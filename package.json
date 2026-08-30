@@ -1,0 +1,27 @@
+{
+  "name": "pi-code-review",
+  "version": "0.1.0",
+  "description": "Static, agent-guided browser reviews for Pi git changes",
+  "type": "module",
+  "keywords": ["pi-package", "code-review", "git-diff"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node ./test/regressions.mjs",
+    "check": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "@types/node": "^22.15.0",
+    "puppeteer-core": "^25.9.0",
+    "typebox": "^1.0.64",
+    "typescript": "^5.8.3"
+  }
+}

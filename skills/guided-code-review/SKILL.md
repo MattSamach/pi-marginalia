@@ -7,12 +7,22 @@ description: Open a Pi-led browser review of the current uncommitted Git changes
 
 Use `open_code_review` to present the current changes in the order that makes them fastest to understand.
 
+## Commit-sized review units
+
+Treat one browser review as one logical commit candidate: a cohesive behavior change plus the tests, documentation, and supporting refactors required to leave the repository valid. Review foundational units before code that depends on them. Do not split purely by file count, and do not combine unrelated changes merely because they were implemented together.
+
+The complete worktree snapshot is reviewed, so it must represent only that logical unit. If it mixes multiple units or unrelated user changes, stop and agree on a safe split before reviewing; never silently stash, revert, commit, or absorb changes that are not part of the unit.
+
 ## Workflow
 
 1. Inspect the complete staged, unstaged, and untracked change set against `HEAD`.
-2. Choose a logical review order based on behavior and dependencies, not lexical file order.
-3. Write the review overview and concise file guidance.
-4. Call `open_code_review` once with every changed file. The tool appends omitted changed files, but explicitly ordering all files produces the clearest walkthrough.
+2. Confirm the snapshot is one coherent, independently valid commit unit. If not, split it safely before opening the review.
+3. Run meaningful validation for that unit.
+4. Choose a logical file order based on behavior and dependencies, not lexical path order.
+5. Write the review overview and concise file guidance.
+6. Call `open_code_review` once with every changed file. The tool appends omitted changed files, but explicitly ordering all files produces the clearest walkthrough.
+7. Address actionable feedback, validate again, and open a fresh snapshot. Repeat until the unit is explicitly approved.
+8. Follow the approval and commit loop below, then continue to the next already-authorized implementation unit when one remains.
 
 ## Overview
 
@@ -34,3 +44,12 @@ Describe outcomes, not development history. Do not enumerate files, repeat file 
 - Prefer no anchored commentary over narrating obvious code.
 - Use stable, descriptive commentary IDs.
 - Ensure every line anchor is visible on the requested old/new diff side.
+
+## Approval and commit loop
+
+- Feedback submission is not approval by itself. Require an explicit statement that the current unit is approved.
+- Never commit a stale review or include changes made after the approved snapshot. If the worktree changed, validate and reopen the review.
+- Approval and permission to commit are separate unless the user clearly provides both. After approval, follow the repository's commit-proof policy and ask whether to commit; if the user says “approved and commit,” that is explicit permission.
+- Commit only the reviewed unit with a descriptive message. Do not include unrelated or unreviewed files.
+- After the commit succeeds, move to the next logical unit only when it belongs to an implementation plan the user already authorized and the next scope is clear. Otherwise, stop and ask.
+- Repeat implementation, validation, review, approval, and commit for each remaining unit. Never wait until the end to combine independently reviewable units into one large commit.

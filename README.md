@@ -14,7 +14,7 @@ Reload an existing Pi session with `/reload` after installation.
 
 ## Use
 
-Ask Pi to walk you through its current changes. The bundled `guided-code-review` skill has Pi call `open_code_review` with an extremely concise pre-PR overview, an ordered manifest, file summaries, and optional anchored commentary.
+Ask Pi to walk you through its current changes. The bundled `guided-code-review` skill reviews one logical commit unit at a time with an extremely concise pre-PR overview, an ordered manifest, file summaries, and optional anchored commentary. After explicit approval and commit permission, Pi commits that reviewed unit before continuing to the next already-authorized implementation unit.
 
 For a review without agent commentary:
 

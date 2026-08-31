@@ -17,8 +17,16 @@ const reviewFileSchema = Type.Object({
 	summary: Type.String({ maxLength: 20_000, description: "File-level purpose, design rationale, and suggested review focus." }),
 	commentary: Type.Optional(Type.Array(commentarySchema, { maxItems: 100 })),
 });
+const reviewOverviewSchema = Type.Object({
+	intent: Type.String({ minLength: 1, maxLength: 500, description: "One sentence stating the problem and resulting behavior." }),
+	changes: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { minItems: 2, maxItems: 4, description: "Outcome-level changes; do not enumerate files." }),
+	validation: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { minItems: 1, maxItems: 2, description: "Meaningful automated or manual checks performed." }),
+	reviewFocus: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "At most one area where human judgment is especially useful." })),
+	risks: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "At most one material risk, limitation, or deferred gap." })),
+});
 const openCodeReviewSchema = Type.Object({
 	title: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
+	overview: reviewOverviewSchema,
 	files: Type.Array(reviewFileSchema, { maxItems: 500, description: "Ordered changed files. Any changed files omitted here are appended automatically." }),
 });
 export type OpenCodeReviewInput = Static<typeof openCodeReviewSchema>;
@@ -78,7 +86,7 @@ async function openBrowser(url: string): Promise<void> {
 export default function piCodeReview(pi: ExtensionAPI): void {
 	const servers = new Set<ReviewServer>();
 
-	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; files: [] }, signal?: AbortSignal) => {
+	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal) => {
 		const snapshot = await collectReviewSnapshot(ctx.cwd, { signal });
 		const review = applyReviewManifest(snapshot, manifest);
 		const server = await createCodeReviewServer(review, {
@@ -90,7 +98,8 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			const xml = formatCodeReviewFeedbackXml(review.id, stale, feedback);
 			if (ctx.isIdle()) pi.sendUserMessage(xml);
 			else pi.sendUserMessage(xml, { deliverAs: "followUp" });
-			ctx.ui.notify(`Received ${feedback.comments.length} diff comment(s) and ${feedback.replies.length} commentary reply/replies.`, "info");
+			const overviewCount = feedback.overviewFeedback ? 1 : 0;
+			ctx.ui.notify(`Received ${overviewCount} overview comment(s), ${feedback.comments.length} diff comment(s), and ${feedback.replies.length} commentary reply/replies.`, "info");
 			return { stale };
 		},
 		});
@@ -108,9 +117,12 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "open_code_review",
 		label: "Open Code Review",
-		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Supply every changed file in the most logical review order with a concise file summary and optional line-anchored commentary. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered.",
+		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with an extremely concise review overview, then supply every changed file in the most logical review order with a concise file summary and optional line-anchored commentary. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered.",
 		promptSnippet: "Open an ordered, agent-commented browser review of current Git changes",
-		promptGuidelines: ["Use open_code_review when the user asks to be walked through or interactively review the agent's current code changes."],
+		promptGuidelines: [
+			"Use open_code_review when the user asks to be walked through or interactively review the agent's current code changes.",
+			"Keep the open_code_review overview extremely concise: under 100 words, one-sentence intent, two to four outcome bullets, one or two validation bullets, and only material optional review focus or risks.",
+		],
 		parameters: openCodeReviewSchema,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			onUpdate?.({ content: [{ type: "text", text: "Collecting a frozen review snapshot…" }], details: {} });

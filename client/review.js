@@ -11,13 +11,16 @@
   let activeIndex = 0;
   let draft;
   let submitted = false;
+  const overviewSection = reviewRoot.querySelector('[data-review-overview]');
+  let showingOverview = Boolean(overviewSection);
+  let overviewFeedback = '';
 
-  const activeFile = () => reviewRoot.querySelector('[data-review-file="' + activeIndex + '"]');
+  const activeFile = () => showingOverview ? undefined : reviewRoot.querySelector('[data-review-file="' + activeIndex + '"]');
   const setStatus = (message, error = false) => {
     globalStatus.textContent = message;
     globalStatus.style.color = error ? '#cf222e' : '';
   };
-  const feedbackCount = () => comments.length + [...replies.values()].filter((value) => value.feedback.trim()).length;
+  const feedbackCount = () => comments.length + [...replies.values()].filter((value) => value.feedback.trim()).length + (overviewFeedback.trim() ? 1 : 0);
   const updateSubmit = () => {
     submitButton.disabled = submitted || !!draft || feedbackCount() === 0 || comments.some((item) => !item.feedback.trim());
   };
@@ -194,6 +197,11 @@
       setStatus('Feedback ready to submit.');
     });
   });
+  const overviewTextarea = document.querySelector('[data-overview-feedback]');
+  overviewTextarea?.addEventListener('input', () => {
+    overviewFeedback = overviewTextarea.value;
+    updateSubmit();
+  });
   document.querySelectorAll('[data-commentary-reply]').forEach((textarea) => {
     const section = textarea.closest('[data-review-file]');
     const commentaryId = textarea.dataset.commentaryReply;
@@ -214,11 +222,26 @@
       section.querySelector(selector)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
   });
+  document.querySelector('[data-overview-nav]')?.addEventListener('click', () => {
+    if (showingOverview) return;
+    if (draft && !window.confirm('Discard the unfinished diff comment?')) return;
+    cancelDraft();
+    showingOverview = true;
+    overviewSection.hidden = false;
+    document.querySelectorAll('[data-review-file]').forEach((section) => { section.hidden = true; section.classList.remove('active'); });
+    document.querySelector('[data-overview-nav]').classList.add('active');
+    document.querySelectorAll('[data-file-nav]').forEach((item) => item.classList.remove('active'));
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    setStatus('Add general feedback or continue through the changed files.');
+  });
   document.querySelectorAll('[data-file-nav]').forEach((button) => {
     button.addEventListener('click', () => {
-      if (submitted && button.dataset.fileNav === String(activeIndex)) return;
+      if (!showingOverview && submitted && button.dataset.fileNav === String(activeIndex)) return;
       if (draft && !window.confirm('Discard the unfinished diff comment?')) return;
       cancelDraft();
+      showingOverview = false;
+      if (overviewSection) overviewSection.hidden = true;
+      document.querySelector('[data-overview-nav]')?.classList.remove('active');
       activeIndex = Number(button.dataset.fileNav);
       document.querySelectorAll('[data-review-file]').forEach((section, index) => {
         section.hidden = index !== activeIndex;
@@ -226,6 +249,7 @@
       });
       document.querySelectorAll('[data-file-nav]').forEach((item, index) => item.classList.toggle('active', index === activeIndex));
       window.scrollTo({ top: 0, behavior: 'instant' });
+      setStatus('Select changed code or reply to Pi.');
     });
   });
   submitButton.addEventListener('click', async () => {
@@ -238,6 +262,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          ...(overviewFeedback.trim() ? { overviewFeedback: overviewFeedback.trim() } : {}),
           comments: comments.map(({ id, ...comment }) => comment),
           replies: [...replies.values()].map((reply) => ({ ...reply, feedback: reply.feedback.trim() })),
         }),

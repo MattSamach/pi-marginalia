@@ -26,6 +26,13 @@ function lineAttributes(anchor) {
 
 export function formatCodeReviewFeedbackXml(snapshotId, stale, feedback) {
 	const entries = [];
+	if (feedback.overviewFeedback) {
+		entries.push([
+			"  <overview-feedback>",
+			`    <feedback>${cdata(feedback.overviewFeedback)}</feedback>`,
+			"  </overview-feedback>",
+		].join("\n"));
+	}
 	for (const comment of feedback.comments) {
 		entries.push([
 			`  <comment file="${attr(comment.file)}" side="${attr(comment.side)}"${lineAttributes(comment)}>`,
@@ -56,7 +63,9 @@ function validRange(start, end) {
 export function parseCodeReviewFeedback(value, review) {
 	if (!value || typeof value !== "object" || !Array.isArray(value.comments) || !Array.isArray(value.replies)) return undefined;
 	if (value.comments.length > FEEDBACK_LIMITS.maxComments || value.replies.length > FEEDBACK_LIMITS.maxReplies) return undefined;
-	if (value.comments.length + value.replies.length < 1) return undefined;
+	const overviewFeedback = value.overviewFeedback === undefined ? undefined : validText(value.overviewFeedback) && review.overview ? value.overviewFeedback.trim() : undefined;
+	if (value.overviewFeedback !== undefined && overviewFeedback === undefined) return undefined;
+	if (value.comments.length + value.replies.length + (overviewFeedback ? 1 : 0) < 1) return undefined;
 	const files = new Map(review.files.map((file) => [file.path, file]));
 	const comments = [];
 	for (const item of value.comments) {
@@ -89,5 +98,5 @@ export function parseCodeReviewFeedback(value, review) {
 		seenReplies.add(key);
 		replies.push({ file: item.file, commentaryId: item.commentaryId, feedback: item.feedback.trim() });
 	}
-	return { comments, replies };
+	return { ...(overviewFeedback ? { overviewFeedback } : {}), comments, replies };
 }

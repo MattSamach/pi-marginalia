@@ -6,7 +6,8 @@
   "keywords": ["pi-package", "code-review", "git-diff"],
   "license": "MIT",
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./index.ts"],
+    "skills": ["./skills"]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

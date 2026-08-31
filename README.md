@@ -14,7 +14,7 @@ Reload an existing Pi session with `/reload` after installation.
 
 ## Use
 
-Ask Pi to walk you through its current changes. Pi calls `open_code_review` with an ordered manifest containing file summaries and optional anchored commentary.
+Ask Pi to walk you through its current changes. The bundled `guided-code-review` skill has Pi call `open_code_review` with an extremely concise pre-PR overview, an ordered manifest, file summaries, and optional anchored commentary.
 
 For a review without agent commentary:
 
@@ -27,11 +27,12 @@ The snapshot contains staged and unstaged changes against `HEAD`, plus untracked
 
 In the browser:
 
-1. Use the left sidebar to follow Pi's file order.
-2. Read the unified diff and Pi's commentary on the right.
-3. Select changed/context code within one file to add a comment. Press Command+Enter (Ctrl+Enter on other platforms) to add the active comment without submitting the review.
-4. Reply directly beneath any Pi commentary card.
-5. Submit one static feedback batch.
+1. Read the brief overview and optionally leave general change-set feedback.
+2. Use the left sidebar to follow Pi's file order.
+3. Read the unified diff and Pi's commentary on the right.
+4. Select changed/context code within one file to add a comment. Press Command+Enter (Ctrl+Enter on other platforms) to add the active comment without submitting the review.
+5. Reply directly beneath any Pi commentary card.
+6. Submit one static feedback batch.
 
 If files change before submission, the resulting message is marked `stale="true"`. The page never remaps or refreshes annotations; open a new snapshot for updated code.
 
@@ -41,6 +42,9 @@ Only feedback and precise anchors are returned—not the diff or manifest:
 
 ```xml
 <code-review-feedback snapshot="…" stale="false">
+  <overview-feedback>
+    <feedback><![CDATA[The direction looks right; please keep the scope narrow.]]></feedback>
+  </overview-feedback>
   <comment file="src/service.ts" side="new" new-start="42" new-end="44">
     <highlight><![CDATA[const result = await execute(input);]]></highlight>
     <feedback><![CDATA[Why is this serial?]]></feedback>

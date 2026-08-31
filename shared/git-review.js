@@ -322,9 +322,32 @@ function assertString(value, label, allowEmpty = false) {
 	return value.trim();
 }
 
-/** Validate commentary, apply agent ordering, and enforce overall rendering caps. */
+function normalizeOverview(overview) {
+	if (overview === undefined) return undefined;
+	if (!overview || typeof overview !== "object") throw new Error("Review overview must be an object.");
+	const conciseString = (value, label) => {
+		const normalized = assertString(value, label);
+		if (normalized.length > 500) throw new Error(`${label} must contain at most 500 characters.`);
+		return normalized;
+	};
+	const intent = conciseString(overview.intent, "Review overview intent");
+	const list = (value, label, minimum, maximum) => {
+		if (!Array.isArray(value) || value.length < minimum || value.length > maximum) throw new Error(`${label} must contain ${minimum} to ${maximum} entries.`);
+		return value.map((entry, index) => conciseString(entry, `${label} entry ${index + 1}`));
+	};
+	const changes = list(overview.changes, "Review overview changes", 2, 4);
+	const validation = list(overview.validation, "Review overview validation", 1, 2);
+	const reviewFocus = overview.reviewFocus === undefined ? undefined : conciseString(overview.reviewFocus, "Review overview focus");
+	const risks = overview.risks === undefined ? undefined : conciseString(overview.risks, "Review overview risks");
+	const words = [intent, ...changes, ...validation, reviewFocus, risks].filter(Boolean).join(" ").trim().split(/\s+/).filter(Boolean).length;
+	if (words > 100) throw new Error("Review overview must contain at most 100 words.");
+	return { intent, changes, validation, ...(reviewFocus ? { reviewFocus } : {}), ...(risks ? { risks } : {}) };
+}
+
+/** Validate the overview and commentary, apply agent ordering, and enforce rendering caps. */
 export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIMITS) {
 	if (!manifest || typeof manifest !== "object") throw new Error("Review manifest must be an object.");
+	const overview = normalizeOverview(manifest.overview);
 	const requested = manifest.files ?? [];
 	if (!Array.isArray(requested) || requested.length > REVIEW_LIMITS.maxManifestFiles) throw new Error(`Review manifest may contain at most ${REVIEW_LIMITS.maxManifestFiles} files.`);
 	const byPath = new Map(snapshot.files.map((file) => [file.path, file]));
@@ -387,5 +410,5 @@ export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIM
 		}
 	}
 	const title = manifest.title === undefined ? "Code review" : assertString(manifest.title, "Review title");
-	return { ...snapshot, title, files: capped, renderedBytes: totalBytes, renderedLines: totalLines };
+	return { ...snapshot, title, overview, files: capped, renderedBytes: totalBytes, renderedLines: totalLines };
 }

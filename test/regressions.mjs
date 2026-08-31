@@ -54,6 +54,12 @@ try {
 
 	const ordered = applyReviewManifest(snapshot, {
 		title: "Safe <review>",
+		overview: {
+			intent: "Make local code review faster before opening a pull request.",
+			changes: ["Add a guided overview.", "Keep file-level review focused."],
+			validation: ["Run automated regression checks."],
+			reviewFocus: "Check whether the overview is sufficiently concise.",
+		},
 		files: [{
 			path: "untracked.txt",
 			summary: "Review this first <script>alert(1)</script>",
@@ -62,6 +68,9 @@ try {
 	});
 	assert.equal(ordered.files[0].path, "untracked.txt", "Agent-provided order should lead.");
 	assert.equal(ordered.files.length, snapshot.files.length, "Changed files omitted by the manifest must be appended.");
+	assert.equal(ordered.overview.intent, "Make local code review faster before opening a pull request.");
+	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "Too sparse", changes: ["Only one"], validation: ["Checked"] }, files: [] }), /changes must contain 2 to 4 entries/);
+	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "word ".repeat(95), changes: ["one two three", "four five six"], validation: ["seven eight"] }, files: [] }), /at most 100 words/);
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "../secret", summary: "bad" }] }), /not changed against HEAD/);
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", commentary: [{ id: "end-only", body: "bad", endLine: 2 }] }] }), /cannot set endLine without startLine/, "Commentary endLine requires a startLine.");
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "binary.dat", commentary: [{ id: "binary-anchor", body: "bad", side: "new", startLine: 1 }] }] }), /cannot anchor to binary file/, "Binary commentary cannot claim a visible line anchor.");
@@ -89,22 +98,31 @@ try {
 	assert.ok(overallTiny.files.filter((file) => !file.binary).every((file) => file.omitted), "Overall caps should omit files that cannot fit.");
 
 	const feedback = {
+		overviewFeedback: "The direction looks right ]]> overall.",
 		comments: [{ file: "untracked.txt", side: "new", newStart: 1, newEnd: 2, highlight: "A ]]> marker", feedback: "Explain <this>." }],
 		replies: [{ file: "untracked.txt", commentaryId: "new-file", feedback: "Makes sense ]]> mostly." }],
 	};
 	assert.deepEqual(parseCodeReviewFeedback(feedback, ordered), feedback);
+	assert.deepEqual(parseCodeReviewFeedback({ overviewFeedback: "General note.", comments: [], replies: [] }, ordered), { overviewFeedback: "General note.", comments: [], replies: [] });
+	assert.equal(parseCodeReviewFeedback({ overviewFeedback: "General note.", comments: [], replies: [] }, { ...ordered, overview: undefined }), undefined, "Overview feedback requires a rendered overview.");
 	assert.equal(parseCodeReviewFeedback({ comments: [], replies: [{ file: "untracked.txt", commentaryId: "missing", feedback: "x" }] }, ordered), undefined);
 	assert.equal(parseCodeReviewFeedback({ comments: [{ ...feedback.comments[0], newStart: 999, newEnd: 999 }], replies: [] }, ordered), undefined, "Forged line anchors outside the frozen diff must be rejected.");
 	assert.equal(parseCodeReviewFeedback({ comments: Array.from({ length: 101 }, () => feedback.comments[0]), replies: [] }, ordered), undefined, "Feedback comment counts must be bounded.");
 	assert.equal(parseCodeReviewFeedback({ comments: [{ ...feedback.comments[0], feedback: "x".repeat(20_001) }], replies: [] }, ordered), undefined, "Feedback strings must be bounded.");
 	const xml = formatCodeReviewFeedbackXml(snapshot.id, false, feedback);
 	assert.match(xml, /^<code-review-feedback snapshot="[a-f0-9]{64}" stale="false">/);
+	assert.match(xml, /<overview-feedback>[\s\S]*direction looks right \]\]\]\]><!\[CDATA\[> overall/, "Overview feedback must be serialized safely.");
 	assert.match(xml, /A \]\]\]\]><!\[CDATA\[> marker/, "CDATA terminators must be split safely.");
 	assert.doesNotMatch(xml, /Why this exists/, "The feedback payload must not include agent commentary or the diff.");
 	const html = renderReviewHtml(ordered, "safe-nonce");
 	assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/, "Manifest text must be escaped.");
 	assert.match(html, /Review this first &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+	assert.match(html, /data-review-overview/, "Agent-guided reviews should begin with an overview page.");
+	assert.match(html, /data-overview-feedback/, "The overview should accept general change-set feedback.");
 	assert.match(html, /script nonce="safe-nonce"/);
+	const plainHtml = renderReviewHtml(applyReviewManifest(snapshot, { files: [] }), "plain-nonce");
+	assert.doesNotMatch(plainHtml, /<section class="review-overview|<button[^>]+data-overview-nav/, "The commentary-free slash command should continue to open directly on the diff.");
+	assert.match(plainHtml, /class="review-file active"[^>]*data-review-file="0"/, "A review without an overview should show its first file initially.");
 
 	let received;
 	const server = await createCodeReviewServer(ordered, { onFeedback: async (value) => { received = value; return { stale: false }; } });
@@ -175,6 +193,9 @@ try {
 		try {
 			const page = await browser.newPage();
 			await page.goto(browserServer.url, { waitUntil: "domcontentloaded" });
+			assert.equal(await page.$eval('[data-review-overview]', (section) => section.hidden), false, "Agent-guided reviews should open on the overview.");
+			await page.type('[data-overview-feedback]', "Keep the introduction quick.");
+			await page.click('[data-file-nav="0"]');
 			await page.evaluate(() => {
 				const code = document.querySelector('[data-review-file="0"] .diff-add .diff-code span');
 				const range = document.createRange();
@@ -212,6 +233,7 @@ try {
 			await page.click('[data-file-nav="0"]');
 			await page.click("[data-submit]");
 			await page.waitForFunction(() => document.querySelector("[data-submit]")?.textContent === "Submitted");
+			assert.equal(browserFeedback.overviewFeedback, "Keep the introduction quick.");
 			assert.equal(browserFeedback.comments.length, 1);
 			assert.equal(browserFeedback.comments[0].file, "untracked.txt");
 			assert.equal(browserFeedback.comments[0].side, "new");

@@ -60,18 +60,28 @@ try {
 			validation: ["Run automated regression checks."],
 			reviewFocus: "Check whether the overview is sufficiently concise.",
 		},
-		files: [{
-			path: "untracked.txt",
-			summary: "Review this first <script>alert(1)</script>",
-			commentary: [{ id: "new-file", body: "Why this exists", side: "new", startLine: 1, endLine: 2 }],
-		}],
+		files: [
+			{
+				path: "untracked.txt",
+				summary: "Review this first <script>alert(1)</script>",
+				commentary: [{ id: "new-file", body: "Why this exists", side: "new", startLine: 1, endLine: 2 }],
+			},
+			{
+				path: "unstaged.txt",
+				summary: "Deterministic fixture output covered by its source test.",
+				reviewMode: "reference",
+			},
+		],
 	});
 	assert.equal(ordered.files[0].path, "untracked.txt", "Agent-provided order should lead.");
 	assert.equal(ordered.files.length, snapshot.files.length, "Changed files omitted by the manifest must be appended.");
 	assert.equal(ordered.overview.intent, "Make local code review faster before opening a pull request.");
+	assert.equal(ordered.files.find((file) => file.path === "unstaged.txt")?.reviewMode, "reference", "Pi should be able to classify textual artifacts as reference files.");
+	assert.equal(ordered.files.find((file) => file.path === "binary.dat")?.reviewMode, "reference", "Binary files should be reference files automatically.");
 	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "Too sparse", changes: ["Only one"], validation: ["Checked"] }, files: [] }), /changes must contain 2 to 4 entries/);
 	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "word ".repeat(95), changes: ["one two three", "four five six"], validation: ["seven eight"] }, files: [] }), /at most 100 words/);
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "../secret", summary: "bad" }] }), /not changed against HEAD/);
+	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", reviewMode: "skip" }] }), /must be review or reference/, "Unknown review classifications must be rejected.");
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", commentary: [{ id: "end-only", body: "bad", endLine: 2 }] }] }), /cannot set endLine without startLine/, "Commentary endLine requires a startLine.");
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "binary.dat", commentary: [{ id: "binary-anchor", body: "bad", side: "new", startLine: 1 }] }] }), /cannot anchor to binary file/, "Binary commentary cannot claim a visible line anchor.");
 	assert.throws(
@@ -96,6 +106,16 @@ try {
 	assert.equal(parseUnifiedPatch("@@ -1 +1 @@\n-old\n+new\n", tiny).truncated, true, "Per-file byte/line boundaries should truncate visibly.");
 	const overallTiny = applyReviewManifest(snapshot, { files: [] }, { ...REVIEW_LIMITS, overallPatchBytes: 1, overallDiffLines: 1 });
 	assert.ok(overallTiny.files.filter((file) => !file.binary).every((file) => file.omitted), "Overall caps should omit files that cannot fit.");
+	const primarySource = snapshot.files.find((file) => file.path === "untracked.txt");
+	assert.ok(primarySource);
+	const prioritizedCaps = applyReviewManifest(snapshot, {
+		files: [
+			{ path: "unstaged.txt", reviewMode: "reference" },
+			{ path: "untracked.txt", reviewMode: "review" },
+		],
+	}, { ...REVIEW_LIMITS, overallPatchBytes: primarySource.renderedBytes, overallDiffLines: primarySource.lines.length });
+	assert.equal(prioritizedCaps.files.find((file) => file.path === "untracked.txt")?.omitted, false, "Primary review files must receive rendering capacity before references.");
+	assert.equal(prioritizedCaps.files.find((file) => file.path === "unstaged.txt")?.omitted, true, "References should yield rendering capacity to primary review files regardless of manifest order.");
 
 	const feedback = {
 		overviewFeedback: "The direction looks right ]]> overall.",
@@ -119,10 +139,15 @@ try {
 	assert.match(html, /Review this first &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 	assert.match(html, /data-review-overview/, "Agent-guided reviews should begin with an overview page.");
 	assert.match(html, /data-overview-feedback/, "The overview should accept general change-set feedback.");
+	assert.match(html, /<details class="reference-files"><summary>Reference files \(3\)<\/summary>/, "Reference files should be grouped in a collapsed sidebar section.");
+	assert.match(html, /data-path="unstaged\.txt" data-review-mode="reference"/, "Reference classification should remain visible on the rendered file.");
 	assert.match(html, /script nonce="safe-nonce"/);
-	const plainHtml = renderReviewHtml(applyReviewManifest(snapshot, { files: [] }), "plain-nonce");
+	const plainReview = applyReviewManifest(snapshot, { files: [] });
+	const plainHtml = renderReviewHtml(plainReview, "plain-nonce");
+	const firstPlainReviewIndex = plainReview.files.findIndex((file) => file.reviewMode === "review");
 	assert.doesNotMatch(plainHtml, /<section class="review-overview|<button[^>]+data-overview-nav/, "The commentary-free slash command should continue to open directly on the diff.");
-	assert.match(plainHtml, /class="review-file active"[^>]*data-review-file="0"/, "A review without an overview should show its first file initially.");
+	assert.match(plainHtml, new RegExp(`class="review-file active"[^>]*data-review-file="${firstPlainReviewIndex}"`), "A review without an overview should show its first primary review file initially.");
+	assert.match(plainHtml, /<details class="reference-files"><summary>Reference files \(2\)<\/summary>/, "Commentary-free reviews should group binary files as references automatically.");
 
 	let received;
 	const server = await createCodeReviewServer(ordered, { onFeedback: async (value) => { received = value; return { stale: false }; } });
@@ -194,7 +219,14 @@ try {
 			const page = await browser.newPage();
 			await page.goto(browserServer.url, { waitUntil: "domcontentloaded" });
 			assert.equal(await page.$eval('[data-review-overview]', (section) => section.hidden), false, "Agent-guided reviews should open on the overview.");
+			assert.equal(await page.$eval('details.reference-files', (details) => details.open), false, "Reference files should start collapsed.");
 			await page.type('[data-overview-feedback]', "Keep the introduction quick.");
+			await page.click('details.reference-files > summary');
+			const referenceIndex = await page.$eval('details.reference-files [data-file-nav]', (item) => Number(item.dataset.fileNav));
+			await page.click(`[data-file-nav="${referenceIndex}"]`);
+			assert.equal(await page.$eval(`[data-file-nav="${referenceIndex}"]`, (item) => item.classList.contains("active")), true, "Clicking a regrouped reference file should activate its own navigation item.");
+			assert.equal(await page.$eval(`[data-review-file="${referenceIndex}"]`, (section) => section.dataset.reviewMode), "reference", "Reference files should remain directly inspectable.");
+			assert.equal(await page.$eval(`[data-review-file="${referenceIndex}"] .file-header > span`, (label) => label.textContent), "Reference file");
 			await page.click('[data-file-nav="0"]');
 			await page.evaluate(() => {
 				const code = document.querySelector('[data-review-file="0"] .diff-add .diff-code span');
@@ -224,12 +256,14 @@ try {
 			await page.waitForFunction(() => document.querySelector('[data-review-file="0"] [data-selection-composer]')?.hidden === false);
 			await page.type('[data-review-file="0"] [data-selection-feedback]', "Unfinished second comment.");
 			assert.equal(await page.$eval("[data-submit]", (button) => button.disabled), true, "Submit must remain disabled while a selection comment draft is active.");
+			const secondReviewIndex = await page.$$eval('.file-sidebar > [data-file-nav]', (items) => Number(items[1].dataset.fileNav));
 			page.once("dialog", async (dialog) => { await dialog.dismiss(); });
-			await page.click('[data-file-nav="1"]');
+			await page.click(`[data-file-nav="${secondReviewIndex}"]`);
 			assert.equal(await page.$eval('[data-review-file="0"]', (section) => section.hidden), false, "Dismissing the draft warning must keep the current file and draft visible.");
 			page.once("dialog", async (dialog) => { await dialog.accept(); });
-			await page.click('[data-file-nav="1"]');
-			assert.equal(await page.$eval('[data-review-file="1"]', (section) => section.hidden), false, "Confirming draft discard should allow explicit file navigation.");
+			await page.click(`[data-file-nav="${secondReviewIndex}"]`);
+			assert.equal(await page.$eval(`[data-review-file="${secondReviewIndex}"]`, (section) => section.hidden), false, "Confirming draft discard should allow explicit file navigation.");
+			assert.equal(await page.$eval(`[data-file-nav="${secondReviewIndex}"]`, (item) => item.classList.contains("active")), true, "Regrouped primary navigation should activate by file index rather than DOM position.");
 			await page.click('[data-file-nav="0"]');
 			await page.click("[data-submit]");
 			await page.waitForFunction(() => document.querySelector("[data-submit]")?.textContent === "Submitted");

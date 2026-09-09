@@ -361,6 +361,9 @@ export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIM
 		if (!file) throw new Error(`Manifest path is not changed against HEAD: ${path}`);
 		used.add(path);
 		const summary = item.summary === undefined ? "" : assertString(item.summary, `Summary for ${path}`, true);
+		const requestedReviewMode = item.reviewMode ?? "review";
+		if (!["review", "reference"].includes(requestedReviewMode)) throw new Error(`Review mode for ${path} must be review or reference.`);
+		const reviewMode = file.binary ? "reference" : requestedReviewMode;
 		const entries = item.commentary ?? [];
 		if (!Array.isArray(entries) || entries.length > REVIEW_LIMITS.maxCommentaryPerFile) throw new Error(`${path} may contain at most ${REVIEW_LIMITS.maxCommentaryPerFile} commentary entries.`);
 		const ids = new Set();
@@ -380,21 +383,30 @@ export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIM
 			if (startLine !== undefined && file.binary) throw new Error(`Commentary ${id} cannot anchor to binary file ${path}.`);
 			return { id, body, side, startLine, endLine };
 		});
-		ordered.push({ ...file, summary, commentary });
+		ordered.push({ ...file, summary, reviewMode, commentary });
 	}
-	for (const file of snapshot.files) if (!used.has(file.path)) ordered.push({ ...file, summary: "", commentary: [] });
+	for (const file of snapshot.files) if (!used.has(file.path)) ordered.push({ ...file, summary: "", reviewMode: file.binary ? "reference" : "review", commentary: [] });
 
 	let totalBytes = 0;
 	let totalLines = 0;
-	const capped = ordered.map((file) => {
-		if (file.binary) return file;
-		if (totalBytes + file.renderedBytes > limits.overallPatchBytes || totalLines + file.lines.length > limits.overallDiffLines) {
-			return { ...file, omitted: true, lines: [] };
+	const cappedByPath = new Map();
+	const allocationOrder = [
+		...ordered.filter((file) => file.reviewMode !== "reference"),
+		...ordered.filter((file) => file.reviewMode === "reference"),
+	];
+	for (const file of allocationOrder) {
+		let rendered = file;
+		if (!file.binary) {
+			if (totalBytes + file.renderedBytes > limits.overallPatchBytes || totalLines + file.lines.length > limits.overallDiffLines) {
+				rendered = { ...file, omitted: true, lines: [] };
+			} else {
+				totalBytes += file.renderedBytes;
+				totalLines += file.lines.length;
+			}
 		}
-		totalBytes += file.renderedBytes;
-		totalLines += file.lines.length;
-		return file;
-	});
+		cappedByPath.set(file.path, rendered);
+	}
+	const capped = ordered.map((file) => cappedByPath.get(file.path));
 	for (const file of capped) {
 		for (const entry of file.commentary) {
 			if (entry.startLine === undefined) continue;

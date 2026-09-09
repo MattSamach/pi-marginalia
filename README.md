@@ -23,12 +23,12 @@ For a review without agent commentary:
 /review-browser --help
 ```
 
-The snapshot contains staged and unstaged changes against `HEAD`, plus untracked files as all-addition diffs. Files omitted from Pi's manifest are appended, so commentary cannot hide changes.
+The snapshot contains staged and unstaged changes against `HEAD`, plus untracked files as all-addition diffs. Files omitted from Pi's manifest are appended, so commentary cannot hide changes. Pi may classify binaries and deterministic generated artifacts as `reviewMode: "reference"`; they remain inspectable under a collapsed **Reference files** sidebar group and remain part of the snapshot and commit.
 
 In the browser:
 
 1. Read the brief overview and optionally leave general change-set feedback.
-2. Use the left sidebar to follow Pi's file order.
+2. Use the left sidebar to follow Pi's primary review order; expand **Reference files** only when you want to inspect low-value generated or binary artifacts.
 3. Read the unified diff and Pi's commentary on the right.
 4. Select changed/context code within one file to add a comment. Press Command+Enter (Ctrl+Enter on other platforms) to add the active comment without submitting the review.
 5. Reply directly beneath any Pi commentary card.

@@ -14,7 +14,8 @@ const commentarySchema = Type.Object({
 });
 const reviewFileSchema = Type.Object({
 	path: Type.String({ minLength: 1, maxLength: 20_000, description: "Repository-relative changed file path. Files are displayed in this array order." }),
-	summary: Type.String({ maxLength: 20_000, description: "File-level purpose, design rationale, and suggested review focus." }),
+	summary: Type.String({ maxLength: 20_000, description: "File-level purpose, design rationale, suggested review focus, or why a reference file needs no focused review." }),
+	reviewMode: Type.Optional(Type.String({ pattern: "^(review|reference)$", description: "Use reference only for visible but low-value review artifacts such as binaries or deterministic generated output; defaults to review." })),
 	commentary: Type.Optional(Type.Array(commentarySchema, { maxItems: 100 })),
 });
 const reviewOverviewSchema = Type.Object({
@@ -117,11 +118,12 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "open_code_review",
 		label: "Open Code Review",
-		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with an extremely concise review overview, then supply every changed file in the most logical review order with a concise file summary and optional line-anchored commentary. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered.",
+		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with an extremely concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered.",
 		promptSnippet: "Open an ordered, agent-commented browser review of current Git changes",
 		promptGuidelines: [
 			"Use open_code_review when the user asks to be walked through or interactively review the agent's current code changes.",
 			"Keep the open_code_review overview extremely concise: under 100 words, one-sentence intent, two to four outcome bullets, one or two validation bullets, and only material optional review focus or risks.",
+			"Use open_code_review reviewMode='reference' conservatively for visible files that do not merit focused review, such as binaries or deterministic generated artifacts; never use it to hide substantive source changes.",
 		],
 		parameters: openCodeReviewSchema,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {

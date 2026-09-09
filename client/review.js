@@ -247,7 +247,7 @@
         section.hidden = index !== activeIndex;
         section.classList.toggle('active', index === activeIndex);
       });
-      document.querySelectorAll('[data-file-nav]').forEach((item, index) => item.classList.toggle('active', index === activeIndex));
+      document.querySelectorAll('[data-file-nav]').forEach((item) => item.classList.toggle('active', Number(item.dataset.fileNav) === activeIndex));
       window.scrollTo({ top: 0, behavior: 'instant' });
       setStatus('Select changed code or reply to Pi.');
     });

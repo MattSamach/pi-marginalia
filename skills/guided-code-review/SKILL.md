@@ -19,10 +19,11 @@ The complete worktree snapshot is reviewed, so it must represent only that logic
 2. Confirm the snapshot is one coherent, independently valid commit unit. If not, split it safely before opening the review.
 3. Run meaningful validation for that unit.
 4. Choose a logical file order based on behavior and dependencies, not lexical path order.
-5. Write the review overview and concise file guidance.
-6. Call `open_code_review` once with every changed file. The tool appends omitted changed files, but explicitly ordering all files produces the clearest walkthrough.
-7. Address actionable feedback, validate again, and open a fresh snapshot. Repeat until the unit is explicitly approved.
-8. Follow the approval and commit loop below, then continue to the next already-authorized implementation unit when one remains.
+5. Classify only genuinely low-value review artifacts as reference files using the rules below.
+6. Write the review overview and concise file guidance.
+7. Call `open_code_review` once with every changed file. The tool appends omitted changed files, but explicitly ordering and classifying all files produces the clearest walkthrough.
+8. Address actionable feedback, validate again, and open a fresh snapshot. Repeat until the unit is explicitly approved.
+9. Follow the approval and commit loop below, then continue to the next already-authorized implementation unit when one remains.
 
 ## Overview
 
@@ -36,6 +37,19 @@ The overview is an **EXTREMELY concise, pre-PR introduction** to the current cod
 - `risks`: at most one material risk, limitation, or deferred gap; omit otherwise.
 
 Describe outcomes, not development history. Do not enumerate files, repeat file summaries or commentary, include session-specific narrative, or add GitHub PR ceremony such as ticket templates, rollout boilerplate, screenshot sections, or exhaustive checklists.
+
+## Reference files
+
+Set `reviewMode: "reference"` only when a changed file should remain visible and inspectable but focused line review has little value. The browser places these files in a collapsed **Reference files** sidebar group.
+
+Appropriate examples include:
+
+- binaries whose contents cannot be rendered;
+- deterministic generated or compiled artifacts reviewed through their source-of-truth change;
+- generated lockfiles when the corresponding dependency declaration is reviewed and package-manager validation passes;
+- mechanical snapshots or fixtures whose intentional source change and regeneration check are both clear.
+
+Use this classification conservatively. Never mark handwritten source, tests, configuration, migrations, security-sensitive files, or unexplained changes as reference merely because they are large or inconvenient to inspect. Every reference file must have a concise summary explaining why focused review is unnecessary and what source or validation provides confidence. Reference files remain part of the reviewed snapshot and eventual commit.
 
 ## File guidance
 

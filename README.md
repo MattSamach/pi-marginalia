@@ -37,27 +37,31 @@ Everything that needs your attention is one uniform queue: every Pi commentary n
 6. Pi's answers stream into each thread. The topbar counts everything awaiting you — unread notes and Pi replies alike; press `n` (or click the strip) to walk them. Sidebar badges count per file.
 7. Resolve threads yourself — Pi can only propose resolution. Replying to a resolved thread reopens it.
 8. Triage without the mouse: `Esc` leaves the text box (keeping your draft), `e` resolves the current thread or note, `n` continues, `Shift+n` steps backwards, and `?` shows the shortcuts guide.
-9. Click **Finish review pass** to hand Pi one summary of the pass. It lists open threads you engaged with; your untouched notes are never echoed back to Pi. Threads stay live afterward.
+9. Click **Send round to Pi** to hand Pi one summary of the pass. It lists open threads you engaged with; your untouched notes are never echoed back to Pi.
 
 While Pi is busy, posts queue and are delivered together the moment Pi settles, so a slow turn never blocks you; Pi then answers each queued thread in one pass.
 
-If files change during the review, the finish-pass message is marked `stale="true"`. The page never remaps or refreshes annotations; open a new snapshot for updated code.
+### Review rounds
+
+A review session is an ordered sequence of immutable, fingerprinted rounds. Sending a round locks posting (reading and navigation stay free) behind a *“Pi is revising — round N+1 pending”* banner while Pi applies your feedback as one batch. When Pi reopens the review with `previousRoundId`, the revised changes arrive as the next round and your open tab advances to it automatically. Prior rounds stay reachable read-only through the topbar round switcher — threads included — and mutations against them are rejected on the server, not just hidden. If a new round never arrives (Pi crashed or was interrupted), the banner's **Resume reviewing this round** unlocks the current round; if Pi reopens with an unchanged snapshot, the current round unlocks instead of adding a hollow round.
+
+If files change during the review, the pass message is marked `stale="true"`. The page never remaps or refreshes annotations; iteration happens in whole rounds.
 
 ## Messages delivered to Pi
 
 Each posted comment or reply arrives as one focused XML message — never the diff or manifest:
 
 ```xml
-<code-review-thread snapshot="…" thread="1a2b3c4d-t1" kind="selection" status="open" file="src/service.ts" side="new" new-start="42" new-end="44">
+<code-review-thread snapshot="…" round="1" thread="1a2b3c4d-t1" kind="selection" status="open" file="src/service.ts" side="new" new-start="42" new-end="44">
   <highlight><![CDATA[const result = await execute(input);]]></highlight>
   <message author="user"><![CDATA[Why is this serial?]]></message>
 </code-review-thread>
 ```
 
-Pi answers with the `reply_review_thread` tool, optionally proposing resolution. Finishing a pass sends:
+Pi answers with the `reply_review_thread` tool, optionally proposing resolution. Sending a round produces one pass summary; its `snapshot` id is what Pi passes back as `previousRoundId` to open the next round:
 
 ```xml
-<code-review-pass snapshot="…" stale="false" open="2" awaiting-user="0" awaiting-pi="2" resolved="3">
+<code-review-pass snapshot="…" round="1" stale="false" open="2" awaiting-user="0" awaiting-pi="2" resolved="3" unread-notes="0">
   <open-thread thread="1a2b3c4d-t2" kind="commentary" file="src/service.ts" commentary-id="error-handling" last-author="user">
     <last-message><![CDATA[Could we preserve the original error?]]></last-message>
   </open-thread>
@@ -83,7 +87,7 @@ Binary file contents are never rendered. Renames, additions, deletions, and modi
 
 ## Security model
 
-Each snapshot uses a server bound only to `127.0.0.1`. A random bootstrap token is exchanged for an `HttpOnly`, `SameSite=Strict` cookie and removed from the address bar. The server enforces a nonce-based script CSP, same-origin JSON POSTs, body/count/string limits, validated file/commentary anchors and thread ids, and safe HTML escaping. The live-update stream (SSE) requires the same authenticated cookie. All snapshot servers close on Pi session shutdown.
+Each review session uses one server bound only to `127.0.0.1`, hosting every round of that session. A random single-use bootstrap token is exchanged for an `HttpOnly`, `SameSite=Strict` cookie and removed from the address bar; round pages and the live-update stream (SSE) require that cookie. The server enforces a nonce-based script CSP, same-origin JSON POSTs, body/count/string limits, validated file/commentary anchors and thread ids, and safe HTML escaping. Superseded rounds reject all mutations server-side. All session servers close on Pi session shutdown.
 
 ## Development
 
@@ -98,4 +102,4 @@ The browser regression runs when a compatible Chrome/Chromium executable is avai
 
 ## Scope
 
-Snapshots are immutable: the diff never refreshes or remaps in place, while comment threads stay live on top of it. Review rounds (auto-advancing to a fresh snapshot after Pi revises), cross-round thread continuity, and provider-hosted merge-request integrations are roadmap items rather than implicit behavior.
+Snapshots are immutable: the diff never refreshes or remaps in place, while comment threads stay live on top of it; iteration happens in whole rounds. Cross-round thread continuity (carrying open threads into the next round) and provider-hosted merge-request integrations are roadmap items rather than implicit behavior.

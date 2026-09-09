@@ -6,6 +6,7 @@ import { createThreadStore, THREAD_LIMITS } from "./threads.js";
 const POST_PATH = "/__pi_code_review_post__";
 const RESOLVE_PATH = "/__pi_code_review_resolve__";
 const FINISH_PATH = "/__pi_code_review_finish__";
+const RESUME_PATH = "/__pi_code_review_resume__";
 const EVENTS_PATH = "/__pi_code_review_events__";
 const SSE_HEARTBEAT_MS = 25_000;
 const SECURITY_HEADERS = {
@@ -67,26 +68,41 @@ async function readJsonBody(req) {
 	}
 }
 
-/** Start an authenticated localhost server hosting one immutable review snapshot with live comment threads. */
+/**
+ * Start an authenticated localhost server hosting one review session: an ordered
+ * sequence of immutable snapshot rounds with live comment threads. Only the
+ * newest round accepts mutations; prior rounds stay reachable read-only.
+ */
 export async function createCodeReviewServer(review, options) {
 	if (typeof options?.onThreadPost !== "function" || typeof options?.onFinishPass !== "function") {
 		throw new Error("Code review server requires onThreadPost and onFinishPass callbacks.");
 	}
-	const store = createThreadStore(review);
-	const token = randomBytes(24).toString("base64url");
+	const rounds = [{ number: 1, review, store: createThreadStore(review) }];
+	let phase = "reviewing";
+	const entryTokens = new Map();
+	const mintToken = () => {
+		const token = randomBytes(24).toString("base64url");
+		entryTokens.set(token, false);
+		return token;
+	};
+	const firstToken = mintToken();
 	const cookieName = `pi_code_review_${randomBytes(8).toString("hex")}`;
+	const cookieValue = randomBytes(24).toString("base64url");
 	let port = 0;
 	let finishing = false;
 	let closed = false;
-	let tokenRedeemed = false;
 	const sockets = new Set();
 	const sseClients = new Set();
+
+	const current = () => rounds[rounds.length - 1];
+	const roundOfThread = (threadId) => rounds.find((round) => round.store.getThread(threadId));
 
 	const broadcast = (event, data) => {
 		const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 		for (const client of sseClients) client.write(frame);
 	};
-	const broadcastThread = (thread) => broadcast("thread", { thread, summary: store.summary() });
+	const broadcastThread = (round, thread) => broadcast("thread", { round: round.number, thread, summary: round.store.summary() });
+	const broadcastPhase = () => broadcast("phase", { phase, currentRound: current().number });
 	const heartbeat = setInterval(() => {
 		for (const client of sseClients) client.write(": ping\n\n");
 	}, SSE_HEARTBEAT_MS);
@@ -103,6 +119,11 @@ export async function createCodeReviewServer(review, options) {
 		}
 		return true;
 	};
+	const guardReviewingPhase = (res) => {
+		if (phase === "reviewing") return true;
+		writeText(res, 409, "Pi is revising this review. Wait for the next round or resume this one.");
+		return false;
+	};
 	const readGuardedBody = async (req, res) => {
 		try {
 			return await readJsonBody(req);
@@ -111,22 +132,28 @@ export async function createCodeReviewServer(review, options) {
 			return undefined;
 		}
 	};
+	const renderRound = (round, res) => {
+		const nonce = randomBytes(18).toString("base64");
+		res.writeHead(200, htmlHeaders(nonce));
+		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }));
+	};
 
 	const server = createServer(async (req, res) => {
 		try {
 			const requestUrl = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
-			const expectedCookie = `${cookieName}=${token}`;
+			const expectedCookie = `${cookieName}=${cookieValue}`;
 			const authenticated = (req.headers.cookie ?? "").split(";").some((part) => part.trim() === expectedCookie);
-			if (req.method === "GET" && requestUrl.pathname === "/" && requestUrl.searchParams.get("token") === token) {
-				if (tokenRedeemed && !authenticated) {
+			const tokenParam = requestUrl.searchParams.get("token");
+			if (req.method === "GET" && requestUrl.pathname === "/" && tokenParam !== null && entryTokens.has(tokenParam)) {
+				if (entryTokens.get(tokenParam) && !authenticated) {
 					writeText(res, 403, "This review link was already used. Ask Pi to reopen the review.");
 					return;
 				}
-				tokenRedeemed = true;
+				entryTokens.set(tokenParam, true);
 				res.writeHead(302, {
 					...SECURITY_HEADERS,
 					Location: "/",
-					"Set-Cookie": `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/`,
+					"Set-Cookie": `${cookieName}=${cookieValue}; HttpOnly; SameSite=Strict; Path=/`,
 				});
 				res.end();
 				return;
@@ -136,14 +163,24 @@ export async function createCodeReviewServer(review, options) {
 				return;
 			}
 			if (req.method === "GET" && requestUrl.pathname === "/") {
-				const nonce = randomBytes(18).toString("base64");
-				res.writeHead(200, htmlHeaders(nonce));
-				res.end(renderReviewHtml(review, nonce));
+				renderRound(current(), res);
+				return;
+			}
+			const roundPage = req.method === "GET" ? /^\/round\/(\d{1,4})$/.exec(requestUrl.pathname) : undefined;
+			if (roundPage) {
+				const round = rounds.find((candidate) => candidate.number === Number(roundPage[1]));
+				if (!round) {
+					writeText(res, 404, "Unknown review round.");
+					return;
+				}
+				renderRound(round, res);
 				return;
 			}
 			if (req.method === "GET" && requestUrl.pathname === EVENTS_PATH) {
+				const requested = Number(requestUrl.searchParams.get("round") ?? current().number);
+				const round = rounds.find((candidate) => candidate.number === requested) ?? current();
 				res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "text/event-stream", Connection: "keep-alive" });
-				res.write(`event: init\ndata: ${JSON.stringify({ threads: store.list(), summary: store.summary() })}\n\n`);
+				res.write(`event: init\ndata: ${JSON.stringify({ round: round.number, currentRound: current().number, phase, threads: round.store.list(), summary: round.store.summary() })}\n\n`);
 				sseClients.add(res);
 				req.on("close", () => sseClients.delete(res));
 				return;
@@ -152,20 +189,33 @@ export async function createCodeReviewServer(review, options) {
 				if (!guardMutation(req, res)) return;
 				const body = await readGuardedBody(req, res);
 				if (body === undefined) return;
-				const result = store.postUserTurn(body);
+				if (!guardReviewingPhase(res)) return;
+				const round = current();
+				if (typeof body?.threadId === "string") {
+					const owner = roundOfThread(body.threadId);
+					if (owner && owner !== round) {
+						writeText(res, 409, `This thread belongs to superseded round ${owner.number}; continue in round ${round.number}.`);
+						return;
+					}
+				} else if (body?.round !== undefined && body.round !== round.number) {
+					writeText(res, 409, `This page shows superseded round ${body.round}; comment in round ${round.number}.`);
+					return;
+				}
+				const { round: _round, ...payload } = body && typeof body === "object" ? body : {};
+				const result = round.store.postUserTurn(payload);
 				if (result.error) {
 					const mapped = STORE_ERRORS[result.error] ?? STORE_ERRORS.invalid;
 					writeText(res, mapped.status, mapped.message);
 					return;
 				}
-				broadcastThread(result.thread);
+				broadcastThread(round, result.thread);
 				let deliveryFailed = false;
 				try {
-					await options.onThreadPost(result.thread, result.thread.turns[result.thread.turns.length - 1]);
+					await options.onThreadPost(round, result.thread, result.thread.turns[result.thread.turns.length - 1]);
 				} catch {
 					deliveryFailed = true;
 				}
-				writeJson(res, 200, { thread: result.thread, summary: store.summary(), ...(deliveryFailed ? { deliveryFailed: true } : {}) });
+				writeJson(res, 200, { thread: result.thread, summary: round.store.summary(), ...(deliveryFailed ? { deliveryFailed: true } : {}) });
 				return;
 			}
 			if (req.method === "POST" && requestUrl.pathname === RESOLVE_PATH) {
@@ -176,13 +226,20 @@ export async function createCodeReviewServer(review, options) {
 					writeText(res, 400, "Invalid resolve payload.");
 					return;
 				}
-				const thread = store.setResolved(body.threadId, body.resolved);
+				if (!guardReviewingPhase(res)) return;
+				const round = current();
+				const owner = roundOfThread(body.threadId);
+				if (owner && owner !== round) {
+					writeText(res, 409, `This thread belongs to superseded round ${owner.number}; continue in round ${round.number}.`);
+					return;
+				}
+				const thread = round.store.setResolved(body.threadId, body.resolved);
 				if (!thread) {
 					writeText(res, 404, "Unknown thread.");
 					return;
 				}
-				broadcastThread(thread);
-				writeJson(res, 200, { thread, summary: store.summary() });
+				broadcastThread(round, thread);
+				writeJson(res, 200, { thread, summary: round.store.summary() });
 				return;
 			}
 			if (req.method === "POST" && requestUrl.pathname === FINISH_PATH) {
@@ -194,18 +251,39 @@ export async function createCodeReviewServer(review, options) {
 					writeText(res, 400, "Invalid finish note.");
 					return;
 				}
+				if (!guardReviewingPhase(res)) return;
 				if (finishing) {
 					writeText(res, 409, "A finish-pass handoff is already in progress.");
 					return;
 				}
 				finishing = true;
+				const round = current();
 				let result;
 				try {
-					result = await options.onFinishPass(note, store.list(), store.summary());
+					result = await options.onFinishPass(round, note, round.store.list(), round.store.summary());
 				} finally {
 					finishing = false;
 				}
-				writeJson(res, 200, { stale: result?.stale === true });
+				// A new round may have opened while the handoff awaited; never lock it retroactively.
+				const superseded = current() !== round;
+				if (!superseded) {
+					phase = "revising";
+					broadcastPhase();
+				}
+				writeJson(res, 200, { stale: result?.stale === true, ...(superseded ? { superseded: true } : {}) });
+				return;
+			}
+			if (req.method === "POST" && requestUrl.pathname === RESUME_PATH) {
+				if (!guardMutation(req, res)) return;
+				const body = await readGuardedBody(req, res);
+				if (body === undefined) return;
+				if (phase !== "revising") {
+					writeText(res, 409, "This round is not waiting on Pi.");
+					return;
+				}
+				phase = "reviewing";
+				broadcastPhase();
+				writeJson(res, 200, { phase, currentRound: current().number });
 				return;
 			}
 			writeText(res, 404, "Not found");
@@ -228,16 +306,48 @@ export async function createCodeReviewServer(review, options) {
 	if (!address || typeof address === "string") throw new Error("Could not determine code review server port.");
 	port = address.port;
 	return {
-		url: `http://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`,
+		url: `http://127.0.0.1:${port}/?token=${encodeURIComponent(firstToken)}`,
 		port,
-		review,
-		getThread: (threadId) => store.getThread(threadId),
-		threads: () => store.list(),
-		threadSummary: () => store.summary(),
+		root: review.root,
+		entryUrl: () => `http://127.0.0.1:${port}/?token=${encodeURIComponent(mintToken())}`,
+		clientCount: () => sseClients.size,
+		currentReview: () => current().review,
+		currentRoundNumber: () => current().number,
+		hasRound: (reviewId) => rounds.some((round) => round.review.id === reviewId),
+		locateThread(threadId) {
+			const round = roundOfThread(threadId);
+			return round ? { round: round.number, current: round === current() } : undefined;
+		},
+		getThread: (threadId) => roundOfThread(threadId)?.store.getThread(threadId),
+		threads: () => current().store.list(),
+		threadSummary: () => current().store.summary(),
 		postPiReply(threadId, body, resolves) {
-			const thread = store.postPiReply(threadId, body, resolves);
-			if (thread) broadcastThread(thread);
+			const round = current();
+			const thread = round.store.postPiReply(threadId, body, resolves);
+			if (thread) broadcastThread(round, thread);
 			return thread;
+		},
+		addRound(nextReview, previousRoundId) {
+			const active = current();
+			if (previousRoundId !== active.review.id) {
+				if (rounds.some((round) => round.review.id === previousRoundId)) {
+					return { error: "superseded", currentRound: active.number, currentRoundId: active.review.id };
+				}
+				return { error: "unknown-round" };
+			}
+			if (nextReview.id === active.review.id) {
+				if (phase !== "reviewing") {
+					phase = "reviewing";
+					broadcastPhase();
+				}
+				return { identical: true, round: active.number };
+			}
+			if (nextReview.root !== active.review.root) return { error: "wrong-root" };
+			const round = { number: active.number + 1, review: nextReview, store: createThreadStore(nextReview) };
+			rounds.push(round);
+			phase = "reviewing";
+			broadcast("round-ready", { round: round.number, previousRound: active.number });
+			return { round: round.number };
 		},
 		async close() {
 			if (closed) return;

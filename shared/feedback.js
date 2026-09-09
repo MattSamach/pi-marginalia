@@ -25,9 +25,13 @@ function threadAttributes(thread) {
 	return values.join(" ");
 }
 
+function roundAttribute(round) {
+	return round === undefined ? "" : ` round="${Number(round)}"`;
+}
+
 /** Format one reviewer thread post as the user message delivered to Pi. */
-export function formatThreadMessageXml(review, thread, turn) {
-	const lines = [`<code-review-thread snapshot="${attr(review.id)}" ${threadAttributes(thread)}${anchorAttributes(thread)}>`];
+export function formatThreadMessageXml(review, thread, turn, round) {
+	const lines = [`<code-review-thread snapshot="${attr(review.id)}"${roundAttribute(round)} ${threadAttributes(thread)}${anchorAttributes(thread)}>`];
 	if (thread.highlight !== undefined) lines.push(`  <highlight>${cdata(thread.highlight)}</highlight>`);
 	lines.push(`  <message author="${attr(turn.author)}">${cdata(turn.body)}</message>`);
 	lines.push("</code-review-thread>");
@@ -35,10 +39,10 @@ export function formatThreadMessageXml(review, thread, turn) {
 }
 
 /** Format the finish-pass summary delivered to Pi when the reviewer completes a pass. */
-export function formatReviewPassXml(review, threads, summary, stale, note) {
+export function formatReviewPassXml(review, threads, summary, stale, note, round) {
 	const unreadNotes = threads.filter((thread) => thread.status === "open" && !thread.turns.some((turn) => turn.author === "user")).length;
 	const lines = [
-		`<code-review-pass snapshot="${attr(review.id)}" stale="${stale ? "true" : "false"}" open="${summary.open}" awaiting-user="${summary.awaitingUser}" awaiting-pi="${summary.awaitingPi}" resolved="${summary.resolved}" unread-notes="${unreadNotes}">`,
+		`<code-review-pass snapshot="${attr(review.id)}"${roundAttribute(round)} stale="${stale ? "true" : "false"}" open="${summary.open}" awaiting-user="${summary.awaitingUser}" awaiting-pi="${summary.awaitingPi}" resolved="${summary.resolved}" unread-notes="${unreadNotes}">`,
 	];
 	if (note) lines.push(`  <note>${cdata(note)}</note>`);
 	for (const thread of threads) {

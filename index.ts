@@ -43,6 +43,7 @@ const openCodeReviewSchema = Type.Object({
 	title: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
 	overview: reviewOverviewSchema,
 	files: Type.Array(reviewFileSchema, { maxItems: 500, description: "Ordered changed files. Any changed files omitted here are appended automatically." }),
+	previousRoundId: Type.Optional(Type.String({ minLength: 8, maxLength: 200, description: "Snapshot id of the current round of an open review session (the snapshot attribute of the code-review-pass message). Opens the revised changes as the next round in the same browser session instead of a fresh review." })),
 });
 export type OpenCodeReviewInput = Static<typeof openCodeReviewSchema>;
 const replyReviewThreadSchema = Type.Object({
@@ -107,25 +108,37 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	const servers = new Set<ReviewServer>();
 	const queue = createReviewMessageQueue((messages: string[]) => pi.sendUserMessage(messages.join("\n\n")));
 
+	type ReviewRound = { number: number; review: { id: string; root: string } };
 	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal) => {
 		const snapshot = await collectReviewSnapshot(ctx.cwd, { signal });
 		const review = applyReviewManifest(snapshot, manifest);
-		for (const stale of [...servers].filter((existing) => existing.review.root === review.root)) {
+		const previousRoundId = "previousRoundId" in manifest ? manifest.previousRoundId : undefined;
+		if (previousRoundId) {
+			const server = [...servers].find((candidate) => candidate.hasRound(previousRoundId));
+			if (!server) throw new Error(`No open review session contains round ${previousRoundId.slice(0, 12)}. Open a fresh review without previousRoundId.`);
+			const added = server.addRound(review, previousRoundId);
+			if (added.error === "superseded") throw new Error(`Round ${previousRoundId.slice(0, 12)} is already superseded; the current round is ${added.currentRoundId?.slice(0, 12)} (round ${added.currentRound}).`);
+			if (added.error === "wrong-root") throw new Error("The new snapshot belongs to a different repository than the open review session.");
+			if (added.error) throw new Error("Could not open the next review round.");
+			if (server.clientCount() === 0) await openBrowser(server.entryUrl());
+			return { review, server, round: added.round, identical: added.identical === true };
+		}
+		for (const stale of [...servers].filter((existing) => existing.root === review.root)) {
 			servers.delete(stale);
 			await stale.close();
 		}
 		const server = await createCodeReviewServer(review, {
-			onThreadPost: async (thread: ReviewThread, turn: ReviewThreadTurn) => {
-				const queued = queue.post(formatThreadMessageXml(review, thread, turn), ctx.isIdle());
+			onThreadPost: async (round: ReviewRound, thread: ReviewThread, turn: ReviewThreadTurn) => {
+				const queued = queue.post(formatThreadMessageXml(round.review, thread, turn, round.number), ctx.isIdle());
 				ctx.ui.notify(`Review thread ${thread.id}: new reviewer message${queued ? " (queued until Pi settles)" : ""}.`, "info");
 			},
-			onFinishPass: async (note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
+			onFinishPass: async (round: ReviewRound, note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
 				let stale = true;
 				try {
-					stale = (await collectReviewSnapshot(review.root)).id !== review.id;
+					stale = (await collectReviewSnapshot(round.review.root)).id !== round.review.id;
 				} catch {}
-				const queued = queue.post(formatReviewPassXml(review, threads, summary, stale, note), ctx.isIdle());
-				ctx.ui.notify(`Review pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s)${queued ? " (queued until Pi settles)" : ""}.`, "info");
+				const queued = queue.post(formatReviewPassXml(round.review, threads, summary, stale, note, round.number), ctx.isIdle());
+				ctx.ui.notify(`Review round ${round.number} pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s)${queued ? " (queued until Pi settles)" : ""}.`, "info");
 				return { stale };
 			},
 		});
@@ -137,26 +150,33 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			await server.close();
 			throw error;
 		}
-		return { review, server };
+		return { review, server, round: 1, identical: false };
 	};
 
 	pi.registerTool({
 		name: "open_code_review",
 		label: "Open Code Review",
-		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with an extremely concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered. The reviewer's browser posts live comment threads as code-review-thread messages; answer each with reply_review_thread, and treat the code-review-pass message as the signal that the pass is complete.",
+		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with a concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered. The reviewer's browser posts live comment threads as code-review-thread messages; answer each with reply_review_thread, and treat the code-review-pass message as the signal that the pass is complete. After a pass, apply the feedback as one batch and call this tool again with previousRoundId set to that pass's snapshot id: the revised changes open as the next round of the same session and the reviewer's browser advances automatically.",
 		promptSnippet: "Open an ordered, agent-commented browser review of current Git changes",
 		promptGuidelines: [
 			"Use open_code_review when the user asks to be walked through or interactively review the agent's current code changes.",
-			"Keep the open_code_review overview extremely concise: under 150 words, one-sentence intent, two to four outcome bullets, one or two validation bullets, and only material optional review focus or risks.",
+			"Keep the open_code_review overview concise: under 500 words, one-sentence intent, two to four outcome bullets, one or two validation bullets, and only material optional review focus or risks.",
 			"Use open_code_review reviewMode='reference' conservatively for visible files that do not merit focused review, such as binaries or deterministic generated artifacts; never use it to hide substantive source changes.",
+			"After a code-review-pass message, apply the feedback as one batch, then reopen with previousRoundId set to that pass's snapshot id so the revised changes appear as the next round in the reviewer's open browser session.",
 		],
 		parameters: openCodeReviewSchema,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			onUpdate?.({ content: [{ type: "text", text: "Collecting a frozen review snapshot…" }], details: {} });
-			const { review, server } = await openReview(ctx, params, signal);
+			const { review, server, round, identical } = await openReview(ctx, params, signal);
+			if (identical) {
+				return {
+					content: [{ type: "text", text: `The snapshot is identical to round ${round} — nothing changed since the reviewer's pass. The session stays on that round (unlocked if it was awaiting revision); continue answering its threads.` }],
+					details: { snapshot: review.id, round, identical: true },
+				};
+			}
 			return {
-				content: [{ type: "text", text: `Opened code review ${review.id.slice(0, 12)} with ${review.files.length} changed file(s). The browser posts live comment threads; reply with reply_review_thread and wait for the reviewer's code-review-pass message.` }],
-				details: { snapshot: review.id, files: review.files.map((file: { path: string }) => file.path), url: server.url.replace(/\?.*$/, "") },
+				content: [{ type: "text", text: `Opened code review ${review.id.slice(0, 12)}${round && round > 1 ? ` as round ${round}; the reviewer's browser advances automatically` : ""} with ${review.files.length} changed file(s). The browser posts live comment threads; reply with reply_review_thread and wait for the reviewer's code-review-pass message.` }],
+				details: { snapshot: review.id, round, files: review.files.map((file: { path: string }) => file.path), url: server.url.replace(/\?.*$/, "") },
 			};
 		},
 	});
@@ -171,12 +191,14 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			"Answer each thread message inside exactly the thread that raised it, taking the thread id from the incoming message; never post placeholder or cross-reference replies into other threads.",
 			"Keep review-thread replies concise and specific to the anchored code; use chat for broader discussion.",
 			"Set resolves=true only when the concern is fully addressed, and never treat a proposal as a resolution.",
-			"Never edit code in response to an individual review thread; keep the worktree identical to the open snapshot until the code-review-pass message arrives, then apply feedback as one batch and open a fresh review.",
+			"Never edit code in response to an individual review thread; keep the worktree identical to the open snapshot until the code-review-pass message arrives, then apply feedback as one batch and open the next round with open_code_review previousRoundId set to that pass's snapshot id.",
 		],
 		parameters: replyReviewThreadSchema,
 		async execute(_toolCallId, params) {
 			for (const server of servers) {
-				if (!server.getThread(params.threadId)) continue;
+				const location = server.locateThread(params.threadId);
+				if (!location) continue;
+				if (!location.current) throw new Error(`Thread ${params.threadId} belongs to superseded round ${location.round}; it is read-only. Respond to the reviewer in round ${server.currentRoundNumber()} instead.`);
 				const thread: ReviewThread | undefined = server.postPiReply(params.threadId, params.body, params.resolves === true);
 				if (!thread) throw new Error(`Reply to thread ${params.threadId} was rejected; the thread may have reached its turn limit.`);
 				const summary = server.threadSummary();

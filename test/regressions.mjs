@@ -84,7 +84,7 @@ try {
 	assert.equal(ordered.files.find((file) => file.path === "unstaged.txt")?.reviewMode, "reference", "Pi should be able to classify textual artifacts as reference files.");
 	assert.equal(ordered.files.find((file) => file.path === "binary.dat")?.reviewMode, "reference", "Binary files should be reference files automatically.");
 	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "Too sparse", changes: ["Only one"], validation: ["Checked"] }, files: [] }), /changes must contain 2 to 4 entries/);
-	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "word ".repeat(95), changes: ["word ".repeat(30), "word ".repeat(30)], validation: ["seven eight"] }, files: [] }), /at most 150 words/);
+	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "a ".repeat(240), changes: ["a ".repeat(240), "a ".repeat(240)], validation: ["seven eight"] }, files: [] }), /at most 500 words/);
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "../secret", summary: "bad" }] }), /not changed against HEAD/);
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", reviewMode: "skip" }] }), /must be review or reference/, "Unknown review classifications must be rejected.");
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", commentary: [{ id: "end-only", body: "bad", endLine: 2 }] }] }), /cannot set endLine without startLine/, "Commentary endLine requires a startLine.");
@@ -191,6 +191,8 @@ try {
 	assert.equal(store.setResolved(noteThreadId, false).status, "open", "Resolved notes can be reopened.");
 	assert.deepEqual(store.summary(), { open: 5, awaitingUser: 1, awaitingPi: 4, resolved: 0 }, "Reopened notes await the reviewer again.");
 	assert.doesNotMatch(formatReviewPassXml(ordered, store.list(), store.summary(), false, undefined), /commentary-id="second-note"/, "Reviewer-untouched notes never appear in pass summaries even when reopened.");
+	assert.match(formatThreadMessageXml(ordered, selectionThread, selectionThread.turns[0], 3), /^<code-review-thread snapshot="[a-f0-9]{64}" round="3" /, "Thread messages must carry their round number when provided.");
+	assert.match(formatReviewPassXml(ordered, store.list(), store.summary(), false, undefined, 2), /^<code-review-pass snapshot="[a-f0-9]{64}" round="2" /, "Pass summaries must carry their round number when provided.");
 
 	const deliveredBatches = [];
 	const messageQueue = createReviewMessageQueue((batch) => deliveredBatches.push(batch));
@@ -238,14 +240,14 @@ try {
 	const passes = [];
 	let failNextPost = false;
 	const server = await createCodeReviewServer(ordered, {
-		onThreadPost: async (thread, turn) => {
+		onThreadPost: async (round, thread, turn) => {
 			if (failNextPost) {
 				failNextPost = false;
 				throw new Error("delivery boom");
 			}
-			posts.push({ thread, turn });
+			posts.push({ round: round.number, thread, turn });
 		},
-		onFinishPass: async (note, threadList, summary) => { passes.push({ note, threadList, summary }); return { stale: false }; },
+		onFinishPass: async (round, note, threadList, summary) => { passes.push({ round: round.number, note, threadList, summary }); return { stale: false }; },
 	});
 	try {
 		const origin = new URL(server.url).origin;
@@ -331,6 +333,8 @@ try {
 		assert.deepEqual(await finishResponse.json(), { stale: false });
 		assert.equal(passes.length, 1);
 		assert.equal(passes[0].note, "Done for now.");
+		assert.equal(passes[0].round, 1, "The pass must report which round it closes.");
+		assert.equal(posts[0].round, 1, "Thread posts must report their round.");
 		assert.deepEqual(passes[0].summary, { open: 1, awaitingUser: 0, awaitingPi: 1, resolved: 2 });
 	} finally {
 		await server.close();
@@ -388,6 +392,106 @@ try {
 		await flakyServer.close();
 	}
 
+	const altId = (id, index) => `${id.slice(0, index)}${id[index] === "0" ? "1" : "0"}${id.slice(index + 1)}`;
+	const roundsServer = await createCodeReviewServer(ordered, {
+		onThreadPost: async () => {},
+		onFinishPass: async () => ({ stale: false }),
+	});
+	try {
+		const origin = new URL(roundsServer.url).origin;
+		const bootstrap = await fetch(roundsServer.url, { redirect: "manual" });
+		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
+		const headers = { cookie, "content-type": "application/json", origin };
+		const postEndpoint = `${origin}/__pi_code_review_post__`;
+		const resolveEndpoint = `${origin}/__pi_code_review_resolve__`;
+		const finishEndpoint = `${origin}/__pi_code_review_finish__`;
+		const resumeEndpoint = `${origin}/__pi_code_review_resume__`;
+		const eventsResponse = await fetch(`${origin}/__pi_code_review_events__?round=1`, { headers: { cookie } });
+		const reader = eventsResponse.body.getReader();
+		const decoder = new TextDecoder();
+		let sseBuffer = "";
+		const readUntil = async (marker) => {
+			const deadline = Date.now() + 5_000;
+			while (!sseBuffer.includes(marker)) {
+				if (Date.now() > deadline) throw new Error(`Timed out waiting for SSE marker: ${marker}`);
+				const { value, done } = await reader.read();
+				if (done) throw new Error("SSE stream ended early.");
+				sseBuffer += decoder.decode(value, { stream: true });
+			}
+		};
+		await readUntil("event: init");
+		assert.match(sseBuffer, /"currentRound":1/, "The init event must carry the session round state.");
+
+		assert.match(await (await fetch(origin, { headers: { cookie } })).text(), /<body data-round="1" data-current-round="1" data-phase="reviewing"/, "The root page serves the current round.");
+		assert.equal((await fetch(`${origin}/round/9`, { headers: { cookie } })).status, 404, "Unknown round pages must be rejected.");
+		assert.equal((await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 2, source: "overview", body: "x" }) })).status, 409, "Creations tagged with a non-current round must be rejected.");
+		const roundsPost = await (await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 1, source: "overview", body: "First round topic." }) })).json();
+
+		assert.equal((await fetch(resumeEndpoint, { method: "POST", headers: { ...headers, origin: "https://example.com" }, body: "{}" })).status, 403, "Cross-origin resume requests must be rejected.");
+		assert.equal((await fetch(resumeEndpoint, { method: "POST", headers, body: "{}" })).status, 409, "Resume outside the revising phase must be rejected.");
+		assert.equal((await fetch(finishEndpoint, { method: "POST", headers, body: "{}" })).status, 200);
+		await readUntil('"phase":"revising"');
+		assert.equal((await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 1, source: "overview", body: "late" }) })).status, 409, "Posting is locked while Pi revises.");
+		assert.equal((await fetch(resolveEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: roundsPost.thread.id, resolved: true }) })).status, 409, "Resolution is locked while Pi revises.");
+		assert.equal((await fetch(resumeEndpoint, { method: "POST", headers, body: "{}" })).status, 200);
+		await readUntil('"phase":"reviewing"');
+		assert.equal((await fetch(resolveEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: roundsPost.thread.id, resolved: true }) })).status, 200, "Resume unlocks the round for mutations.");
+
+		const secondRoundReview = { ...ordered, id: altId(ordered.id, 63) };
+		assert.equal(roundsServer.addRound(secondRoundReview, "0".repeat(64)).error, "unknown-round", "Chaining from an unknown round must be rejected.");
+		assert.deepEqual(roundsServer.addRound({ ...ordered }, ordered.id), { identical: true, round: 1 }, "An unchanged snapshot must not open a hollow round.");
+		assert.equal(roundsServer.addRound(secondRoundReview, ordered.id).round, 2);
+		await readUntil("event: round-ready");
+		assert.match(sseBuffer, /"previousRound":1/, "round-ready must name the superseded round for auto-navigation.");
+		assert.match(await (await fetch(origin, { headers: { cookie } })).text(), /<body data-round="2" data-current-round="2"/, "The root page advances to the new round.");
+		assert.match(await (await fetch(`${origin}/round/1`, { headers: { cookie } })).text(), /<body data-round="1" data-current-round="2"/, "Prior rounds stay reachable read-only.");
+		assert.equal(roundsServer.addRound(secondRoundReview, ordered.id).error, "superseded", "Chaining from a superseded round must be rejected.");
+		assert.deepEqual(roundsServer.locateThread(roundsPost.thread.id), { round: 1, current: false });
+		assert.equal(roundsServer.postPiReply(roundsPost.thread.id, "late", false), undefined, "Pi replies must not land in superseded rounds.");
+		assert.equal((await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: roundsPost.thread.id, body: "stale reply" }) })).status, 409, "Replies into superseded rounds are rejected.");
+		assert.equal((await fetch(resolveEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: roundsPost.thread.id, resolved: false }) })).status, 409, "Resolution into superseded rounds is rejected.");
+		assert.equal((await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 2, source: "overview", body: "Round two topic." }) })).status, 200, "The new round accepts posts.");
+		assert.equal(roundsServer.addRound({ ...secondRoundReview, id: "f".repeat(64), root: "/elsewhere" }, secondRoundReview.id).error, "wrong-root", "Rounds from another repository must be rejected.");
+		assert.equal((await fetch(finishEndpoint, { method: "POST", headers, body: "{}" })).status, 200);
+		assert.deepEqual(roundsServer.addRound({ ...secondRoundReview }, secondRoundReview.id), { identical: true, round: 2 });
+		assert.equal((await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 2, source: "overview", body: "unlocked again" }) })).status, 200, "An identical reopen resumes the current round.");
+		const entry = roundsServer.entryUrl();
+		assert.equal((await fetch(entry, { redirect: "manual" })).status, 302, "Reissued entry links must authenticate.");
+		assert.equal((await fetch(entry, { redirect: "manual" })).status, 403, "Reissued entry links must be single-use.");
+		await reader.cancel();
+	} finally {
+		await roundsServer.close();
+	}
+
+	let releaseRaceFinish;
+	let markRaceFinishEntered;
+	const raceFinishEntered = new Promise((resolvePromise) => { markRaceFinishEntered = resolvePromise; });
+	const raceServer = await createCodeReviewServer(ordered, {
+		onThreadPost: async () => {},
+		onFinishPass: async () => {
+			markRaceFinishEntered();
+			await new Promise((resolvePromise) => { releaseRaceFinish = resolvePromise; });
+			return { stale: false };
+		},
+	});
+	try {
+		const origin = new URL(raceServer.url).origin;
+		const bootstrap = await fetch(raceServer.url, { redirect: "manual" });
+		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
+		const headers = { cookie, "content-type": "application/json", origin };
+		const finishPromise = fetch(`${origin}/__pi_code_review_finish__`, { method: "POST", headers, body: "{}" });
+		await raceFinishEntered;
+		assert.equal(raceServer.addRound({ ...ordered, id: altId(ordered.id, 63) }, ordered.id).round, 2, "Pi may open the next round while the finish handoff is in flight.");
+		releaseRaceFinish();
+		const finishResponse = await finishPromise;
+		assert.equal(finishResponse.status, 200);
+		assert.equal((await finishResponse.json()).superseded, true, "A finish that lost to a new round must say so.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ round: 2, source: "overview", body: "fresh" }) })).status, 200, "A round opened during the finish handoff must not be born locked.");
+	} finally {
+		releaseRaceFinish?.();
+		await raceServer.close();
+	}
+
 	const browserCandidates = [process.env.PUPPETEER_EXECUTABLE_PATH, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/usr/bin/google-chrome", "/usr/bin/chromium"].filter(Boolean);
 	let executablePath;
 	for (const candidate of browserCandidates) {
@@ -397,8 +501,8 @@ try {
 		const browserPosts = [];
 		let browserPass;
 		const browserServer = await createCodeReviewServer(ordered, {
-			onThreadPost: async (thread, turn) => { browserPosts.push({ thread, turn }); },
-			onFinishPass: async (note, threadList, summary) => { browserPass = { note, threadList, summary }; return { stale: false }; },
+			onThreadPost: async (round, thread, turn) => { browserPosts.push({ thread, turn }); },
+			onFinishPass: async (round, note, threadList, summary) => { browserPass = { round: round.number, note, threadList, summary }; return { stale: false }; },
 		});
 		const browser = await puppeteer.launch({ headless: true, executablePath, args: ["--no-sandbox"] });
 		try {
@@ -534,10 +638,51 @@ try {
 			assert.equal(await page.$eval(`[data-file-nav="${secondReviewIndex}"]`, (item) => item.classList.contains("active")), true, "Regrouped primary navigation should activate by file index rather than DOM position.");
 			page.once("dialog", async (dialog) => { await dialog.accept(); });
 			await page.click("[data-finish]");
-			await page.waitForFunction(() => document.querySelector('[data-global-status]')?.textContent.includes("Review pass sent"));
+			await page.waitForFunction(() => document.querySelector('[data-phase-banner]')?.hidden === false);
 			assert.ok(browserPass, "Finishing the pass must hand the summary to Pi.");
+			assert.equal(browserPass.round, 1);
 			assert.deepEqual(browserPass.summary, { open: 3, awaitingUser: 0, awaitingPi: 3, resolved: 2 });
-			assert.equal(await page.$eval("[data-finish]", (button) => button.disabled), false, "Threads must stay live after a pass is handed to Pi.");
+			assert.equal(await page.evaluate(() => document.body.classList.contains("locked")), true, "Sending the pass locks posting.");
+			assert.match(await page.$eval('[data-phase-banner-text]', (el) => el.textContent), /Pi is revising — round 2 pending/);
+			assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('[data-finish]')).display), "none", "Posting controls must hide while Pi revises.");
+			await page.click('[data-resume]');
+			await page.waitForFunction(() => document.querySelector('[data-phase-banner]')?.hidden === true);
+			assert.equal(await page.evaluate(() => document.body.classList.contains("locked")), false, "Resume must unlock the round.");
+
+			const browserOrigin = new URL(browserServer.url).origin;
+			const nextRoundReview = { ...ordered, id: altId(ordered.id, 63) };
+			assert.equal(browserServer.addRound(nextRoundReview, ordered.id).round, 2);
+			await page.waitForFunction(() => document.body.dataset.round === "2", { timeout: 5_000 });
+			assert.match(await page.$eval('[data-round-chip]', (chip) => chip.textContent), /round 2/, "round-ready must auto-advance the browser to the new round.");
+			assert.equal(await page.$$eval('[data-round-switcher] a', (links) => links.length), 2, "The round switcher must list every round.");
+			assert.equal(await page.evaluate(() => document.body.classList.contains("locked")), false, "The new round opens unlocked.");
+			await page.goto(`${browserOrigin}/round/1`, { waitUntil: "domcontentloaded" });
+			await page.waitForFunction(() => document.body.classList.contains("locked"));
+			assert.match(await page.$eval('[data-phase-banner-text]', (el) => el.textContent), /Round 1 is read-only — round 2 is current/);
+			assert.equal(await page.$eval('[data-goto-current]', (link) => link.hidden), false, "Superseded rounds must link to the current round.");
+			await page.waitForFunction(() => document.querySelectorAll('[data-overview-thread] .thread-card').length === 2);
+			assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('[data-finish]')).display), "none", "Superseded rounds never offer posting controls.");
+
+			const driftPage = await browser.newPage();
+			await driftPage.setRequestInterception(true);
+			let grabEvents;
+			const eventsHeld = new Promise((resolvePromise) => { grabEvents = resolvePromise; });
+			driftPage.on("request", (request) => {
+				if (grabEvents && request.url().includes("/__pi_code_review_events__")) {
+					const grab = grabEvents;
+					grabEvents = undefined;
+					grab(request);
+					return;
+				}
+				request.continue().catch(() => {});
+			});
+			await driftPage.goto(`${browserOrigin}/round/2`, { waitUntil: "domcontentloaded" });
+			const heldEvents = await eventsHeld;
+			assert.equal(browserServer.addRound({ ...ordered, id: altId(ordered.id, 62) }, nextRoundReview.id).round, 3, "The session advances while the drift tab is disconnected.");
+			heldEvents.continue().catch(() => {});
+			await driftPage.waitForFunction(() => document.body.dataset.round === "3", { timeout: 5_000 });
+			assert.match(await driftPage.$eval('[data-round-chip]', (chip) => chip.textContent), /round 3/, "A current-round tab that slept through round-ready must catch up on reconnect.");
+			await driftPage.close();
 
 			const plainServer = await createCodeReviewServer(plainReview, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
 			try {

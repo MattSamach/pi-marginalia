@@ -8,6 +8,15 @@
   const RESOLVE_PATH = '/__pi_code_review_resolve__';
   const EVENTS_PATH = '/__pi_code_review_events__';
   const FINISH_PATH = '/__pi_code_review_finish__';
+  const RESUME_PATH = '/__pi_code_review_resume__';
+
+  const myRound = Number(document.body.dataset.round || 1);
+  let currentRound = Number(document.body.dataset.currentRound || myRound);
+  let phase = document.body.dataset.phase || 'reviewing';
+  const loadedAsCurrent = myRound === currentRound;
+  let autoNavigating = false;
+  const isSuperseded = () => myRound < currentRound;
+  const isLocked = () => isSuperseded() || phase !== 'reviewing';
 
   const threads = new Map();
   const highlights = new Map();
@@ -23,6 +32,44 @@
   const inbox = document.querySelector('[data-inbox]');
   const tally = document.querySelector('[data-thread-tally]');
   const shortcutsOverlay = document.querySelector('[data-shortcuts-overlay]');
+  const phaseBanner = document.querySelector('[data-phase-banner]');
+  const phaseBannerText = document.querySelector('[data-phase-banner-text]');
+  const resumeButton = document.querySelector('[data-resume]');
+  const gotoCurrent = document.querySelector('[data-goto-current]');
+  const roundSwitcher = document.querySelector('[data-round-switcher]');
+
+  const applySessionState = () => {
+    document.body.classList.toggle('locked', isLocked());
+    if (phaseBanner && phaseBannerText && resumeButton && gotoCurrent) {
+      if (isSuperseded()) {
+        phaseBanner.hidden = false;
+        phaseBannerText.textContent = 'Round ' + myRound + ' is read-only — round ' + currentRound + ' is current.';
+        resumeButton.hidden = true;
+        gotoCurrent.hidden = false;
+        gotoCurrent.href = '/round/' + currentRound;
+      } else if (phase === 'revising') {
+        phaseBanner.hidden = false;
+        phaseBannerText.textContent = 'Pi is revising — round ' + (myRound + 1) + ' pending.';
+        resumeButton.hidden = false;
+        gotoCurrent.hidden = true;
+      } else {
+        phaseBanner.hidden = true;
+      }
+    }
+    if (roundSwitcher) {
+      roundSwitcher.hidden = currentRound <= 1;
+      roundSwitcher.replaceChildren(...Array.from({ length: currentRound }, (_, index) => {
+        const number = index + 1;
+        const link = document.createElement('a');
+        link.href = '/round/' + number;
+        link.textContent = 'R' + number;
+        if (number === currentRound) link.classList.add('current');
+        if (number === myRound) link.classList.add('viewing');
+        link.title = number === currentRound ? 'Round ' + number + ' (current)' : 'Round ' + number + ' (read-only)';
+        return link;
+      }));
+    }
+  };
 
   const setStatus = (message, error = false) => {
     globalStatus.textContent = message;
@@ -136,6 +183,7 @@
     return { section, rows };
   };
   const beginComment = () => {
+    if (isLocked()) return;
     const selection = window.getSelection();
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return;
     const range = selection.getRangeAt(0);
@@ -209,6 +257,7 @@
       add.disabled = true;
       try {
         const result = await postJson(POST_PATH, {
+          round: myRound,
           source: 'selection',
           file: draft.file,
           side: draft.side,
@@ -242,6 +291,10 @@
     return section.querySelector('[data-selection-threads]');
   };
   const resolveThread = async (threadId, resolved) => {
+    if (isLocked()) {
+      setStatus('This round is read-only.', true);
+      return;
+    }
     try {
       const result = await postJson(RESOLVE_PATH, { threadId, resolved });
       upsertThread(result.thread);
@@ -492,7 +545,7 @@
       if (!body) return;
       button.disabled = true;
       try {
-        const result = await postJson(POST_PATH, { source: 'commentary', file: section.dataset.path, commentaryId: button.dataset.commentaryPost, body });
+        const result = await postJson(POST_PATH, { round: myRound, source: 'commentary', file: section.dataset.path, commentaryId: button.dataset.commentaryPost, body });
         textarea.value = '';
         upsertThread(result.thread);
         postedStatus(result, 'Reply sent to Pi.');
@@ -524,7 +577,7 @@
       if (!body) return;
       overviewPost.disabled = true;
       try {
-        const result = await postJson(POST_PATH, { source: 'overview', body });
+        const result = await postJson(POST_PATH, { round: myRound, source: 'overview', body });
         overviewTextarea.value = '';
         upsertThread(result.thread);
         postedStatus(result, 'Feedback sent to Pi.');
@@ -618,16 +671,27 @@
   });
 
   // Live updates ----------------------------------------------------------------
-  const events = new EventSource(EVENTS_PATH);
+  const events = new EventSource(EVENTS_PATH + '?round=' + myRound);
   events.addEventListener('init', (event) => {
     const data = JSON.parse(event.data);
+    if (loadedAsCurrent && data.currentRound > myRound) {
+      // This tab was the active reviewer but slept through round-ready; catch up.
+      autoNavigating = true;
+      window.location.href = '/round/' + data.currentRound;
+      return;
+    }
+    currentRound = data.currentRound;
+    phase = data.phase;
+    applySessionState();
     threads.clear();
     for (const thread of data.threads) threads.set(thread.id, thread);
     for (const thread of data.threads) renderThread(thread);
     updateAggregates();
   });
   events.addEventListener('thread', (event) => {
-    const { thread } = JSON.parse(event.data);
+    const data = JSON.parse(event.data);
+    if (data.round !== myRound) return;
+    const thread = data.thread;
     const previous = threads.get(thread.id);
     upsertThread(thread);
     const last = thread.turns[thread.turns.length - 1];
@@ -635,9 +699,36 @@
       setStatus('Pi replied — press n to view.');
     }
   });
+  events.addEventListener('phase', (event) => {
+    const data = JSON.parse(event.data);
+    phase = data.phase;
+    currentRound = data.currentRound;
+    applySessionState();
+    if (myRound === currentRound) setStatus(phase === 'revising' ? 'Pass sent — Pi is revising.' : 'Round ' + myRound + ' is live again.');
+  });
+  events.addEventListener('round-ready', (event) => {
+    const data = JSON.parse(event.data);
+    if (myRound === data.previousRound) {
+      autoNavigating = true;
+      window.location.href = '/round/' + data.round;
+      return;
+    }
+    currentRound = data.round;
+    phase = 'reviewing';
+    applySessionState();
+  });
+  resumeButton?.addEventListener('click', async () => {
+    try {
+      await postJson(RESUME_PATH, {});
+    } catch (error) {
+      setStatus(errorMessage(error), true);
+    }
+  });
+  applySessionState();
 
   // Finish pass -------------------------------------------------------------------
   finishButton.addEventListener('click', async () => {
+    if (isLocked()) return;
     if (!confirmDiscardDraft()) return;
     const openCount = [...threads.values()].filter((thread) => thread.status === 'open').length;
     if (!window.confirm('Send this review pass to Pi?' + (openCount ? ' Open threads: ' + openCount + '.' : ''))) return;
@@ -656,6 +747,8 @@
     }
   });
   window.addEventListener('beforeunload', (event) => {
+    // Drafts on a superseded round are already dead; never block advancing past them.
+    if (autoNavigating || isSuperseded()) return;
     const hasDraftText = draft || [...document.querySelectorAll('textarea')].some((textarea) => textarea.value.trim());
     if (!hasDraftText) return;
     event.preventDefault();

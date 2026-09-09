@@ -36,12 +36,14 @@ export function formatThreadMessageXml(review, thread, turn) {
 
 /** Format the finish-pass summary delivered to Pi when the reviewer completes a pass. */
 export function formatReviewPassXml(review, threads, summary, stale, note) {
+	const unreadNotes = threads.filter((thread) => thread.status === "open" && !thread.turns.some((turn) => turn.author === "user")).length;
 	const lines = [
-		`<code-review-pass snapshot="${attr(review.id)}" stale="${stale ? "true" : "false"}" open="${summary.open}" awaiting-user="${summary.awaitingUser}" awaiting-pi="${summary.awaitingPi}" resolved="${summary.resolved}">`,
+		`<code-review-pass snapshot="${attr(review.id)}" stale="${stale ? "true" : "false"}" open="${summary.open}" awaiting-user="${summary.awaitingUser}" awaiting-pi="${summary.awaitingPi}" resolved="${summary.resolved}" unread-notes="${unreadNotes}">`,
 	];
 	if (note) lines.push(`  <note>${cdata(note)}</note>`);
 	for (const thread of threads) {
 		if (thread.status !== "open") continue;
+		if (!thread.turns.some((turn) => turn.author === "user")) continue;
 		const last = thread.turns[thread.turns.length - 1];
 		lines.push(`  <open-thread ${threadAttributes(thread)} last-author="${attr(last?.author ?? "user")}">`);
 		if (last) lines.push(`    <last-message>${cdata(last.body)}</last-message>`);

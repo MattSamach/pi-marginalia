@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type, type Static } from "typebox";
 import { spawn } from "node:child_process";
 import { applyReviewManifest, collectReviewSnapshot } from "./shared/git-review.js";
+import { createReviewMessageQueue } from "./shared/delivery-queue.js";
 import { formatReviewPassXml, formatThreadMessageXml } from "./shared/feedback.js";
 import { createCodeReviewServer } from "./shared/server.js";
 
@@ -104,11 +105,7 @@ async function openBrowser(url: string): Promise<void> {
 
 export default function piCodeReview(pi: ExtensionAPI): void {
 	const servers = new Set<ReviewServer>();
-
-	const deliverToPi = (ctx: ExtensionContext, xml: string) => {
-		if (ctx.isIdle()) pi.sendUserMessage(xml);
-		else pi.sendUserMessage(xml, { deliverAs: "followUp" });
-	};
+	const queue = createReviewMessageQueue((messages: string[]) => pi.sendUserMessage(messages.join("\n\n")));
 
 	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal) => {
 		const snapshot = await collectReviewSnapshot(ctx.cwd, { signal });
@@ -119,16 +116,16 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		}
 		const server = await createCodeReviewServer(review, {
 			onThreadPost: async (thread: ReviewThread, turn: ReviewThreadTurn) => {
-				deliverToPi(ctx, formatThreadMessageXml(review, thread, turn));
-				ctx.ui.notify(`Review thread ${thread.id}: new reviewer message.`, "info");
+				const queued = queue.post(formatThreadMessageXml(review, thread, turn), ctx.isIdle());
+				ctx.ui.notify(`Review thread ${thread.id}: new reviewer message${queued ? " (queued until Pi settles)" : ""}.`, "info");
 			},
 			onFinishPass: async (note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
 				let stale = true;
 				try {
 					stale = (await collectReviewSnapshot(review.root)).id !== review.id;
 				} catch {}
-				deliverToPi(ctx, formatReviewPassXml(review, threads, summary, stale, note));
-				ctx.ui.notify(`Review pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s).`, "info");
+				const queued = queue.post(formatReviewPassXml(review, threads, summary, stale, note), ctx.isIdle());
+				ctx.ui.notify(`Review pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s)${queued ? " (queued until Pi settles)" : ""}.`, "info");
 				return { stale };
 			},
 		});
@@ -150,7 +147,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		promptSnippet: "Open an ordered, agent-commented browser review of current Git changes",
 		promptGuidelines: [
 			"Use open_code_review when the user asks to be walked through or interactively review the agent's current code changes.",
-			"Keep the open_code_review overview extremely concise: under 100 words, one-sentence intent, two to four outcome bullets, one or two validation bullets, and only material optional review focus or risks.",
+			"Keep the open_code_review overview extremely concise: under 150 words, one-sentence intent, two to four outcome bullets, one or two validation bullets, and only material optional review focus or risks.",
 			"Use open_code_review reviewMode='reference' conservatively for visible files that do not merit focused review, such as binaries or deterministic generated artifacts; never use it to hide substantive source changes.",
 		],
 		parameters: openCodeReviewSchema,
@@ -211,6 +208,14 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
 		},
+	});
+
+	pi.on("agent_settled", async (_event, ctx) => {
+		try {
+			queue.flush(ctx.isIdle());
+		} catch {
+			// A failed delivery keeps the batch queued; retry at the next settle.
+		}
 	});
 
 	pi.on("session_shutdown", async () => {

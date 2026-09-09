@@ -172,7 +172,7 @@ export async function createCodeReviewServer(review, options) {
 				if (!guardMutation(req, res)) return;
 				const body = await readGuardedBody(req, res);
 				if (body === undefined) return;
-				if (!body || typeof body !== "object" || typeof body.resolved !== "boolean") {
+				if (!body || typeof body !== "object" || typeof body.resolved !== "boolean" || typeof body.threadId !== "string") {
 					writeText(res, 400, "Invalid resolve payload.");
 					return;
 				}

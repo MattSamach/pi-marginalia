@@ -13,7 +13,8 @@
   const highlights = new Map();
   let nextHighlightId = 1;
   let draft;
-  let nextPointer = 0;
+  let navIndex = -1;
+  let currentThreadId;
   const overviewSection = reviewRoot.querySelector('[data-review-overview]');
   let showingOverview = Boolean(overviewSection);
   const fileSections = [...reviewRoot.querySelectorAll('[data-review-file]')];
@@ -21,6 +22,7 @@
   const navButtons = [...document.querySelectorAll('[data-file-nav]')];
   const inbox = document.querySelector('[data-inbox]');
   const tally = document.querySelector('[data-thread-tally]');
+  const shortcutsOverlay = document.querySelector('[data-shortcuts-overlay]');
 
   const setStatus = (message, error = false) => {
     globalStatus.textContent = message;
@@ -46,6 +48,7 @@
   };
   const threadNumber = (thread) => Number(thread.id.split('-t')[1]) || 0;
   const orderedAwaiting = () => [...threads.values()].filter(isAwaiting).sort((left, right) => sectionIndexOf(left) - sectionIndexOf(right) || threadNumber(left) - threadNumber(right));
+  const commentaryThreadFor = (file, commentaryId) => [...threads.values()].find((thread) => thread.source === 'commentary' && thread.file === file && thread.commentaryId === commentaryId);
 
   // Navigation ---------------------------------------------------------------
   const showOverview = () => {
@@ -247,10 +250,19 @@
       setStatus(errorMessage(error), true);
     }
   };
+
   const renderThread = (thread) => {
     const host = threadHost(thread);
     if (!host) return;
     let card = host.querySelector('[data-thread-card="' + thread.id + '"]');
+    if (thread.source === 'commentary' && thread.turns.length === 1 && thread.status === 'open') {
+      // A note the reviewer has not engaged with yet: the commentary card itself
+      // is the thread's visual, so show its composer instead of an empty card.
+      if (card) card.remove();
+      const origin = [...(sectionForPath(thread.file)?.querySelectorAll('[data-commentary-composer]') ?? [])].find((element) => element.dataset.commentaryComposer === thread.commentaryId);
+      if (origin) origin.hidden = false;
+      return;
+    }
     const previousReply = card?.querySelector('[data-thread-reply]');
     const previousDraft = previousReply?.value ?? '';
     const hadFocus = Boolean(previousReply) && document.activeElement === previousReply;
@@ -361,10 +373,6 @@
       const origin = [...(section?.querySelectorAll('[data-commentary-composer]') ?? [])].find((element) => element.dataset.commentaryComposer === thread.commentaryId);
       if (origin) origin.hidden = true;
     }
-    if (thread.source === 'overview') {
-      const origin = document.querySelector('[data-overview-composer]');
-      if (origin) origin.hidden = true;
-    }
   };
   const updateAggregates = () => {
     const all = [...threads.values()];
@@ -423,27 +431,49 @@
     renderThread(thread);
     updateAggregates();
   };
-  const navigateNext = () => {
+  const flashTarget = (element) => {
+    if (!element) return;
+    document.querySelectorAll('.thread-flash').forEach((flashed) => flashed.classList.remove('thread-flash'));
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    void element.offsetWidth;
+    element.classList.add('thread-flash');
+  };
+  const navigateStep = (direction) => {
     const awaiting = orderedAwaiting();
     if (!awaiting.length) {
-      setStatus('No threads awaiting you.');
+      setStatus('Nothing awaiting you.');
       return;
     }
     if (!confirmDiscardDraft()) return;
-    nextPointer = nextPointer % awaiting.length;
-    const thread = awaiting[nextPointer++];
+    if (direction > 0) navIndex = (navIndex + 1) % awaiting.length;
+    else navIndex = navIndex < 0 ? awaiting.length - 1 : (navIndex - 1 + awaiting.length) % awaiting.length;
+    const thread = awaiting[navIndex];
+    currentThreadId = thread.id;
     if (thread.source === 'overview') showOverview();
     else {
       const index = sectionIndexOf(thread);
       if (index >= 0 && index < fileSections.length) showFile(index);
     }
-    const card = document.querySelector('[data-thread-card="' + thread.id + '"]');
-    if (card) {
-      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      card.classList.remove('thread-flash');
-      void card.offsetWidth;
-      card.classList.add('thread-flash');
+    let target = document.querySelector('[data-thread-card="' + thread.id + '"]');
+    if (!target && thread.source === 'commentary') {
+      const section = sectionForPath(thread.file);
+      target = [...(section?.querySelectorAll('.agent-note') ?? [])].find((note) => note.dataset.commentaryId === thread.commentaryId);
     }
+    flashTarget(target);
+  };
+  const navigateNext = () => navigateStep(1);
+  const navigatePrev = () => navigateStep(-1);
+  const resolveCurrent = () => {
+    const thread = threads.get(currentThreadId);
+    if (!thread) {
+      setStatus('No current thread — press n to select one.');
+      return;
+    }
+    if (thread.status === 'resolved') {
+      setStatus('The current thread is already resolved.');
+      return;
+    }
+    resolveThread(thread.id, true);
   };
 
   // Composers for Pi commentary and the overview -------------------------------
@@ -470,6 +500,14 @@
         button.disabled = false;
         setStatus(errorMessage(error), true);
       }
+    });
+  });
+  document.querySelectorAll('[data-commentary-resolve]').forEach((button) => {
+    const section = button.closest('[data-review-file]');
+    button.addEventListener('click', () => {
+      const thread = commentaryThreadFor(section.dataset.path, button.dataset.commentaryResolve);
+      if (thread) resolveThread(thread.id, true);
+      else setStatus('Threads are still loading — try again in a moment.', true);
     });
   });
   const overviewPost = document.querySelector('[data-overview-post]');
@@ -524,12 +562,59 @@
     });
   });
   inbox?.addEventListener('click', navigateNext);
+  shortcutsOverlay?.addEventListener('click', (event) => {
+    if (event.target === shortcutsOverlay) shortcutsOverlay.hidden = true;
+  });
+  document.addEventListener('focusin', (event) => {
+    if (!(event.target instanceof HTMLElement)) return;
+    const card = event.target.closest('[data-thread-card]');
+    if (card) {
+      currentThreadId = card.dataset.threadCard;
+      return;
+    }
+    const note = event.target.closest('.agent-note');
+    if (note) {
+      const thread = commentaryThreadFor(note.closest('[data-review-file]').dataset.path, note.dataset.commentaryId);
+      if (thread) currentThreadId = thread.id;
+    }
+  });
   document.addEventListener('keydown', (event) => {
-    if (event.key !== 'n' || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key === 'Escape') {
+      if (shortcutsOverlay && !shortcutsOverlay.hidden) {
+        shortcutsOverlay.hidden = true;
+        event.preventDefault();
+        return;
+      }
+      const escaped = event.target;
+      if (escaped instanceof HTMLElement && escaped.tagName === 'TEXTAREA') {
+        escaped.blur();
+        event.preventDefault();
+      }
+      return;
+    }
+    if (shortcutsOverlay && !shortcutsOverlay.hidden) {
+      if (event.key === '?') {
+        event.preventDefault();
+        shortcutsOverlay.hidden = true;
+      }
+      return;
+    }
     const target = event.target;
     if (target instanceof HTMLElement && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) return;
-    event.preventDefault();
-    navigateNext();
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key === 'n') {
+      event.preventDefault();
+      navigateNext();
+    } else if (event.key === 'N') {
+      event.preventDefault();
+      navigatePrev();
+    } else if (event.key === 'e') {
+      event.preventDefault();
+      resolveCurrent();
+    } else if (event.key === '?') {
+      event.preventDefault();
+      if (shortcutsOverlay) shortcutsOverlay.hidden = !shortcutsOverlay.hidden;
+    }
   });
 
   // Live updates ----------------------------------------------------------------

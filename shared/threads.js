@@ -20,9 +20,28 @@ export function createThreadStore(review, limits = THREAD_LIMITS) {
 	const threads = new Map();
 	const files = new Map(review.files.map((file) => [file.path, file]));
 	const commentaryThreadIds = new Map();
-	let overviewThreadId;
 	let counter = 0;
 	const storeSalt = randomBytes(3).toString("hex");
+	const mintId = () => `${review.id.slice(0, 8)}-${storeSalt}-t${++counter}`;
+
+	// Every commentary note seeds an open thread awaiting the reviewer. Seeds are
+	// exempt from maxThreads, which bounds reviewer-created threads only.
+	for (const file of review.files) {
+		for (const entry of file.commentary) {
+			const thread = {
+				id: mintId(),
+				status: "open",
+				piProposedResolve: false,
+				source: "commentary",
+				file: file.path,
+				commentaryId: entry.id,
+				turns: [{ author: "pi", body: entry.body, ts: Date.now() }],
+			};
+			threads.set(thread.id, thread);
+			commentaryThreadIds.set(`${file.path}\0${entry.id}`, thread.id);
+		}
+	}
+	const seededCount = threads.size;
 
 	const publicThread = (thread) => ({ ...thread, turns: thread.turns.map((turn) => ({ ...turn })) });
 	const lastAuthor = (thread) => thread.turns[thread.turns.length - 1]?.author;
@@ -47,8 +66,8 @@ export function createThreadStore(review, limits = THREAD_LIMITS) {
 	}
 
 	function createThread(fields, turns) {
-		if (threads.size >= limits.maxThreads) return { error: "too-many-threads" };
-		const thread = { id: `${review.id.slice(0, 8)}-${storeSalt}-t${++counter}`, status: "open", piProposedResolve: false, ...fields, turns };
+		if (threads.size - seededCount >= limits.maxThreads) return { error: "too-many-threads" };
+		const thread = { id: mintId(), status: "open", piProposedResolve: false, ...fields, turns };
 		threads.set(thread.id, thread);
 		return { thread: publicThread(thread), created: true };
 	}
@@ -79,26 +98,13 @@ export function createThreadStore(review, limits = THREAD_LIMITS) {
 			return createThread({ source: "selection", ...anchor }, [{ author: "user", body, ts }]);
 		}
 		if (value.source === "commentary") {
-			const file = typeof value.file === "string" ? files.get(value.file) : undefined;
-			const commentary = file?.commentary.find((entry) => entry.id === value.commentaryId);
-			if (!commentary) return { error: "invalid" };
-			const key = `${value.file}\0${value.commentaryId}`;
-			const existing = threads.get(commentaryThreadIds.get(key));
-			if (existing) return appendTurn(existing, "user", body, ts);
-			const result = createThread(
-				{ source: "commentary", file: value.file, commentaryId: value.commentaryId },
-				[{ author: "pi", body: commentary.body, ts }, { author: "user", body, ts }],
-			);
-			if (result.thread) commentaryThreadIds.set(key, result.thread.id);
-			return result;
+			const existing = typeof value.file === "string" ? threads.get(commentaryThreadIds.get(`${value.file}\0${value.commentaryId}`)) : undefined;
+			if (!existing) return { error: "invalid" };
+			return appendTurn(existing, "user", body, ts);
 		}
 		if (value.source === "overview") {
 			if (!review.overview) return { error: "invalid" };
-			const existing = threads.get(overviewThreadId);
-			if (existing) return appendTurn(existing, "user", body, ts);
-			const result = createThread({ source: "overview" }, [{ author: "user", body, ts }]);
-			if (result.thread) overviewThreadId = result.thread.id;
-			return result;
+			return createThread({ source: "overview" }, [{ author: "user", body, ts }]);
 		}
 		return { error: "invalid" };
 	}

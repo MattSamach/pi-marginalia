@@ -340,7 +340,7 @@ function normalizeOverview(overview) {
 	const reviewFocus = overview.reviewFocus === undefined ? undefined : conciseString(overview.reviewFocus, "Review overview focus");
 	const risks = overview.risks === undefined ? undefined : conciseString(overview.risks, "Review overview risks");
 	const words = [intent, ...changes, ...validation, reviewFocus, risks].filter(Boolean).join(" ").trim().split(/\s+/).filter(Boolean).length;
-	if (words > 100) throw new Error("Review overview must contain at most 100 words.");
+	if (words > 150) throw new Error("Review overview must contain at most 150 words.");
 	return { intent, changes, validation, ...(reviewFocus ? { reviewFocus } : {}), ...(risks ? { risks } : {}) };
 }
 

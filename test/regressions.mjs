@@ -6,9 +6,10 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import puppeteer from "puppeteer-core";
 import { applyReviewManifest, collectReviewSnapshot, parseUnifiedPatch, REVIEW_LIMITS } from "../shared/git-review.js";
-import { formatCodeReviewFeedbackXml, parseCodeReviewFeedback } from "../shared/feedback.js";
+import { formatReviewPassXml, formatThreadMessageXml } from "../shared/feedback.js";
 import { renderReviewHtml } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
+import { createThreadStore, THREAD_LIMITS } from "../shared/threads.js";
 
 const exec = promisify(execFile);
 const git = (cwd, ...args) => exec("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -117,29 +118,70 @@ try {
 	assert.equal(prioritizedCaps.files.find((file) => file.path === "untracked.txt")?.omitted, false, "Primary review files must receive rendering capacity before references.");
 	assert.equal(prioritizedCaps.files.find((file) => file.path === "unstaged.txt")?.omitted, true, "References should yield rendering capacity to primary review files regardless of manifest order.");
 
-	const feedback = {
-		overviewFeedback: "The direction looks right ]]> overall.",
-		comments: [{ file: "untracked.txt", side: "new", newStart: 1, newEnd: 2, highlight: "A ]]> marker", feedback: "Explain <this>." }],
-		replies: [{ file: "untracked.txt", commentaryId: "new-file", feedback: "Makes sense ]]> mostly." }],
-	};
-	assert.deepEqual(parseCodeReviewFeedback(feedback, ordered), feedback);
-	assert.deepEqual(parseCodeReviewFeedback({ overviewFeedback: "General note.", comments: [], replies: [] }, ordered), { overviewFeedback: "General note.", comments: [], replies: [] });
-	assert.equal(parseCodeReviewFeedback({ overviewFeedback: "General note.", comments: [], replies: [] }, { ...ordered, overview: undefined }), undefined, "Overview feedback requires a rendered overview.");
-	assert.equal(parseCodeReviewFeedback({ comments: [], replies: [{ file: "untracked.txt", commentaryId: "missing", feedback: "x" }] }, ordered), undefined);
-	assert.equal(parseCodeReviewFeedback({ comments: [{ ...feedback.comments[0], newStart: 999, newEnd: 999 }], replies: [] }, ordered), undefined, "Forged line anchors outside the frozen diff must be rejected.");
-	assert.equal(parseCodeReviewFeedback({ comments: Array.from({ length: 101 }, () => feedback.comments[0]), replies: [] }, ordered), undefined, "Feedback comment counts must be bounded.");
-	assert.equal(parseCodeReviewFeedback({ comments: [{ ...feedback.comments[0], feedback: "x".repeat(20_001) }], replies: [] }, ordered), undefined, "Feedback strings must be bounded.");
-	const xml = formatCodeReviewFeedbackXml(snapshot.id, false, feedback);
-	assert.match(xml, /^<code-review-feedback snapshot="[a-f0-9]{64}" stale="false">/);
-	assert.match(xml, /<overview-feedback>[\s\S]*direction looks right \]\]\]\]><!\[CDATA\[> overall/, "Overview feedback must be serialized safely.");
-	assert.match(xml, /A \]\]\]\]><!\[CDATA\[> marker/, "CDATA terminators must be split safely.");
-	assert.doesNotMatch(xml, /Why this exists/, "The feedback payload must not include agent commentary or the diff.");
+	const store = createThreadStore(ordered);
+	assert.equal(store.postUserTurn({ source: "selection", file: "untracked.txt", side: "new", newStart: 999, newEnd: 999, highlight: "x", body: "y" }).error, "invalid", "Forged line anchors outside the frozen diff must be rejected.");
+	assert.equal(store.postUserTurn({ source: "selection", file: "binary.dat", side: "new", newStart: 1, newEnd: 1, highlight: "x", body: "y" }).error, "invalid", "Binary files cannot host selection threads.");
+	assert.equal(store.postUserTurn({ source: "commentary", file: "untracked.txt", commentaryId: "missing", body: "y" }).error, "invalid", "Unknown commentary ids must be rejected.");
+	assert.equal(store.postUserTurn({ threadId: "forged", body: "y" }).error, "unknown-thread", "Forged thread ids must be rejected.");
+	assert.equal(store.postUserTurn({ source: "selection", file: "untracked.txt", side: "new", newStart: 1, newEnd: 2, highlight: "x", body: "y".repeat(20_001) }).error, "invalid", "Thread bodies must be bounded.");
+	const selectionPost = store.postUserTurn({ source: "selection", file: "untracked.txt", side: "new", newStart: 1, newEnd: 2, highlight: "A ]]> marker", body: "Explain <this>." });
+	assert.match(selectionPost.thread.id, /^[a-f0-9]{8}-[a-f0-9]{6}-t1$/, "Thread ids should be scoped to the snapshot and salted per store.");
+	assert.equal(selectionPost.thread.turns.length, 1);
+	assert.equal(store.postUserTurn({ threadId: selectionPost.thread.id, body: "More detail." }).thread.turns.length, 2, "Reviewer replies append to the thread.");
+	const commentaryPost = store.postUserTurn({ source: "commentary", file: "untracked.txt", commentaryId: "new-file", body: "Why not generate this?" });
+	assert.deepEqual(commentaryPost.thread.turns.map((turn) => turn.author), ["pi", "user"], "Commentary threads open with Pi's commentary as the first turn.");
+	assert.equal(store.postUserTurn({ source: "commentary", file: "untracked.txt", commentaryId: "new-file", body: "One more question." }).thread.id, commentaryPost.thread.id, "Commentary replies must join the existing thread.");
+	const overviewPost = store.postUserTurn({ source: "overview", body: "The direction looks right ]]> overall." });
+	assert.equal(store.postUserTurn({ source: "overview", body: "Second overview note." }).thread.id, overviewPost.thread.id, "Overview feedback shares one thread.");
+	assert.equal(createThreadStore({ ...ordered, overview: undefined }).postUserTurn({ source: "overview", body: "x" }).error, "invalid", "Overview threads require a rendered overview.");
+	assert.equal(store.postPiReply(selectionPost.thread.id, "Because it is clearer.", true).piProposedResolve, true, "Pi replies may propose resolution.");
+	assert.equal(store.postPiReply("missing", "x", false), undefined, "Pi replies to unknown threads must be rejected.");
+	assert.deepEqual(store.summary(), { open: 3, awaitingUser: 1, awaitingPi: 2, resolved: 0 });
+	const resolvedThread = store.setResolved(selectionPost.thread.id, true);
+	assert.equal(resolvedThread.status, "resolved");
+	assert.equal(resolvedThread.piProposedResolve, false, "Resolution clears the pending proposal.");
+	assert.equal(store.setResolved("missing", true), undefined);
+	assert.equal(store.postUserTurn({ threadId: selectionPost.thread.id, body: "Actually, one more thing." }).thread.status, "open", "A reviewer reply reopens a resolved thread.");
+	const cramped = createThreadStore(ordered, { ...THREAD_LIMITS, maxThreads: 1 });
+	cramped.postUserTurn({ source: "overview", body: "first" });
+	assert.equal(cramped.postUserTurn({ source: "selection", file: "untracked.txt", side: "new", newStart: 1, newEnd: 1, highlight: "x", body: "y" }).error, "too-many-threads", "Thread counts must be bounded.");
+	const shallow = createThreadStore(ordered, { ...THREAD_LIMITS, maxTurnsPerThread: 1 });
+	const shallowThread = shallow.postUserTurn({ source: "overview", body: "only" }).thread;
+	assert.equal(shallow.postUserTurn({ threadId: shallowThread.id, body: "again" }).error, "thread-full", "Turn counts must be bounded.");
+	assert.notEqual(
+		createThreadStore(ordered).postUserTurn({ source: "overview", body: "x" }).thread.id,
+		createThreadStore(ordered).postUserTurn({ source: "overview", body: "x" }).thread.id,
+		"Independent stores over one snapshot must mint globally distinct thread ids.",
+	);
+	const lateStore = createThreadStore(ordered);
+	const lateThread = lateStore.postUserTurn({ source: "overview", body: "resolve me" }).thread;
+	lateStore.setResolved(lateThread.id, true);
+	const lateReply = lateStore.postPiReply(lateThread.id, "Late addendum.", true);
+	assert.equal(lateReply.status, "resolved", "Pi replies must not reopen resolved threads.");
+	assert.equal(lateReply.piProposedResolve, false, "Resolution proposals do not apply to resolved threads.");
+	assert.deepEqual(lateStore.summary(), { open: 0, awaitingUser: 0, awaitingPi: 0, resolved: 1 });
+
+	const selectionThread = store.getThread(selectionPost.thread.id);
+	const threadXml = formatThreadMessageXml(ordered, selectionThread, selectionThread.turns[selectionThread.turns.length - 1]);
+	assert.match(threadXml, /^<code-review-thread snapshot="[a-f0-9]{64}" thread="[a-f0-9]{8}-[a-f0-9]{6}-t1" kind="selection" status="open" file="untracked.txt" side="new" new-start="1" new-end="2">/);
+	assert.match(threadXml, /A \]\]\]\]><!\[CDATA\[> marker/, "CDATA terminators must be split safely.");
+	assert.match(threadXml, /<message author="user"><!\[CDATA\[Actually, one more thing\.\]\]><\/message>/);
+	const passXml = formatReviewPassXml(ordered, store.list(), store.summary(), false, "Note ]]> here");
+	assert.match(passXml, /^<code-review-pass snapshot="[a-f0-9]{64}" stale="false" open="3" awaiting-user="0" awaiting-pi="3" resolved="0">/);
+	assert.match(passXml, /<note><!\[CDATA\[Note \]\]\]\]><!\[CDATA\[> here\]\]><\/note>/, "Finish notes must be serialized safely.");
+	assert.match(passXml, /<open-thread thread="[a-f0-9]{8}-[a-f0-9]{6}-t2" kind="commentary" status="open" file="untracked.txt" commentary-id="new-file" last-author="user">/);
+	assert.doesNotMatch(passXml, /Why this exists/, "Pass summaries carry only the last message of each open thread.");
 	const html = renderReviewHtml(ordered, "safe-nonce");
 	assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/, "Manifest text must be escaped.");
 	assert.match(html, /Review this first &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 	assert.match(html, /data-review-overview/, "Agent-guided reviews should begin with an overview page.");
 	assert.match(html, /data-overview-feedback/, "The overview should accept general change-set feedback.");
-	assert.match(html, /<details class="reference-files"><summary>Reference files \(3\)<\/summary>/, "Reference files should be grouped in a collapsed sidebar section.");
+	assert.match(html, /data-finish/, "The topbar should expose the finish-pass action.");
+	assert.match(html, /data-inbox/, "The topbar should expose the awaiting-you inbox strip.");
+	assert.match(html, /data-selection-threads/, "Each file should host selection comment threads.");
+	assert.match(html, /data-commentary-thread="new-file"/, "Each commentary card should host its live thread.");
+	assert.match(html, /<details class="reference-files"><summary>Reference files \(3\)/, "Reference files should be grouped in a collapsed sidebar section.");
+	assert.match(html, /data-reference-unread/, "The reference group summary should carry an awaiting-you badge.");
 	assert.match(html, /data-path="unstaged\.txt" data-review-mode="reference"/, "Reference classification should remain visible on the rendered file.");
 	assert.match(html, /script nonce="safe-nonce"/);
 	const plainReview = applyReviewManifest(snapshot, { files: [] });
@@ -147,45 +189,115 @@ try {
 	const firstPlainReviewIndex = plainReview.files.findIndex((file) => file.reviewMode === "review");
 	assert.doesNotMatch(plainHtml, /<section class="review-overview|<button[^>]+data-overview-nav/, "The commentary-free slash command should continue to open directly on the diff.");
 	assert.match(plainHtml, new RegExp(`class="review-file active"[^>]*data-review-file="${firstPlainReviewIndex}"`), "A review without an overview should show its first primary review file initially.");
-	assert.match(plainHtml, /<details class="reference-files"><summary>Reference files \(2\)<\/summary>/, "Commentary-free reviews should group binary files as references automatically.");
+	assert.match(plainHtml, /<details class="reference-files"><summary>Reference files \(2\)/, "Commentary-free reviews should group binary files as references automatically.");
 
-	let received;
-	const server = await createCodeReviewServer(ordered, { onFeedback: async (value) => { received = value; return { stale: false }; } });
+	const posts = [];
+	const passes = [];
+	let failNextPost = false;
+	const server = await createCodeReviewServer(ordered, {
+		onThreadPost: async (thread, turn) => {
+			if (failNextPost) {
+				failNextPost = false;
+				throw new Error("delivery boom");
+			}
+			posts.push({ thread, turn });
+		},
+		onFinishPass: async (note, threadList, summary) => { passes.push({ note, threadList, summary }); return { stale: false }; },
+	});
 	try {
 		const origin = new URL(server.url).origin;
 		assert.equal((await fetch(origin)).status, 403, "Unauthenticated review requests should be rejected.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_events__`)).status, 403, "Unauthenticated event streams must be rejected.");
 		const bootstrap = await fetch(server.url, { redirect: "manual" });
 		assert.equal(bootstrap.status, 302);
 		assert.equal(bootstrap.headers.get("location"), "/", "Bootstrap should remove the token from the address bar.");
 		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
 		assert.match(bootstrap.headers.get("set-cookie") ?? "", /HttpOnly; SameSite=Strict/);
+		assert.equal((await fetch(server.url, { redirect: "manual" })).status, 403, "The bootstrap token must be single-use.");
+		assert.equal((await fetch(server.url, { redirect: "manual", headers: { cookie } })).status, 302, "Authenticated visits may still strip the token from the URL.");
 		const pageResponse = await fetch(origin, { headers: { cookie } });
 		const pageBody = await pageResponse.text();
 		assert.equal(pageResponse.status, 200);
 		assert.match(pageResponse.headers.get("content-security-policy") ?? "", /script-src 'nonce-/);
 		assert.ok(!pageBody.includes(new URL(server.url).searchParams.get("token")), "Bootstrap token must not be embedded in served HTML.");
-		const endpoint = `${origin}/__pi_code_review_feedback__`;
-		assert.equal((await fetch(endpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin: "https://example.com" }, body: JSON.stringify(feedback) })).status, 403);
-		assert.equal((await fetch(endpoint, { method: "POST", headers: { cookie, "content-type": "text/plain", origin }, body: "{}" })).status, 415);
-		assert.equal((await fetch(endpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ comments: [], replies: [] }) })).status, 400);
-		assert.equal((await fetch(endpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ padding: "x".repeat(256 * 1024), comments: [], replies: [] }) })).status, 413, "Feedback request bodies must be bounded.");
-		const accepted = await fetch(endpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify(feedback) });
-		assert.equal(accepted.status, 200);
-		assert.deepEqual(received, feedback);
-		assert.equal((await fetch(endpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify(feedback) })).status, 409, "Static v1 should accept only one feedback batch.");
+		const postEndpoint = `${origin}/__pi_code_review_post__`;
+		const validPost = { source: "selection", file: "untracked.txt", side: "new", newStart: 1, newEnd: 2, highlight: "A marker", body: "Explain this line." };
+		assert.equal((await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin: "https://example.com" }, body: JSON.stringify(validPost) })).status, 403, "Cross-origin thread posts must be rejected.");
+		assert.equal((await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "text/plain", origin }, body: "{}" })).status, 415);
+		assert.equal((await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ padding: "x".repeat(256 * 1024), ...validPost }) })).status, 413, "Thread post bodies must be bounded.");
+		assert.equal((await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: "forged", body: "x" }) })).status, 404, "Forged thread ids must be rejected.");
+		assert.equal((await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ ...validPost, newStart: 999, newEnd: 999 }) })).status, 400, "Forged anchors must be rejected.");
+		const acceptedResponse = await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify(validPost) });
+		assert.equal(acceptedResponse.status, 200);
+		const accepted = await acceptedResponse.json();
+		assert.equal(posts.length, 1, "Each reviewer post must be delivered to Pi exactly once.");
+		assert.equal(posts[0].thread.id, accepted.thread.id);
+		assert.equal(posts[0].turn.body, "Explain this line.");
+
+		const eventsResponse = await fetch(`${origin}/__pi_code_review_events__`, { headers: { cookie } });
+		assert.equal(eventsResponse.status, 200);
+		assert.match(eventsResponse.headers.get("content-type") ?? "", /text\/event-stream/);
+		const reader = eventsResponse.body.getReader();
+		const decoder = new TextDecoder();
+		let sseBuffer = "";
+		const readUntil = async (marker) => {
+			const deadline = Date.now() + 5_000;
+			while (!sseBuffer.includes(marker)) {
+				if (Date.now() > deadline) throw new Error(`Timed out waiting for SSE marker: ${marker}`);
+				const { value, done } = await reader.read();
+				if (done) throw new Error("SSE stream ended early.");
+				sseBuffer += decoder.decode(value, { stream: true });
+			}
+		};
+		await readUntil("event: init");
+		assert.ok(sseBuffer.includes(accepted.thread.id), "The SSE init event must carry existing threads.");
+		const piThread = server.postPiReply(accepted.thread.id, "Renaming in the next pass.", true);
+		assert.equal(piThread.piProposedResolve, true);
+		assert.equal(server.postPiReply("missing", "x", false), undefined, "Pi replies to unknown threads must be rejected.");
+		await readUntil('"author":"pi"');
+		await reader.cancel();
+
+		const resolveEndpoint = `${origin}/__pi_code_review_resolve__`;
+		assert.equal((await fetch(resolveEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: "forged", resolved: true }) })).status, 404);
+		assert.equal((await fetch(resolveEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: accepted.thread.id, resolved: "yes" }) })).status, 400, "Resolution must be an explicit boolean.");
+		const resolveResponse = await fetch(resolveEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: accepted.thread.id, resolved: true }) });
+		assert.equal(resolveResponse.status, 200);
+		assert.equal((await resolveResponse.json()).thread.status, "resolved");
+		const reopenResponse = await fetch(resolveEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: accepted.thread.id, resolved: false }) });
+		assert.equal((await reopenResponse.json()).thread.status, "open", "Reviewers can reopen resolved threads.");
+		assert.equal((await (await fetch(resolveEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: accepted.thread.id, resolved: true }) })).json()).thread.status, "resolved");
+
+		failNextPost = true;
+		const failedDelivery = await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ source: "commentary", file: "untracked.txt", commentaryId: "new-file", body: "Ping" }) });
+		assert.equal(failedDelivery.status, 200, "Failed Pi delivery must not look like a rejected post.");
+		const failedDeliveryJson = await failedDelivery.json();
+		assert.equal(failedDeliveryJson.deliveryFailed, true, "Failed Pi delivery must be reported explicitly.");
+		assert.equal(server.getThread(failedDeliveryJson.thread.id).turns.length, 2, "The turn must remain stored when delivery fails.");
+		assert.equal(posts.length, 1, "Failed delivery must not record a Pi message.");
+
+		const finishEndpoint = `${origin}/__pi_code_review_finish__`;
+		assert.equal((await fetch(finishEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin: "https://example.com" }, body: "{}" })).status, 403);
+		assert.equal((await fetch(finishEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ note: "" }) })).status, 400, "Blank finish notes must be rejected.");
+		const finishResponse = await fetch(finishEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ note: "Done for now." }) });
+		assert.equal(finishResponse.status, 200);
+		assert.deepEqual(await finishResponse.json(), { stale: false });
+		assert.equal(passes.length, 1);
+		assert.equal(passes[0].note, "Done for now.");
+		assert.deepEqual(passes[0].summary, { open: 1, awaitingUser: 0, awaitingPi: 1, resolved: 1 });
 	} finally {
 		await server.close();
 	}
 
-	let releaseConcurrentFeedback;
-	let concurrentCallbackCalls = 0;
-	let markConcurrentCallbackEntered;
-	const concurrentCallbackEntered = new Promise((resolvePromise) => { markConcurrentCallbackEntered = resolvePromise; });
+	let releaseConcurrentFinish;
+	let concurrentFinishCalls = 0;
+	let markConcurrentFinishEntered;
+	const concurrentFinishEntered = new Promise((resolvePromise) => { markConcurrentFinishEntered = resolvePromise; });
 	const concurrentServer = await createCodeReviewServer(ordered, {
-		onFeedback: async () => {
-			concurrentCallbackCalls++;
-			markConcurrentCallbackEntered();
-			await new Promise((resolvePromise) => { releaseConcurrentFeedback = resolvePromise; });
+		onThreadPost: async () => {},
+		onFinishPass: async () => {
+			concurrentFinishCalls++;
+			markConcurrentFinishEntered();
+			await new Promise((resolvePromise) => { releaseConcurrentFinish = resolvePromise; });
 			return { stale: false };
 		},
 	});
@@ -193,17 +305,39 @@ try {
 		const origin = new URL(concurrentServer.url).origin;
 		const bootstrap = await fetch(concurrentServer.url, { redirect: "manual" });
 		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
-		const request = { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify(feedback) };
-		const firstSubmission = fetch(`${origin}/__pi_code_review_feedback__`, request);
-		await concurrentCallbackEntered;
-		const secondSubmission = await fetch(`${origin}/__pi_code_review_feedback__`, request);
-		assert.equal(secondSubmission.status, 409, "A concurrent feedback submission must be rejected while the first callback is pending.");
-		releaseConcurrentFeedback();
-		assert.equal((await firstSubmission).status, 200);
-		assert.equal(concurrentCallbackCalls, 1, "Concurrent POSTs must invoke Pi feedback delivery exactly once.");
+		const request = { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: "{}" };
+		const firstFinish = fetch(`${origin}/__pi_code_review_finish__`, request);
+		await concurrentFinishEntered;
+		const secondFinish = await fetch(`${origin}/__pi_code_review_finish__`, request);
+		assert.equal(secondFinish.status, 409, "A concurrent finish must be rejected while the first handoff is pending.");
+		releaseConcurrentFinish();
+		assert.equal((await firstFinish).status, 200);
+		assert.equal(concurrentFinishCalls, 1, "Concurrent finish requests must invoke the handoff exactly once.");
 	} finally {
-		releaseConcurrentFeedback?.();
+		releaseConcurrentFinish?.();
 		await concurrentServer.close();
+	}
+
+	let failFinish = true;
+	const flakyServer = await createCodeReviewServer(ordered, {
+		onThreadPost: async () => {},
+		onFinishPass: async () => {
+			if (failFinish) {
+				failFinish = false;
+				throw new Error("finish boom");
+			}
+			return { stale: false };
+		},
+	});
+	try {
+		const origin = new URL(flakyServer.url).origin;
+		const bootstrap = await fetch(flakyServer.url, { redirect: "manual" });
+		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
+		const request = { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: "{}" };
+		assert.equal((await fetch(`${origin}/__pi_code_review_finish__`, request)).status, 500, "A failed handoff must surface an error.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_finish__`, request)).status, 200, "A failed handoff must not lock future finishes.");
+	} finally {
+		await flakyServer.close();
 	}
 
 	const browserCandidates = [process.env.PUPPETEER_EXECUTABLE_PATH, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/usr/bin/google-chrome", "/usr/bin/chromium"].filter(Boolean);
@@ -212,15 +346,19 @@ try {
 		try { await access(candidate); executablePath = candidate; break; } catch {}
 	}
 	if (executablePath) {
-		let browserFeedback;
-		const browserServer = await createCodeReviewServer(ordered, { onFeedback: async (value) => { browserFeedback = value; return { stale: false }; } });
+		const browserPosts = [];
+		let browserPass;
+		const browserServer = await createCodeReviewServer(ordered, {
+			onThreadPost: async (thread, turn) => { browserPosts.push({ thread, turn }); },
+			onFinishPass: async (note, threadList, summary) => { browserPass = { note, threadList, summary }; return { stale: false }; },
+		});
 		const browser = await puppeteer.launch({ headless: true, executablePath, args: ["--no-sandbox"] });
 		try {
 			const page = await browser.newPage();
 			await page.goto(browserServer.url, { waitUntil: "domcontentloaded" });
 			assert.equal(await page.$eval('[data-review-overview]', (section) => section.hidden), false, "Agent-guided reviews should open on the overview.");
 			assert.equal(await page.$eval('details.reference-files', (details) => details.open), false, "Reference files should start collapsed.");
-			await page.type('[data-overview-feedback]', "Keep the introduction quick.");
+			assert.equal(await page.$eval('[data-thread-tally]', (section) => section.hidden), true, "The thread tally should stay hidden before any thread exists.");
 			await page.click('details.reference-files > summary');
 			const referenceIndex = await page.$eval('details.reference-files [data-file-nav]', (item) => Number(item.dataset.fileNav));
 			await page.click(`[data-file-nav="${referenceIndex}"]`);
@@ -241,10 +379,47 @@ try {
 			await page.$eval('[data-review-file="0"] [data-selection-feedback]', (textarea) => {
 				textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, cancelable: true }));
 			});
-			assert.equal(await page.$eval('[data-review-file="0"] [data-selection-composer]', (composer) => composer.hidden), true, "Command+Enter should add the active diff comment without submitting the review.");
-			assert.equal(await page.$$eval('[data-review-file="0"] .user-comment', (comments) => comments.length), 1);
+			await page.waitForFunction(() => document.querySelector('[data-review-file="0"] [data-selection-threads] .thread-card'));
+			assert.equal(await page.$eval('[data-review-file="0"] [data-selection-composer]', (composer) => composer.hidden), true, "Command+Enter should post the comment thread without finishing the pass.");
 			assert.equal(await page.evaluate(() => CSS.highlights.get("pi-code-review-feedback")?.size), 1);
+			assert.equal(browserPosts.length, 1, "Posting a selection comment must deliver one thread message to Pi.");
+			assert.equal(browserPosts[0].thread.file, "untracked.txt");
+			assert.equal(browserPosts[0].thread.side, "new");
+			assert.equal(browserPosts[0].turn.body, "Please rename this.");
+			const liveThreadId = browserPosts[0].thread.id;
+			browserServer.postPiReply(liveThreadId, "Because generated names collide.", true);
+			await page.waitForFunction(() => document.querySelector('.thread-card.awaiting .thread-turn.turn-pi'));
+			assert.equal(await page.$eval('[data-inbox]', (strip) => strip.hidden), false, "Pi replies must surface the awaiting-you inbox strip.");
+			assert.match(await page.$eval('[data-inbox]', (strip) => strip.textContent), /^1 awaiting you/);
+			assert.equal(await page.$eval('[data-file-nav="0"] [data-unread-badge]', (badge) => badge.hidden), false, "Sidebar files must show awaiting-you thread counts.");
+			assert.equal(await page.$eval('[data-file-nav="0"] [data-unread-badge]', (badge) => badge.textContent), "1");
+			await page.click('[data-overview-nav]');
+			await page.keyboard.press("n");
+			await page.waitForFunction(() => document.querySelector('[data-review-file="0"]')?.hidden === false);
+			assert.ok(await page.$(`[data-thread-card="${liveThreadId}"].thread-flash`), "Pressing n must jump to the next thread awaiting the reviewer.");
+			await page.click('[data-thread-accept-resolve]');
+			await page.waitForFunction(() => document.querySelector('.thread-card.resolved'));
+			assert.equal(await page.$eval('[data-inbox]', (strip) => strip.hidden), true, "Resolving the last awaiting thread must clear the inbox strip.");
 			await page.type('[data-review-file="0"] [data-commentary-reply="new-file"]', "Why not generate this?");
+			await page.click('[data-commentary-post="new-file"]');
+			await page.waitForFunction(() => document.querySelector('[data-commentary-thread="new-file"] .thread-card'));
+			assert.equal(await page.$eval('[data-commentary-composer="new-file"]', (composer) => composer.hidden), true, "The commentary composer should collapse into its live thread.");
+			assert.doesNotMatch(await page.$eval('[data-commentary-thread="new-file"] .thread-card', (card) => card.textContent), /Why this exists/, "Commentary threads must not duplicate Pi's rendered note.");
+			const commentaryThreadId = browserPosts.find((post) => post.thread.source === "commentary").thread.id;
+			browserServer.postPiReply(commentaryThreadId, "It stays handwritten for clarity.", false);
+			await page.waitForFunction((id) => document.querySelector(`[data-thread-card="${id}"] .thread-turn.turn-pi`), {}, commentaryThreadId);
+			await page.type(`[data-thread-card="${commentaryThreadId}"] [data-thread-reply]`, "Good, keep it handwritten.");
+			await page.click(`[data-thread-card="${commentaryThreadId}"] [data-thread-send]`);
+			await page.waitForFunction((id) => document.querySelectorAll(`[data-thread-card="${id}"] .thread-turn`).length === 3, {}, commentaryThreadId);
+			assert.equal(await page.$eval(`[data-thread-card="${commentaryThreadId}"] [data-thread-reply]`, (textarea) => textarea.value), "", "Sending a thread reply must clear its draft.");
+			assert.equal(await page.$eval('[data-inbox]', (strip) => strip.hidden), true, "Replying to the awaiting thread must clear the inbox strip.");
+			await page.click('[data-overview-nav]');
+			await page.type('[data-overview-feedback]', "Keep the introduction quick.");
+			await page.click('[data-overview-post]');
+			await page.waitForFunction(() => document.querySelector('[data-overview-thread] .thread-card'));
+			assert.equal(await page.$eval('[data-thread-tally]', (section) => section.hidden), false, "The overview tally should appear once threads exist.");
+			assert.match(await page.$eval('[data-thread-tally]', (section) => section.textContent), /2 open.*2 awaiting Pi.*1 resolved/, "The tally must aggregate live thread states.");
+			await page.click('[data-file-nav="0"]');
 			await page.evaluate(() => {
 				const code = document.querySelectorAll('[data-review-file="0"] .diff-add .diff-code span')[1];
 				const range = document.createRange();
@@ -255,7 +430,6 @@ try {
 			});
 			await page.waitForFunction(() => document.querySelector('[data-review-file="0"] [data-selection-composer]')?.hidden === false);
 			await page.type('[data-review-file="0"] [data-selection-feedback]', "Unfinished second comment.");
-			assert.equal(await page.$eval("[data-submit]", (button) => button.disabled), true, "Submit must remain disabled while a selection comment draft is active.");
 			const secondReviewIndex = await page.$$eval('.file-sidebar > [data-file-nav]', (items) => Number(items[1].dataset.fileNav));
 			page.once("dialog", async (dialog) => { await dialog.dismiss(); });
 			await page.click(`[data-file-nav="${secondReviewIndex}"]`);
@@ -264,22 +438,40 @@ try {
 			await page.click(`[data-file-nav="${secondReviewIndex}"]`);
 			assert.equal(await page.$eval(`[data-review-file="${secondReviewIndex}"]`, (section) => section.hidden), false, "Confirming draft discard should allow explicit file navigation.");
 			assert.equal(await page.$eval(`[data-file-nav="${secondReviewIndex}"]`, (item) => item.classList.contains("active")), true, "Regrouped primary navigation should activate by file index rather than DOM position.");
-			await page.click('[data-file-nav="0"]');
-			await page.click("[data-submit]");
-			await page.waitForFunction(() => document.querySelector("[data-submit]")?.textContent === "Submitted");
-			assert.equal(browserFeedback.overviewFeedback, "Keep the introduction quick.");
-			assert.equal(browserFeedback.comments.length, 1);
-			assert.equal(browserFeedback.comments[0].file, "untracked.txt");
-			assert.equal(browserFeedback.comments[0].side, "new");
-			assert.equal(browserFeedback.replies[0].commentaryId, "new-file");
-			assert.equal(await page.$eval('[data-commentary-reply="new-file"]', (element) => element.disabled), true, "Submitted controls should lock.");
-			console.log("Headless browser feedback flow passed.");
+			page.once("dialog", async (dialog) => { await dialog.accept(); });
+			await page.click("[data-finish]");
+			await page.waitForFunction(() => document.querySelector('[data-global-status]')?.textContent.includes("Review pass sent"));
+			assert.ok(browserPass, "Finishing the pass must hand the summary to Pi.");
+			assert.deepEqual(browserPass.summary, { open: 2, awaitingUser: 0, awaitingPi: 2, resolved: 1 });
+			assert.equal(await page.$eval("[data-finish]", (button) => button.disabled), false, "Threads must stay live after a pass is handed to Pi.");
+
+			const plainServer = await createCodeReviewServer(plainReview, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+			try {
+				const plainPage = await browser.newPage();
+				await plainPage.goto(plainServer.url, { waitUntil: "domcontentloaded" });
+				assert.equal(await plainPage.$eval(".review-file.active", (section) => section.dataset.reviewMode), "review", "Overview-free reviews must open on a primary review file.");
+				await plainPage.evaluate(() => {
+					const code = document.querySelector(".review-file.active tr.diff-add .diff-code span, .review-file.active tr.diff-del .diff-code span, .review-file.active tr.diff-context .diff-code span");
+					const range = document.createRange();
+					range.selectNodeContents(code);
+					const selection = window.getSelection();
+					selection.removeAllRanges(); selection.addRange(range);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false);
+				await plainPage.click(".review-file.active [data-selection-cancel]");
+				assert.equal(await plainPage.$eval(".review-file.active [data-selection-composer]", (composer) => composer.hidden), true, "Cancel must hide the visible file's composer even when file 0 is a reference.");
+				await plainPage.close();
+			} finally {
+				await plainServer.close();
+			}
+			console.log("Headless browser live-thread flow passed.");
 		} finally {
 			await browser.close();
 			await browserServer.close();
 		}
 	} else {
-		console.log("Headless browser feedback flow skipped: Chrome/Chromium not found.");
+		console.log("Headless browser live-thread flow skipped: Chrome/Chromium not found.");
 	}
 
 	const largeFixture = await mkdtemp(join(tmpdir(), "pi-code-review-large-"));

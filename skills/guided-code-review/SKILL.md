@@ -22,8 +22,9 @@ The complete worktree snapshot is reviewed, so it must represent only that logic
 5. Classify only genuinely low-value review artifacts as reference files using the rules below.
 6. Write the review overview and concise file guidance.
 7. Call `open_code_review` once with every changed file. The tool appends omitted changed files, but explicitly ordering and classifying all files produces the clearest walkthrough.
-8. Address actionable feedback, validate again, and open a fresh snapshot. Repeat until the unit is explicitly approved.
-9. Follow the approval and commit loop below, then continue to the next already-authorized implementation unit when one remains.
+8. Answer live comment threads promptly while the reviewer works, following the live-thread rules below.
+9. When the `code-review-pass` message arrives, address the open threads and actionable feedback, validate again, and open a fresh snapshot. Repeat until the unit is explicitly approved.
+10. Follow the approval and commit loop below, then continue to the next already-authorized implementation unit when one remains.
 
 ## Overview
 
@@ -58,6 +59,17 @@ Use this classification conservatively. Never mark handwritten source, tests, co
 - Prefer no anchored commentary over narrating obvious code.
 - Use stable, descriptive commentary IDs.
 - Ensure every line anchor is visible on the requested old/new diff side.
+
+## Live comment threads
+
+The review browser is conversational: reviewer comments arrive individually as `code-review-thread` messages, each carrying a thread id, anchor, and the new message.
+
+- Reply promptly to each thread with `reply_review_thread`, using that thread id. The reply renders inside the reviewer's browser in real time.
+- Answer every thread message inside exactly the thread that raised it. Thread messages can arrive mid-turn while you are working on something else, so always take the thread id from the incoming message rather than from whatever thread you were last discussing. When several messages arrive together, answer each with its own `reply_review_thread` call, and never post placeholder or cross-reference replies into other threads.
+- Keep thread replies concise and specific to the anchored code. Move broader design discussion into normal chat.
+- Set `resolves: true` only when the concern is fully addressed. This merely proposes resolution; only the reviewer's explicit resolve action closes a thread, and proposals must never be treated as resolutions.
+- **Never modify code in response to an individual thread.** Threads are discussion about the frozen snapshot; the worktree must stay byte-identical to it for the entire pass so the review stays truthful and every revision arrives as one stable, reviewable round. If a thread convinces you a change is needed, say so in the reply and queue it for the next round.
+- The `code-review-pass` message means the reviewer finished the pass. It lists open threads with their last messages. Only then apply the accumulated feedback as one batch, validate, and open a fresh snapshot for the next round.
 
 ## Approval and commit loop
 

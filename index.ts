@@ -2,8 +2,21 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type, type Static } from "typebox";
 import { spawn } from "node:child_process";
 import { applyReviewManifest, collectReviewSnapshot } from "./shared/git-review.js";
-import { formatCodeReviewFeedbackXml } from "./shared/feedback.js";
+import { formatReviewPassXml, formatThreadMessageXml } from "./shared/feedback.js";
 import { createCodeReviewServer } from "./shared/server.js";
+
+type ReviewThreadTurn = { author: "user" | "pi"; body: string; ts: number };
+type ReviewThread = {
+	id: string;
+	source: "selection" | "commentary" | "overview";
+	status: "open" | "resolved";
+	piProposedResolve: boolean;
+	file?: string;
+	commentaryId?: string;
+	highlight?: string;
+	turns: ReviewThreadTurn[];
+};
+type ReviewThreadSummary = { open: number; awaitingUser: number; awaitingPi: number; resolved: number };
 
 const commentarySchema = Type.Object({
 	id: Type.String({ minLength: 1, maxLength: 20_000, description: "Stable ID unique within this file; used to identify user replies." }),
@@ -31,6 +44,11 @@ const openCodeReviewSchema = Type.Object({
 	files: Type.Array(reviewFileSchema, { maxItems: 500, description: "Ordered changed files. Any changed files omitted here are appended automatically." }),
 });
 export type OpenCodeReviewInput = Static<typeof openCodeReviewSchema>;
+const replyReviewThreadSchema = Type.Object({
+	threadId: Type.String({ minLength: 1, maxLength: 200, description: "Thread id from a code-review-thread message." }),
+	body: Type.String({ minLength: 1, maxLength: 20_000, description: "Concise reply shown inside the reviewer's thread." }),
+	resolves: Type.Optional(Type.Boolean({ description: "Propose resolution; only the reviewer's resolve action closes the thread." })),
+});
 
 type ReviewServer = Awaited<ReturnType<typeof createCodeReviewServer>>;
 const CMUX_OPEN_TIMEOUT_MS = 2_500;
@@ -87,22 +105,32 @@ async function openBrowser(url: string): Promise<void> {
 export default function piCodeReview(pi: ExtensionAPI): void {
 	const servers = new Set<ReviewServer>();
 
+	const deliverToPi = (ctx: ExtensionContext, xml: string) => {
+		if (ctx.isIdle()) pi.sendUserMessage(xml);
+		else pi.sendUserMessage(xml, { deliverAs: "followUp" });
+	};
+
 	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal) => {
 		const snapshot = await collectReviewSnapshot(ctx.cwd, { signal });
 		const review = applyReviewManifest(snapshot, manifest);
+		for (const stale of [...servers].filter((existing) => existing.review.root === review.root)) {
+			servers.delete(stale);
+			await stale.close();
+		}
 		const server = await createCodeReviewServer(review, {
-			onFeedback: async (feedback: Parameters<typeof formatCodeReviewFeedbackXml>[2]) => {
-			let stale = true;
-			try {
-				stale = (await collectReviewSnapshot(review.root)).id !== review.id;
-			} catch {}
-			const xml = formatCodeReviewFeedbackXml(review.id, stale, feedback);
-			if (ctx.isIdle()) pi.sendUserMessage(xml);
-			else pi.sendUserMessage(xml, { deliverAs: "followUp" });
-			const overviewCount = feedback.overviewFeedback ? 1 : 0;
-			ctx.ui.notify(`Received ${overviewCount} overview comment(s), ${feedback.comments.length} diff comment(s), and ${feedback.replies.length} commentary reply/replies.`, "info");
-			return { stale };
-		},
+			onThreadPost: async (thread: ReviewThread, turn: ReviewThreadTurn) => {
+				deliverToPi(ctx, formatThreadMessageXml(review, thread, turn));
+				ctx.ui.notify(`Review thread ${thread.id}: new reviewer message.`, "info");
+			},
+			onFinishPass: async (note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
+				let stale = true;
+				try {
+					stale = (await collectReviewSnapshot(review.root)).id !== review.id;
+				} catch {}
+				deliverToPi(ctx, formatReviewPassXml(review, threads, summary, stale, note));
+				ctx.ui.notify(`Review pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s).`, "info");
+				return { stale };
+			},
 		});
 		servers.add(server);
 		try {
@@ -118,7 +146,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "open_code_review",
 		label: "Open Code Review",
-		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with an extremely concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered.",
+		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with an extremely concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered. The reviewer's browser posts live comment threads as code-review-thread messages; answer each with reply_review_thread, and treat the code-review-pass message as the signal that the pass is complete.",
 		promptSnippet: "Open an ordered, agent-commented browser review of current Git changes",
 		promptGuidelines: [
 			"Use open_code_review when the user asks to be walked through or interactively review the agent's current code changes.",
@@ -130,9 +158,37 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			onUpdate?.({ content: [{ type: "text", text: "Collecting a frozen review snapshot…" }], details: {} });
 			const { review, server } = await openReview(ctx, params, signal);
 			return {
-				content: [{ type: "text", text: `Opened code review ${review.id.slice(0, 12)} with ${review.files.length} changed file(s). The browser may now submit one static feedback batch.` }],
+				content: [{ type: "text", text: `Opened code review ${review.id.slice(0, 12)} with ${review.files.length} changed file(s). The browser posts live comment threads; reply with reply_review_thread and wait for the reviewer's code-review-pass message.` }],
 				details: { snapshot: review.id, files: review.files.map((file: { path: string }) => file.path), url: server.url.replace(/\?.*$/, "") },
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: "reply_review_thread",
+		label: "Reply Review Thread",
+		description: "Reply inside a live comment thread of the open browser code review. Use the thread id from the code-review-thread message. Set resolves=true to propose resolution; only the reviewer's explicit resolve action closes a thread.",
+		promptSnippet: "Reply to a live browser code-review comment thread",
+		promptGuidelines: [
+			"When a code-review-thread message arrives, answer promptly with reply_review_thread using that thread id.",
+			"Answer each thread message inside exactly the thread that raised it, taking the thread id from the incoming message; never post placeholder or cross-reference replies into other threads.",
+			"Keep review-thread replies concise and specific to the anchored code; use chat for broader discussion.",
+			"Set resolves=true only when the concern is fully addressed, and never treat a proposal as a resolution.",
+			"Never edit code in response to an individual review thread; keep the worktree identical to the open snapshot until the code-review-pass message arrives, then apply feedback as one batch and open a fresh review.",
+		],
+		parameters: replyReviewThreadSchema,
+		async execute(_toolCallId, params) {
+			for (const server of servers) {
+				if (!server.getThread(params.threadId)) continue;
+				const thread: ReviewThread | undefined = server.postPiReply(params.threadId, params.body, params.resolves === true);
+				if (!thread) throw new Error(`Reply to thread ${params.threadId} was rejected; the thread may have reached its turn limit.`);
+				const summary = server.threadSummary();
+				return {
+					content: [{ type: "text", text: `Replied in thread ${thread.id} (${thread.status}${thread.piProposedResolve ? ", resolution proposed" : ""}). Review now has ${summary.open} open and ${summary.resolved} resolved thread(s).` }],
+					details: { thread: thread.id, status: thread.status, piProposedResolve: thread.piProposedResolve },
+				};
+			}
+			throw new Error(`No open code review contains thread ${params.threadId}.`);
 		},
 	});
 

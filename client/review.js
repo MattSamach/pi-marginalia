@@ -9,6 +9,7 @@
   const EVENTS_PATH = '/__pi_code_review_events__';
   const FINISH_PATH = '/__pi_code_review_finish__';
   const RESUME_PATH = '/__pi_code_review_resume__';
+  const VIEWED_PATH = '/__pi_code_review_viewed__';
 
   const myRound = Number(document.body.dataset.round || 1);
   let currentRound = Number(document.body.dataset.currentRound || myRound);
@@ -40,6 +41,7 @@
 
   const applySessionState = () => {
     document.body.classList.toggle('locked', isLocked());
+    document.querySelectorAll('[data-viewed-toggle]').forEach((box) => { box.disabled = isSuperseded(); });
     if (phaseBanner && phaseBannerText && resumeButton && gotoCurrent) {
       if (isSuperseded()) {
         phaseBanner.hidden = false;
@@ -641,6 +643,40 @@
     });
   });
 
+  // Viewed checklist -----------------------------------------------------------
+  const viewedFiles = new Set([...document.querySelectorAll('[data-viewed-toggle]')].filter((box) => box.checked).map((box) => box.closest('[data-review-file]').dataset.path));
+  const viewedBar = document.querySelector('[data-viewed-bar]');
+  const viewedCountLabel = document.querySelector('[data-viewed-count]');
+  const applyViewed = () => {
+    fileSections.forEach((section) => {
+      const box = section.querySelector('[data-viewed-toggle]');
+      if (box) box.checked = viewedFiles.has(section.dataset.path);
+    });
+    document.querySelectorAll('[data-viewed-check]').forEach((mark) => { mark.hidden = !viewedFiles.has(mark.dataset.viewedCheck); });
+    if (viewedBar) viewedBar.style.width = (fileSections.length ? Math.round((viewedFiles.size / fileSections.length) * 100) : 0) + '%';
+    if (viewedCountLabel) viewedCountLabel.textContent = viewedFiles.size + ' / ' + fileSections.length + ' viewed';
+  };
+  const setViewed = async (path, viewed) => {
+    if (isSuperseded()) return;
+    if (viewed) viewedFiles.add(path);
+    else viewedFiles.delete(path);
+    applyViewed();
+    try {
+      await postJson(VIEWED_PATH, { round: myRound, file: path, viewed });
+    } catch (error) {
+      if (viewed) viewedFiles.delete(path);
+      else viewedFiles.add(path);
+      applyViewed();
+      setStatus(errorMessage(error), true);
+    }
+  };
+  document.querySelectorAll('[data-viewed-toggle]').forEach((box) => {
+    box.addEventListener('change', () => setViewed(box.closest('[data-review-file]').dataset.path, box.checked));
+  });
+  document.querySelector('[data-shortcuts-hint]')?.addEventListener('click', () => {
+    if (shortcutsOverlay) shortcutsOverlay.hidden = !shortcutsOverlay.hidden;
+  });
+
   // Navigation wiring ----------------------------------------------------------
   document.querySelector('[data-overview-nav]')?.addEventListener('click', () => {
     if (showingOverview) return;
@@ -709,6 +745,10 @@
     } else if (event.key === 'e') {
       event.preventDefault();
       resolveCurrent();
+    } else if (event.key === 'x') {
+      event.preventDefault();
+      const section = activeFile();
+      if (section) setViewed(section.dataset.path, !viewedFiles.has(section.dataset.path));
     } else if (event.key === '?') {
       event.preventDefault();
       if (shortcutsOverlay) shortcutsOverlay.hidden = !shortcutsOverlay.hidden;
@@ -749,6 +789,11 @@
     threads.clear();
     for (const thread of data.threads) threads.set(thread.id, thread);
     for (const thread of data.threads) renderThread(thread);
+    if (Array.isArray(data.viewedFiles)) {
+      viewedFiles.clear();
+      for (const path of data.viewedFiles) viewedFiles.add(path);
+      applyViewed();
+    }
     updateAggregates();
     applyDeepLink();
   });
@@ -762,6 +807,13 @@
     if (last?.author === 'pi' && (previous?.turns.length ?? 0) < thread.turns.length) {
       setStatus('Pi replied — press n to view.');
     }
+  });
+  events.addEventListener('viewed', (event) => {
+    const data = JSON.parse(event.data);
+    if (data.round !== myRound) return;
+    viewedFiles.clear();
+    for (const path of data.viewedFiles) viewedFiles.add(path);
+    applyViewed();
   });
   events.addEventListener('phase', (event) => {
     const data = JSON.parse(event.data);

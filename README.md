@@ -36,8 +36,9 @@ Everything that needs your attention is one uniform queue: every Pi commentary n
 5. Reply beneath any Pi commentary note to discuss it, or click its **Resolve** to settle it without messaging Pi.
 6. Pi's answers stream into each thread. The topbar counts everything awaiting you — unread notes and Pi replies alike; press `n` (or click the strip) to walk them. Sidebar badges count per file.
 7. Resolve threads yourself — Pi can only propose resolution. Replying to a resolved thread reopens it.
-8. Triage without the mouse: `Esc` leaves the text box (keeping your draft), `e` resolves the current thread or note, `n` continues, `Shift+n` steps backwards, `⇧⌘⏎` quiet-adds, and `?` shows the shortcuts guide.
-9. Click **Send round to Pi** to hand Pi one summary of the pass. It lists open threads you engaged with; your untouched notes are never echoed back to Pi.
+8. Triage without the mouse: `Esc` leaves the text box (keeping your draft), `e` resolves the current thread or note, `n` continues, `Shift+n` steps backwards, `⇧⌘⏎` quiet-adds, `x` marks the current file viewed, and `?` (or the header hint) shows the shortcuts guide.
+9. Track progress with the viewed checklist: every file has a **Viewed** checkbox (header or `x`), mirrored as a sidebar checkmark and progress bar. It is reviewer-side bookkeeping only — never sent to Pi — and stays available while Pi revises. A new round keeps a file's checkmark only when its diff is byte-identical to the previous round.
+10. Click **Send round to Pi** to hand Pi one summary of the pass. It lists open threads you engaged with; your untouched notes are never echoed back to Pi.
 
 While Pi is busy, posts queue and are delivered together the moment Pi settles, so a slow turn never blocks you; Pi then answers each queued thread in one pass.
 

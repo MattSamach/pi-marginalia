@@ -282,6 +282,10 @@ export async function collectReviewSnapshot(cwd, options = {}) {
 	for (const record of records) {
 		let binary = false;
 		let parsed;
+		// Full-content hash retained per file so later rounds can tell whether a
+		// diff truly changed even when its rendering (binary marker, truncated or
+		// omitted lines) would look identical.
+		let contentSha256;
 		if (record.status === "untracked") {
 			const absolutePath = resolve(root, record.path);
 			const fileStat = await lstat(absolutePath);
@@ -293,6 +297,7 @@ export async function collectReviewSnapshot(cwd, options = {}) {
 			binary = !isSymlink && (!fileStat.isFile() || looksBinary(data.sample));
 			const mode = isSymlink ? "120000" : (fileStat.mode & 0o111) ? "100755" : "100644";
 			fingerprint.update(`file\0${record.status}\0${record.path}\0${mode}\0`).update(Buffer.from(data.sha256, "hex"));
+			contentSha256 = data.sha256;
 			if (binary) parsed = { lines: [], truncated: false, patchBytes: data.totalBytes, totalDiffLines: 0, renderedBytes: 0 };
 			else {
 				const synthetic = makeUntrackedPatchPrefix(record.path, data, mode);
@@ -304,13 +309,17 @@ export async function collectReviewSnapshot(cwd, options = {}) {
 			const patchSample = patchData.sample.toString("utf8");
 			binary = /(?:^|\n)Binary files .* differ(?:\n|$)/.test(patchSample) || /(?:^|\n)GIT binary patch(?:\n|$)/.test(patchSample);
 			fingerprint.update(`file\0${record.statusCode}\0${record.oldPath ?? ""}\0${record.path}\0patch\0`).update(Buffer.from(patchData.sha256, "hex"));
+			contentSha256 = patchData.sha256;
 			if (binary) {
 				const worktree = await fingerprintWorktreePath(root, record.path, options.signal);
 				fingerprint.update(`\0worktree\0${worktree.kind}\0`).update(worktree.sha256 ? Buffer.from(worktree.sha256, "hex") : Buffer.alloc(0));
+				// The textual diff of a binary change is a constant marker; only the
+				// worktree hash tracks the actual content.
+				contentSha256 = `${patchData.sha256}:${worktree.kind}:${worktree.sha256}`;
 				parsed = { lines: [], truncated: false, patchBytes: patchData.totalBytes, totalDiffLines: 0, renderedBytes: 0 };
 			} else parsed = parseCollectedPatch(patchData, limits);
 		}
-		files.push({ ...record, binary, omitted: false, ...parsed });
+		files.push({ ...record, binary, omitted: false, contentSha256, ...parsed });
 	}
 	return { root, head, id: fingerprint.digest("hex"), files };
 }

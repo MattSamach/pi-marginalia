@@ -410,6 +410,14 @@ try {
 		assert.equal(failedEscalation.thread.queued, true, "A failed escalation requeues the backlog.");
 		assert.equal(server.getThread(quietOv.thread.id).queued, true);
 
+		const viewedEndpoint = `${origin}/__pi_code_review_viewed__`;
+		assert.equal((await fetch(viewedEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ file: "untracked.txt", viewed: "yes" }) })).status, 400, "Viewed must be an explicit boolean.");
+		assert.equal((await fetch(viewedEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ file: "missing.txt", viewed: true }) })).status, 404, "Viewed only tracks files in the snapshot.");
+		assert.equal((await fetch(viewedEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ round: 9, file: "untracked.txt", viewed: true }) })).status, 409, "Viewed rejects stale round pages.");
+		const viewedResponse = await (await fetch(viewedEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ round: 1, file: "untracked.txt", viewed: true }) })).json();
+		assert.deepEqual(viewedResponse.viewedFiles, ["untracked.txt"]);
+		assert.deepEqual(server.viewedFiles(), ["untracked.txt"]);
+
 		const finishEndpoint = `${origin}/__pi_code_review_finish__`;
 		assert.equal((await fetch(finishEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin: "https://example.com" }, body: "{}" })).status, 403);
 		assert.equal((await fetch(finishEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ note: "" }) })).status, 400, "Blank finish notes must be rejected.");
@@ -422,6 +430,7 @@ try {
 		assert.equal(posts[0].round, 1, "Thread posts must report their round.");
 		assert.deepEqual(passes[0].summary, { open: 2, awaitingUser: 0, awaitingPi: 2, resolved: 2 });
 		assert.equal(server.getThread(quietOv.thread.id).queued, false, "The pass delivers the requeued backlog in full.");
+		assert.equal((await fetch(viewedEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ round: 1, file: "unstaged.txt", viewed: true }) })).status, 200, "Viewed bookkeeping stays available while Pi revises.");
 	} finally {
 		await server.close();
 	}
@@ -527,7 +536,13 @@ try {
 		const secondRoundReview = { ...ordered, id: altId(ordered.id, 63) };
 		assert.equal(roundsServer.addRound(secondRoundReview, "0".repeat(64)).error, "unknown-round", "Chaining from an unknown round must be rejected.");
 		assert.deepEqual(roundsServer.addRound({ ...ordered }, ordered.id), { identical: true, round: 1 }, "An unchanged snapshot must not open a hollow round.");
-		assert.equal(roundsServer.addRound(secondRoundReview, ordered.id).round, 2);
+		const roundsViewedEndpoint = `${origin}/__pi_code_review_viewed__`;
+		assert.equal((await fetch(roundsViewedEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 1, file: "untracked.txt", viewed: true }) })).status, 200);
+		assert.equal((await fetch(roundsViewedEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 1, file: "binary.dat", viewed: true }) })).status, 200);
+		const binaryChangedFiles = secondRoundReview.files.map((file) => (file.path === "binary.dat" ? { ...file, contentSha256: "0".repeat(64) } : file));
+		assert.equal(roundsServer.addRound({ ...secondRoundReview, files: binaryChangedFiles }, ordered.id).round, 2);
+		assert.deepEqual(roundsServer.viewedFiles(), ["untracked.txt"], "Byte-identical diffs keep their checkmark; changed binary content (identical rendering) drops it; unviewed files stay unviewed.");
+		assert.equal((await fetch(roundsViewedEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 1, file: "untracked.txt", viewed: false }) })).status, 409, "Superseded round pages cannot mutate the checklist.");
 		await readUntil("event: round-ready");
 		assert.match(sseBuffer, /"previousRound":1/, "round-ready must name the superseded round for auto-navigation.");
 		assert.match(await (await fetch(origin, { headers: { cookie } })).text(), /<body data-round="2" data-current-round="2"/, "The root page advances to the new round.");
@@ -546,7 +561,8 @@ try {
 		assert.equal(roundsServer.addRound({ ...ordered, id: altId(ordered.id, 61) }, secondRoundReview.id).error, "invalid-responses", "Open threads demand responses before the next round opens.");
 		const eligibleIds = roundsServer.threads().filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user")).map((thread) => thread.id);
 		assert.equal(eligibleIds.length, 2);
-		const thirdRoundReview = { ...ordered, id: altId(ordered.id, 61) };
+		assert.equal((await fetch(roundsViewedEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 2, file: "unstaged.txt", viewed: true }) })).status, 200);
+		const thirdRoundReview = { ...ordered, id: altId(ordered.id, 61), files: ordered.files.map((file) => (file.path === "unstaged.txt" ? { ...file, lines: file.lines.slice(0, -1) } : file)) };
 		const carriedAdd = roundsServer.addRound(thirdRoundReview, secondRoundReview.id, eligibleIds.map((id, index) => ({ respondsTo: id, resolution: index === 0 ? "addressed" : "declined", body: `Response ${index}.`, ...(index === 0 ? { file: "untracked.txt", side: "new", startLine: 1 } : {}) })));
 		assert.equal(carriedAdd.round, 3, "Complete responses open the next round with carried threads.");
 		const carriedThread = roundsServer.getThread(eligibleIds[0]);
@@ -558,6 +574,7 @@ try {
 		const carriedReply = await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: eligibleIds[0], body: "Reviewer follow-up." }) });
 		assert.equal(carriedReply.status, 200, "Reviewer replies land in the carried copy, not the archived one.");
 		assert.match(await (await fetch(`${origin}/round/3`, { headers: { cookie } })).text(), /Resolved in earlier rounds/, "Round pages surface the prior-round archive.");
+		assert.deepEqual(roundsServer.viewedFiles(), ["untracked.txt"], "A changed diff drops its checkmark while identical files keep theirs.");
 
 		const deliveriesBefore = roundsDeliveries.length;
 		const quietPost = await (await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 3, source: "overview", body: "Quiet topic.", quiet: true }) })).json();
@@ -646,7 +663,7 @@ try {
 			await page.click(`[data-file-nav="${referenceIndex}"]`);
 			assert.equal(await page.$eval(`[data-file-nav="${referenceIndex}"]`, (item) => item.classList.contains("active")), true, "Clicking a regrouped reference file should activate its own navigation item.");
 			assert.equal(await page.$eval(`[data-review-file="${referenceIndex}"]`, (section) => section.dataset.reviewMode), "reference", "Reference files should remain directly inspectable.");
-			assert.equal(await page.$eval(`[data-review-file="${referenceIndex}"] .file-header > span`, (label) => label.textContent), "Reference file");
+			assert.equal(await page.$eval(`[data-review-file="${referenceIndex}"] .file-header-side > span`, (label) => label.textContent), "Reference file");
 			await page.click('[data-file-nav="0"]');
 			await page.evaluate(() => {
 				const code = document.querySelector('[data-review-file="0"] .diff-add .diff-code span');
@@ -878,6 +895,20 @@ try {
 				assert.equal(plainDeliveries.length, 2, "The mouse click must deliver immediately.");
 				assert.equal(plainDeliveries[1].length, 1, "A discarded quiet keystroke must not leak into a later mouse click.");
 				assert.equal(await plainPage.$(".thread-card.queued"), null, "Mouse clicks always post live.");
+				const plainTotal = plainReview.files.length;
+				assert.equal(await plainPage.$eval("[data-viewed-count]", (label) => label.textContent), `0 / ${plainTotal} viewed`);
+				await plainPage.keyboard.press("x");
+				await plainPage.waitForFunction((total) => document.querySelector("[data-viewed-count]").textContent === `1 / ${total} viewed`, {}, plainTotal);
+				assert.equal(await plainPage.$eval(".review-file.active [data-viewed-toggle]", (box) => box.checked), true, "x must check the active file's viewed box.");
+				const activePath = await plainPage.$eval(".review-file.active", (section) => section.dataset.path);
+				assert.equal(await plainPage.$eval(`[data-viewed-check="${activePath}"]`, (mark) => mark.hidden), false, "The sidebar must show the viewed check.");
+				for (let attempt = 0; attempt < 100 && plainServer.viewedFiles().length !== 1; attempt++) await new Promise((resolvePoll) => setTimeout(resolvePoll, 20));
+				assert.deepEqual(plainServer.viewedFiles(), [activePath], "The viewed toggle must persist server-side.");
+				await plainPage.keyboard.press("x");
+				await plainPage.waitForFunction((total) => document.querySelector("[data-viewed-count]").textContent === `0 / ${total} viewed`, {}, plainTotal);
+				await plainPage.click("[data-shortcuts-hint]");
+				assert.equal(await plainPage.$eval("[data-shortcuts-overlay]", (overlay) => overlay.hidden), false, "The header hint must open the shortcuts guide.");
+				await plainPage.keyboard.press("Escape");
 				await plainPage.close();
 			} finally {
 				await plainServer.close();

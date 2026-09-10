@@ -7,6 +7,7 @@ const POST_PATH = "/__pi_code_review_post__";
 const RESOLVE_PATH = "/__pi_code_review_resolve__";
 const FINISH_PATH = "/__pi_code_review_finish__";
 const RESUME_PATH = "/__pi_code_review_resume__";
+const VIEWED_PATH = "/__pi_code_review_viewed__";
 const EVENTS_PATH = "/__pi_code_review_events__";
 const SSE_HEARTBEAT_MS = 25_000;
 const SECURITY_HEADERS = {
@@ -77,7 +78,10 @@ export async function createCodeReviewServer(review, options) {
 	if (typeof options?.onThreadPost !== "function" || typeof options?.onFinishPass !== "function") {
 		throw new Error("Code review server requires onThreadPost and onFinishPass callbacks.");
 	}
-	const rounds = [{ number: 1, review, store: createThreadStore(review) }];
+	// Identity of a file's rendered diff; viewed checkmarks survive a new round
+	// only for files whose diff is byte-identical to the previous one.
+	const diffSignature = (file) => JSON.stringify([file.status, file.oldPath ?? null, file.binary === true, file.omitted === true, file.truncated === true, file.patchBytes ?? 0, file.contentSha256 ?? null, (file.lines ?? []).map((line) => [line.kind, line.content, line.oldLine ?? null, line.newLine ?? null])]);
+	const rounds = [{ number: 1, review, store: createThreadStore(review), viewed: new Set() }];
 	let phase = "reviewing";
 	const entryTokens = new Map();
 	const mintToken = () => {
@@ -149,7 +153,7 @@ export async function createCodeReviewServer(review, options) {
 			}))
 			.filter((entry) => entry.resolved.length > 0);
 		res.writeHead(200, htmlHeaders(nonce));
-		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive }));
+		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive, viewed: [...round.viewed] }));
 	};
 
 	const server = createServer(async (req, res) => {
@@ -194,7 +198,7 @@ export async function createCodeReviewServer(review, options) {
 				const requested = Number(requestUrl.searchParams.get("round") ?? current().number);
 				const round = rounds.find((candidate) => candidate.number === requested) ?? current();
 				res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "text/event-stream", Connection: "keep-alive" });
-				res.write(`event: init\ndata: ${JSON.stringify({ round: round.number, currentRound: current().number, phase, threads: round.store.list(), summary: round.store.summary() })}\n\n`);
+				res.write(`event: init\ndata: ${JSON.stringify({ round: round.number, currentRound: current().number, phase, threads: round.store.list(), summary: round.store.summary(), viewedFiles: [...round.viewed] })}\n\n`);
 				sseClients.add(res);
 				req.on("close", () => sseClients.delete(res));
 				return;
@@ -247,6 +251,31 @@ export async function createCodeReviewServer(review, options) {
 					}
 				}
 				writeJson(res, 200, { thread: responseThread, summary: round.store.summary(), ...(result.escalated === true && !deliveryFailed ? { escalated: true } : {}), ...(deliveryFailed ? { deliveryFailed: true } : {}) });
+				return;
+			}
+			if (req.method === "POST" && requestUrl.pathname === VIEWED_PATH) {
+				if (!guardMutation(req, res)) return;
+				const body = await readGuardedBody(req, res);
+				if (body === undefined) return;
+				if (!body || typeof body !== "object" || typeof body.file !== "string" || typeof body.viewed !== "boolean") {
+					writeText(res, 400, "Invalid viewed payload.");
+					return;
+				}
+				// Viewed is reviewer bookkeeping: allowed while Pi revises (unlike thread
+				// mutations), but only on the current round.
+				const round = current();
+				if (body.round !== undefined && body.round !== round.number) {
+					writeText(res, 409, `This page shows superseded round ${body.round}; the viewed checklist lives on round ${round.number}.`);
+					return;
+				}
+				if (!round.review.files.some((file) => file.path === body.file)) {
+					writeText(res, 404, "Unknown file.");
+					return;
+				}
+				if (body.viewed) round.viewed.add(body.file);
+				else round.viewed.delete(body.file);
+				broadcast("viewed", { round: round.number, viewedFiles: [...round.viewed] });
+				writeJson(res, 200, { viewedFiles: [...round.viewed] });
 				return;
 			}
 			if (req.method === "POST" && requestUrl.pathname === RESOLVE_PATH) {
@@ -354,6 +383,7 @@ export async function createCodeReviewServer(review, options) {
 		getThread: (threadId) => roundOfThread(threadId)?.store.getThread(threadId),
 		threads: () => current().store.list(),
 		threadSummary: () => current().store.summary(),
+		viewedFiles: () => [...current().viewed],
 		postPiReply(threadId, body, resolves) {
 			const round = current();
 			const thread = round.store.postPiReply(threadId, body, resolves);
@@ -385,7 +415,9 @@ export async function createCodeReviewServer(review, options) {
 			} catch (error) {
 				return { error: "invalid-responses", message: error instanceof Error ? error.message : String(error) };
 			}
-			const round = { number: active.number + 1, review: nextReview, store: createThreadStore(nextReview, THREAD_LIMITS, carried) };
+			const previousSignatures = new Map(active.review.files.map((file) => [file.path, diffSignature(file)]));
+			const viewed = new Set(nextReview.files.filter((file) => active.viewed.has(file.path) && previousSignatures.get(file.path) === diffSignature(file)).map((file) => file.path));
+			const round = { number: active.number + 1, review: nextReview, store: createThreadStore(nextReview, THREAD_LIMITS, carried), viewed };
 			rounds.push(round);
 			phase = "reviewing";
 			broadcast("round-ready", { round: round.number, previousRound: active.number });

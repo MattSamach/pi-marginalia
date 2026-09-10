@@ -45,6 +45,12 @@ While Pi is busy, posts queue and are delivered together the moment Pi settles, 
 
 A review session is an ordered sequence of immutable, fingerprinted rounds. Sending a round locks posting (reading and navigation stay free) behind a *“Pi is revising — round N+1 pending”* banner while Pi applies your feedback as one batch. When Pi reopens the review with `previousRoundId`, the revised changes arrive as the next round and your open tab advances to it automatically. Prior rounds stay reachable read-only through the topbar round switcher — threads included — and mutations against them are rejected on the server, not just hidden. If a new round never arrives (Pi crashed or was interrupted), the banner's **Resume reviewing this round** unlocks the current round; if Pi reopens with an unchanged snapshot, the current round unlocks instead of adding a hollow round.
 
+### Thread continuity
+
+Open threads never silently die between rounds. A next round is rejected unless it answers **every** open thread of the pass with exactly one response — `addressed`, `declined`, or `needs-discussion` — and Pi must explicitly designate where each carried conversation now lives: a validated line anchor in the new snapshot, a file-level placement, or (only when the anchor is truly gone) the overview's **Outdated threads** strip. There is no heuristic re-anchoring: placement is Pi's auditable claim, and your original highlight travels verbatim inside the carried card so the claim is checkable at a glance.
+
+Carried threads keep their ids and full conversation history, count as awaiting you, and work with `n`/`e` like any thread; `addressed` responses arrive as one-click resolution proposals. A thread at its 50-turn cap stops accepting replies; resolving it remains available. Each carried card's *from round N* label deep-links to the read-only origin round, scrolled to the thread at its original anchor. Threads you resolved earlier don't carry — they collect in a collapsed **Resolved in earlier rounds** archive on the overview. Your untouched Pi notes also don't carry; fresh rounds bring fresh notes.
+
 If files change during the review, the pass message is marked `stale="true"`. The page never remaps or refreshes annotations; iteration happens in whole rounds.
 
 ## Messages delivered to Pi
@@ -102,4 +108,4 @@ The browser regression runs when a compatible Chrome/Chromium executable is avai
 
 ## Scope
 
-Snapshots are immutable: the diff never refreshes or remaps in place, while comment threads stay live on top of it; iteration happens in whole rounds. Cross-round thread continuity (carrying open threads into the next round) and provider-hosted merge-request integrations are roadmap items rather than implicit behavior.
+Snapshots are immutable: the diff never refreshes or remaps in place, while comment threads stay live on top of it; iteration happens in whole rounds with open threads carried forward explicitly. Provider-hosted merge-request integrations are roadmap items rather than implicit behavior.

@@ -89,7 +89,7 @@
   const isAwaiting = (thread) => thread.status === 'open' && thread.turns.length > 0 && thread.turns[thread.turns.length - 1].author === 'pi';
   const sectionForPath = (path) => fileSections.find((section) => section.dataset.path === path);
   const sectionIndexOf = (thread) => {
-    if (thread.source === 'overview') return -1;
+    if (thread.source === 'overview' || !thread.file) return -1;
     const section = sectionForPath(thread.file);
     return section ? Number(section.dataset.reviewFile) : fileSections.length;
   };
@@ -282,6 +282,7 @@
 
   // Threads ------------------------------------------------------------------
   const threadHost = (thread) => {
+    if (thread.carried) return [...document.querySelectorAll('[data-carried-host]')].find((host) => host.dataset.carriedHost === thread.id);
     if (thread.source === 'overview') return document.querySelector('[data-overview-thread]');
     const section = sectionForPath(thread.file);
     if (!section) return undefined;
@@ -308,7 +309,7 @@
     const host = threadHost(thread);
     if (!host) return;
     let card = host.querySelector('[data-thread-card="' + thread.id + '"]');
-    if (thread.source === 'commentary' && thread.turns.length === 1 && thread.status === 'open') {
+    if (thread.source === 'commentary' && !thread.carried && thread.turns.length === 1 && thread.status === 'open') {
       // A note the reviewer has not engaged with yet: the commentary card itself
       // is the thread's visual, so show its composer instead of an empty card.
       if (card) card.remove();
@@ -351,7 +352,7 @@
       quote.textContent = thread.highlight;
       card.append(quote);
     }
-    const turns = thread.source === 'commentary' ? thread.turns.slice(1) : thread.turns;
+    const turns = thread.source === 'commentary' && !thread.carried ? thread.turns.slice(1) : thread.turns;
     for (const turn of turns) {
       const entry = document.createElement('div');
       entry.className = 'thread-turn turn-' + turn.author;
@@ -421,7 +422,7 @@
         try { textarea.setSelectionRange(previousSelection[0], previousSelection[1]); } catch {}
       }
     }
-    if (thread.source === 'commentary') {
+    if (thread.source === 'commentary' && !thread.carried) {
       const section = sectionForPath(thread.file);
       const origin = [...(section?.querySelectorAll('[data-commentary-composer]') ?? [])].find((element) => element.dataset.commentaryComposer === thread.commentaryId);
       if (origin) origin.hidden = true;
@@ -437,7 +438,7 @@
     const perFile = new Map();
     let overviewCount = 0;
     for (const thread of awaiting) {
-      if (thread.source === 'overview') overviewCount++;
+      if (thread.source === 'overview' || !thread.file) overviewCount++;
       else perFile.set(thread.file, (perFile.get(thread.file) ?? 0) + 1);
     }
     navButtons.forEach((button) => {
@@ -491,6 +492,11 @@
     void element.offsetWidth;
     element.classList.add('thread-flash');
   };
+  // Keeping the focused thread in the URL fragment makes browser Back/refresh
+  // land on the thread instead of the page default, and every focus shareable.
+  const rememberThreadLocation = (id) => {
+    try { window.history.replaceState(null, '', '#thread=' + id); } catch {}
+  };
   const navigateStep = (direction) => {
     const awaiting = orderedAwaiting();
     if (!awaiting.length) {
@@ -502,7 +508,8 @@
     else navIndex = navIndex < 0 ? awaiting.length - 1 : (navIndex - 1 + awaiting.length) % awaiting.length;
     const thread = awaiting[navIndex];
     currentThreadId = thread.id;
-    if (thread.source === 'overview') showOverview();
+    rememberThreadLocation(thread.id);
+    if (thread.source === 'overview' || !thread.file) showOverview();
     else {
       const index = sectionIndexOf(thread);
       if (index >= 0 && index < fileSections.length) showFile(index);
@@ -591,7 +598,7 @@
   // Anchored commentary jump ---------------------------------------------------
   document.querySelectorAll('.agent-note-anchor:not(:disabled)').forEach((button) => {
     button.addEventListener('click', () => {
-      const note = button.closest('.agent-note');
+      const note = button.closest('.agent-note, .carried-thread');
       const section = note.closest('[data-review-file]');
       const side = note.dataset.anchorSide;
       const line = note.dataset.anchorStart;
@@ -623,12 +630,16 @@
     const card = event.target.closest('[data-thread-card]');
     if (card) {
       currentThreadId = card.dataset.threadCard;
+      rememberThreadLocation(currentThreadId);
       return;
     }
     const note = event.target.closest('.agent-note');
     if (note) {
       const thread = commentaryThreadFor(note.closest('[data-review-file]').dataset.path, note.dataset.commentaryId);
-      if (thread) currentThreadId = thread.id;
+      if (thread) {
+        currentThreadId = thread.id;
+        rememberThreadLocation(currentThreadId);
+      }
     }
   });
   document.addEventListener('keydown', (event) => {
@@ -671,6 +682,24 @@
   });
 
   // Live updates ----------------------------------------------------------------
+  const focusHashThread = () => {
+    const match = /(?:^#|[#&])thread=([A-Za-z0-9-]+)/.exec(window.location.hash || '');
+    if (!match) return;
+    const target = document.querySelector('[data-thread-card="' + match[1] + '"]') || document.querySelector('[data-carried-thread="' + match[1] + '"]');
+    if (!target) return;
+    const section = target.closest('[data-review-file]');
+    if (section) showFile(Number(section.dataset.reviewFile));
+    else showOverview();
+    currentThreadId = match[1];
+    flashTarget(target);
+  };
+  window.addEventListener('hashchange', focusHashThread);
+  let deepLinked = false;
+  const applyDeepLink = () => {
+    if (deepLinked) return;
+    deepLinked = true;
+    focusHashThread();
+  };
   const events = new EventSource(EVENTS_PATH + '?round=' + myRound);
   events.addEventListener('init', (event) => {
     const data = JSON.parse(event.data);
@@ -687,6 +716,7 @@
     for (const thread of data.threads) threads.set(thread.id, thread);
     for (const thread of data.threads) renderThread(thread);
     updateAggregates();
+    applyDeepLink();
   });
   events.addEventListener('thread', (event) => {
     const data = JSON.parse(event.data);

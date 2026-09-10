@@ -44,6 +44,15 @@ const openCodeReviewSchema = Type.Object({
 	overview: reviewOverviewSchema,
 	files: Type.Array(reviewFileSchema, { maxItems: 500, description: "Ordered changed files. Any changed files omitted here are appended automatically." }),
 	previousRoundId: Type.Optional(Type.String({ minLength: 8, maxLength: 200, description: "Snapshot id of the current round of an open review session (the snapshot attribute of the code-review-pass message). Opens the revised changes as the next round in the same browser session instead of a fresh review." })),
+	threadResponses: Type.Optional(Type.Array(Type.Object({
+		respondsTo: Type.String({ minLength: 1, maxLength: 200, description: "Open thread id from the previous round's code-review-pass message." }),
+		resolution: Type.String({ pattern: "^(addressed|declined|needs-discussion)$", description: "Whether the concern was addressed in this round, declined with rationale, or needs further discussion." }),
+		body: Type.String({ minLength: 1, maxLength: 20_000, description: "Resolution commentary shown at the top of the carried thread." }),
+		file: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000, description: "File in this round where the reviewer should verify the response. Omit only when the anchor is truly gone." })),
+		side: Type.Optional(Type.String({ pattern: "^(old|new|both)$" })),
+		startLine: Type.Optional(Type.Integer({ minimum: 1 })),
+		endLine: Type.Optional(Type.Integer({ minimum: 1 })),
+	}), { maxItems: 400, description: "Required with previousRoundId when the previous round has open threads: exactly one response per open thread, carrying the conversation into this round at an explicitly designated anchor." })),
 });
 export type OpenCodeReviewInput = Static<typeof openCodeReviewSchema>;
 const replyReviewThreadSchema = Type.Object({
@@ -113,12 +122,16 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		const snapshot = await collectReviewSnapshot(ctx.cwd, { signal });
 		const review = applyReviewManifest(snapshot, manifest);
 		const previousRoundId = "previousRoundId" in manifest ? manifest.previousRoundId : undefined;
+		if (!previousRoundId && "threadResponses" in manifest && manifest.threadResponses !== undefined) {
+			throw new Error("threadResponses requires previousRoundId; fresh reviews have no threads to respond to.");
+		}
 		if (previousRoundId) {
 			const server = [...servers].find((candidate) => candidate.hasRound(previousRoundId));
 			if (!server) throw new Error(`No open review session contains round ${previousRoundId.slice(0, 12)}. Open a fresh review without previousRoundId.`);
-			const added = server.addRound(review, previousRoundId);
+			const added = server.addRound(review, previousRoundId, "threadResponses" in manifest ? manifest.threadResponses : undefined);
 			if (added.error === "superseded") throw new Error(`Round ${previousRoundId.slice(0, 12)} is already superseded; the current round is ${added.currentRoundId?.slice(0, 12)} (round ${added.currentRound}).`);
 			if (added.error === "wrong-root") throw new Error("The new snapshot belongs to a different repository than the open review session.");
+			if (added.error === "invalid-responses") throw new Error(`Thread responses are invalid: ${added.message}`);
 			if (added.error) throw new Error("Could not open the next review round.");
 			if (server.clientCount() === 0) await openBrowser(server.entryUrl());
 			return { review, server, round: added.round, identical: added.identical === true };
@@ -156,21 +169,23 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "open_code_review",
 		label: "Open Code Review",
-		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with a concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered. The reviewer's browser posts live comment threads as code-review-thread messages; answer each with reply_review_thread, and treat the code-review-pass message as the signal that the pass is complete. After a pass, apply the feedback as one batch and call this tool again with previousRoundId set to that pass's snapshot id: the revised changes open as the next round of the same session and the reviewer's browser advances automatically.",
+		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with a concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered. The reviewer's browser posts live comment threads as code-review-thread messages; answer each with reply_review_thread, and treat the code-review-pass message as the signal that the pass is complete. After a pass, apply the feedback as one batch and call this tool again with previousRoundId set to that pass's snapshot id: the revised changes open as the next round of the same session and the reviewer's browser advances automatically. The next round must include threadResponses: exactly one {respondsTo, resolution, body} per open thread of the pass, each with an explicitly designated anchor (file plus optional lines) into the new snapshot, or no file only when the anchor is truly gone.",
 		promptSnippet: "Open an ordered, agent-commented browser review of current Git changes",
 		promptGuidelines: [
 			"Use open_code_review when the user asks to be walked through or interactively review the agent's current code changes.",
 			"Keep the open_code_review overview concise: under 500 words, one-sentence intent, two to four outcome bullets, one or two validation bullets, and only material optional review focus or risks.",
 			"Use open_code_review reviewMode='reference' conservatively for visible files that do not merit focused review, such as binaries or deterministic generated artifacts; never use it to hide substantive source changes.",
 			"After a code-review-pass message, apply the feedback as one batch, then reopen with previousRoundId set to that pass's snapshot id so the revised changes appear as the next round in the reviewer's open browser session.",
+			"When opening a next round, answer every open thread from the pass in threadResponses with an honest resolution (addressed, declined, or needs-discussion) and anchor each response to the exact new code that proves it; never anchor somewhere unrelated to close a thread.",
 		],
 		parameters: openCodeReviewSchema,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			onUpdate?.({ content: [{ type: "text", text: "Collecting a frozen review snapshot…" }], details: {} });
 			const { review, server, round, identical } = await openReview(ctx, params, signal);
 			if (identical) {
+				const ignoredResponses = "threadResponses" in params && params.threadResponses !== undefined ? " Your threadResponses were ignored: with no code change there is nothing to re-anchor, so answer those threads in place with reply_review_thread instead." : "";
 				return {
-					content: [{ type: "text", text: `The snapshot is identical to round ${round} — nothing changed since the reviewer's pass. The session stays on that round (unlocked if it was awaiting revision); continue answering its threads.` }],
+					content: [{ type: "text", text: `The snapshot is identical to round ${round} — nothing changed since the reviewer's pass. The session stays on that round (unlocked if it was awaiting revision); continue answering its threads.${ignoredResponses}` }],
 					details: { snapshot: review.id, round, identical: true },
 				};
 			}

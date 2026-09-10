@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { renderReviewHtml } from "./render.js";
-import { createThreadStore, THREAD_LIMITS } from "./threads.js";
+import { buildCarriedThreads, createThreadStore, THREAD_LIMITS } from "./threads.js";
 
 const POST_PATH = "/__pi_code_review_post__";
 const RESOLVE_PATH = "/__pi_code_review_resolve__";
@@ -95,7 +95,14 @@ export async function createCodeReviewServer(review, options) {
 	const sseClients = new Set();
 
 	const current = () => rounds[rounds.length - 1];
-	const roundOfThread = (threadId) => rounds.find((round) => round.store.getThread(threadId));
+	// Carried threads keep their ids across rounds; newest-first lookup makes the
+	// living copy authoritative while older rounds stay reachable read-only.
+	const roundOfThread = (threadId) => {
+		for (let index = rounds.length - 1; index >= 0; index--) {
+			if (rounds[index].store.getThread(threadId)) return rounds[index];
+		}
+		return undefined;
+	};
 
 	const broadcast = (event, data) => {
 		const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -134,8 +141,15 @@ export async function createCodeReviewServer(review, options) {
 	};
 	const renderRound = (round, res) => {
 		const nonce = randomBytes(18).toString("base64");
+		const archive = rounds
+			.filter((candidate) => candidate.number < round.number)
+			.map((candidate) => ({
+				round: candidate.number,
+				resolved: candidate.store.list().filter((thread) => thread.status === "resolved").map((thread) => ({ id: thread.id, source: thread.source, file: thread.file, highlight: thread.highlight, lastBody: thread.turns[thread.turns.length - 1]?.body ?? "" })),
+			}))
+			.filter((entry) => entry.resolved.length > 0);
 		res.writeHead(200, htmlHeaders(nonce));
-		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }));
+		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive }));
 	};
 
 	const server = createServer(async (req, res) => {
@@ -327,7 +341,7 @@ export async function createCodeReviewServer(review, options) {
 			if (thread) broadcastThread(round, thread);
 			return thread;
 		},
-		addRound(nextReview, previousRoundId) {
+		addRound(nextReview, previousRoundId, threadResponses) {
 			const active = current();
 			if (previousRoundId !== active.review.id) {
 				if (rounds.some((round) => round.review.id === previousRoundId)) {
@@ -335,6 +349,9 @@ export async function createCodeReviewServer(review, options) {
 				}
 				return { error: "unknown-round" };
 			}
+			// An identical snapshot has nothing to re-anchor: threads stay live in the
+			// existing round, so the response contract deliberately does not apply and
+			// any supplied responses are ignored in favor of in-place replies.
 			if (nextReview.id === active.review.id) {
 				if (phase !== "reviewing") {
 					phase = "reviewing";
@@ -343,7 +360,13 @@ export async function createCodeReviewServer(review, options) {
 				return { identical: true, round: active.number };
 			}
 			if (nextReview.root !== active.review.root) return { error: "wrong-root" };
-			const round = { number: active.number + 1, review: nextReview, store: createThreadStore(nextReview) };
+			let carried;
+			try {
+				carried = buildCarriedThreads(threadResponses, active.store.list(), nextReview, active.number);
+			} catch (error) {
+				return { error: "invalid-responses", message: error instanceof Error ? error.message : String(error) };
+			}
+			const round = { number: active.number + 1, review: nextReview, store: createThreadStore(nextReview, THREAD_LIMITS, carried) };
 			rounds.push(round);
 			phase = "reviewing";
 			broadcast("round-ready", { round: round.number, previousRound: active.number });

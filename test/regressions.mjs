@@ -9,7 +9,7 @@ import { applyReviewManifest, collectReviewSnapshot, parseUnifiedPatch, REVIEW_L
 import { formatReviewPassXml, formatThreadMessageXml } from "../shared/feedback.js";
 import { renderReviewHtml } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
-import { createThreadStore, THREAD_LIMITS } from "../shared/threads.js";
+import { buildCarriedThreads, createThreadStore, THREAD_LIMITS } from "../shared/threads.js";
 import { createReviewMessageQueue } from "../shared/delivery-queue.js";
 
 const exec = promisify(execFile);
@@ -193,6 +193,58 @@ try {
 	assert.doesNotMatch(formatReviewPassXml(ordered, store.list(), store.summary(), false, undefined), /commentary-id="second-note"/, "Reviewer-untouched notes never appear in pass summaries even when reopened.");
 	assert.match(formatThreadMessageXml(ordered, selectionThread, selectionThread.turns[0], 3), /^<code-review-thread snapshot="[a-f0-9]{64}" round="3" /, "Thread messages must carry their round number when provided.");
 	assert.match(formatReviewPassXml(ordered, store.list(), store.summary(), false, undefined, 2), /^<code-review-pass snapshot="[a-f0-9]{64}" round="2" /, "Pass summaries must carry their round number when provided.");
+
+	const carrySource = createThreadStore(ordered);
+	const carryTopic = carrySource.postUserTurn({ source: "overview", body: "Please split this function." }).thread;
+	const carrySelection = carrySource.postUserTurn({ source: "selection", file: "untracked.txt", side: "new", newStart: 1, newEnd: 2, highlight: "A marker", body: "Rename?" }).thread;
+	const carryResolved = carrySource.postUserTurn({ source: "overview", body: "Settled topic." }).thread;
+	carrySource.setResolved(carryResolved.id, true);
+	const untouchedSeedId = carrySource.list().find((thread) => thread.source === "commentary").id;
+	assert.throws(() => buildCarriedThreads([], carrySource.list(), ordered, 1), /missing: .*-t/, "Every open thread must receive a response.");
+	assert.throws(() => buildCarriedThreads([{ respondsTo: untouchedSeedId, resolution: "addressed", body: "x" }], carrySource.list(), ordered, 1), /does not match an open thread/, "Untouched notes are not respondable; they die with their round.");
+	assert.throws(() => buildCarriedThreads([{ respondsTo: carryResolved.id, resolution: "addressed", body: "x" }], carrySource.list(), ordered, 1), /does not match an open thread/, "Resolved threads do not carry forward.");
+	const validPair = [
+		{ respondsTo: carryTopic.id, resolution: "needs-discussion", body: "Still deciding on the split." },
+		{ respondsTo: carrySelection.id, resolution: "addressed", body: "Renamed here.", file: "untracked.txt", side: "new", startLine: 1, endLine: 2 },
+	];
+	assert.throws(() => buildCarriedThreads([validPair[0], validPair[0], validPair[1]], carrySource.list(), ordered, 1), /more than one response/);
+	assert.throws(() => buildCarriedThreads([validPair[0], { ...validPair[1], resolution: "done" }], carrySource.list(), ordered, 1), /resolution of addressed, declined, or needs-discussion/);
+	assert.throws(() => buildCarriedThreads([validPair[0], { ...validPair[1], file: "missing.txt" }], carrySource.list(), ordered, 1), /not part of this round/);
+	assert.throws(() => buildCarriedThreads([validPair[0], { ...validPair[1], startLine: 999, endLine: 999 }], carrySource.list(), ordered, 1), /visible complete new range/);
+	assert.throws(() => buildCarriedThreads([validPair[0], { respondsTo: carrySelection.id, resolution: "addressed", body: "x", startLine: 1 }], carrySource.list(), ordered, 1), /without a file/);
+	assert.throws(() => buildCarriedThreads([validPair[0], { respondsTo: carrySelection.id, resolution: "addressed", body: "x", file: "untracked.txt", side: "new" }], carrySource.list(), ordered, 1), /without startLine/, "Partial anchors must be rejected, not downgraded to file placement.");
+	assert.throws(() => buildCarriedThreads([validPair[0], { respondsTo: carrySelection.id, resolution: "addressed", body: "x", file: "untracked.txt", endLine: 2 }], carrySource.list(), ordered, 1), /without startLine/);
+	assert.throws(() => buildCarriedThreads([validPair[0], { ...validPair[1], file: "binary.dat" }], carrySource.list(), ordered, 1), /cannot line-anchor/, "Binary files reject line anchors for carried threads.");
+	const capSource = createThreadStore(ordered, { ...THREAD_LIMITS, maxTurnsPerThread: 2 });
+	const capThread = capSource.postUserTurn({ source: "overview", body: "cap me" }).thread;
+	capSource.postPiReply(capThread.id, "at cap", false);
+	const capCarried = buildCarriedThreads([{ respondsTo: capThread.id, resolution: "needs-discussion", body: "carrying" }], capSource.list(), ordered, 1);
+	const capStore = createThreadStore(ordered, { ...THREAD_LIMITS, maxTurnsPerThread: 2 }, capCarried);
+	assert.equal(capStore.postUserTurn({ threadId: capThread.id, body: "reply" }).error, "thread-full", "Over-cap carried threads reject replies without crashing.");
+	assert.equal(capStore.setResolved(capThread.id, true).status, "resolved", "Resolution remains the exit for over-cap carried threads.");
+	const carriedRecords = buildCarriedThreads(validPair, carrySource.list(), ordered, 1);
+	assert.deepEqual(carriedRecords.map((record) => record.id), [carryTopic.id, carrySelection.id], "Carried threads keep their round-of-origin ids.");
+	assert.equal(carriedRecords[0].carried.placement, "outdated");
+	assert.equal(carriedRecords[1].carried.placement, "anchored");
+	assert.equal(carriedRecords[1].piProposedResolve, true, "Addressed responses arrive as resolution proposals.");
+	assert.equal(carriedRecords[1].highlight, "A marker", "The origin highlight travels with the carried thread.");
+	assert.equal(carriedRecords[1].turns.length, carrySelection.turns.length + 1);
+	assert.equal(carriedRecords[1].turns[carriedRecords[1].turns.length - 1].resolution, "addressed");
+	const carryStore = createThreadStore(ordered, { ...THREAD_LIMITS, maxThreads: 1 }, carriedRecords);
+	assert.equal(carryStore.list().length, 4, "Seeds and carried threads coexist in the next round's store.");
+	assert.equal(carryStore.postUserTurn({ source: "overview", body: "fresh topic" }).error, undefined, "Carried threads must not consume the reviewer's thread budget.");
+	assert.deepEqual(carryStore.summary(), { open: 5, awaitingUser: 4, awaitingPi: 1, resolved: 0 }, "Carried threads await the reviewer like any Pi reply.");
+	assert.equal(carryStore.postUserTurn({ threadId: carrySelection.id, body: "Verified, thanks." }).thread.turns.length, carriedRecords[1].turns.length + 1, "Reviewers reply to the carried copy by its original id.");
+	assert.equal(carryStore.setResolved(carryTopic.id, true).status, "resolved");
+	const carryPassXml = formatReviewPassXml(ordered, carryStore.list(), carryStore.summary(), false, undefined, 2);
+	assert.match(carryPassXml, /carried-from-round="1" resolution="addressed"/, "Pass summaries must identify carried threads and their resolutions.");
+	const carryHtml = renderReviewHtml(ordered, "carry-nonce", { round: 2, currentRound: 2, phase: "reviewing" }, { carried: carryStore.list().filter((thread) => thread.carried), archive: [{ round: 1, resolved: [{ id: "abc-t9", source: "selection", file: "untracked.txt", highlight: "A marker" }] }] });
+	assert.match(carryHtml, new RegExp(`data-carried-thread="${carriedRecords[1].id}"[^>]*data-anchor-side="new" data-anchor-start="1"`), "Anchored carried shells must expose their jump anchor.");
+	assert.match(carryHtml, new RegExp(`href="/round/1#thread=${carriedRecords[1].id}"`), "Carried shells must deep-link to their origin round.");
+	assert.match(carryHtml, /Outdated threads/, "Anchor-less carried threads land on the overview.");
+	assert.match(carryHtml, /outdated — anchored to round 1/);
+	assert.match(carryHtml, /Resolved in earlier rounds \(1\)/, "Prior-round resolutions collect in the overview archive.");
+	assert.match(carryHtml, /href="\/round\/1#thread=abc-t9"/);
 
 	const deliveredBatches = [];
 	const messageQueue = createReviewMessageQueue((batch) => deliveredBatches.push(batch));
@@ -454,7 +506,24 @@ try {
 		assert.equal(roundsServer.addRound({ ...secondRoundReview, id: "f".repeat(64), root: "/elsewhere" }, secondRoundReview.id).error, "wrong-root", "Rounds from another repository must be rejected.");
 		assert.equal((await fetch(finishEndpoint, { method: "POST", headers, body: "{}" })).status, 200);
 		assert.deepEqual(roundsServer.addRound({ ...secondRoundReview }, secondRoundReview.id), { identical: true, round: 2 });
+		assert.equal(roundsServer.addRound({ ...secondRoundReview }, secondRoundReview.id, [{ respondsTo: "not-a-thread", resolution: "addressed", body: "x" }]).identical, true, "Identical reopens skip the response contract even with open threads; conversations continue in place.");
 		assert.equal((await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 2, source: "overview", body: "unlocked again" }) })).status, 200, "An identical reopen resumes the current round.");
+		assert.equal(roundsServer.addRound({ ...ordered, id: altId(ordered.id, 61) }, secondRoundReview.id).error, "invalid-responses", "Open threads demand responses before the next round opens.");
+		const eligibleIds = roundsServer.threads().filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user")).map((thread) => thread.id);
+		assert.equal(eligibleIds.length, 2);
+		const thirdRoundReview = { ...ordered, id: altId(ordered.id, 61) };
+		const carriedAdd = roundsServer.addRound(thirdRoundReview, secondRoundReview.id, eligibleIds.map((id, index) => ({ respondsTo: id, resolution: index === 0 ? "addressed" : "declined", body: `Response ${index}.`, ...(index === 0 ? { file: "untracked.txt", side: "new", startLine: 1 } : {}) })));
+		assert.equal(carriedAdd.round, 3, "Complete responses open the next round with carried threads.");
+		const carriedThread = roundsServer.getThread(eligibleIds[0]);
+		assert.equal(carriedThread.carried.fromRound, 2);
+		assert.equal(carriedThread.carried.placement, "anchored");
+		assert.equal(carriedThread.piProposedResolve, true);
+		assert.deepEqual(roundsServer.locateThread(eligibleIds[0]), { round: 3, current: true }, "Carried ids resolve to the living copy in the newest round.");
+		assert.ok(roundsServer.postPiReply(eligibleIds[0], "Follow-up.", false), "Pi replies to carried threads in the current round.");
+		const carriedReply = await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: eligibleIds[0], body: "Reviewer follow-up." }) });
+		assert.equal(carriedReply.status, 200, "Reviewer replies land in the carried copy, not the archived one.");
+		assert.match(await (await fetch(`${origin}/round/3`, { headers: { cookie } })).text(), /Resolved in earlier rounds/, "Round pages surface the prior-round archive.");
+
 		const entry = roundsServer.entryUrl();
 		assert.equal((await fetch(entry, { redirect: "manual" })).status, 302, "Reissued entry links must authenticate.");
 		assert.equal((await fetch(entry, { redirect: "manual" })).status, 403, "Reissued entry links must be single-use.");
@@ -651,11 +720,37 @@ try {
 
 			const browserOrigin = new URL(browserServer.url).origin;
 			const nextRoundReview = { ...ordered, id: altId(ordered.id, 63) };
-			assert.equal(browserServer.addRound(nextRoundReview, ordered.id).round, 2);
+			const overviewThreadIds = browserPosts.filter((post) => post.thread.source === "overview").map((post) => post.thread.id);
+			assert.equal(browserServer.addRound(nextRoundReview, ordered.id).error, "invalid-responses", "The next round must respond to every open thread.");
+			assert.equal(browserServer.addRound(nextRoundReview, ordered.id, [
+				{ respondsTo: commentaryThreadId, resolution: "addressed", body: "Kept handwritten; clarified the comment.", file: "untracked.txt", side: "new", startLine: 1, endLine: 2 },
+				{ respondsTo: overviewThreadIds[0], resolution: "declined", body: "Keeping the introduction as is.", file: "untracked.txt" },
+				{ respondsTo: overviewThreadIds[1], resolution: "needs-discussion", body: "Needs a synchronous decision." },
+			]).round, 2);
 			await page.waitForFunction(() => document.body.dataset.round === "2", { timeout: 5_000 });
 			assert.match(await page.$eval('[data-round-chip]', (chip) => chip.textContent), /round 2/, "round-ready must auto-advance the browser to the new round.");
 			assert.equal(await page.$$eval('[data-round-switcher] a', (links) => links.length), 2, "The round switcher must list every round.");
 			assert.equal(await page.evaluate(() => document.body.classList.contains("locked")), false, "The new round opens unlocked.");
+			await page.waitForFunction(() => document.querySelectorAll('[data-carried-thread]').length === 3);
+			assert.equal(await page.$$eval('[data-review-file="0"] .carried-threads [data-carried-thread]', (shells) => shells.length), 2, "File-designated responses land in that file's commentary column.");
+			assert.equal(await page.$$eval('[data-outdated-threads] [data-carried-thread]', (shells) => shells.length), 1, "Anchor-less responses land in the overview's outdated strip.");
+			await page.waitForFunction(() => document.querySelector('[data-inbox]')?.textContent.startsWith("5 awaiting you"), { timeout: 5_000 });
+			await page.click('[data-file-nav="0"]');
+			await page.waitForFunction((id) => document.querySelector(`[data-carried-host="${id}"] [data-thread-card="${id}"]`), {}, commentaryThreadId);
+			assert.match(await page.$eval(`[data-carried-host="${commentaryThreadId}"]`, (host) => host.textContent), /Kept handwritten; clarified the comment\./, "The resolution commentary renders inside the carried thread.");
+			assert.match(await page.$eval(`[data-carried-host="${commentaryThreadId}"]`, (host) => host.textContent), /Why not generate this\?/, "The carried thread keeps its full prior conversation.");
+			assert.equal(await page.$eval(`[data-carried-thread="${commentaryThreadId}"] .carried-origin`, (link) => link.getAttribute("href")), `/round/1#thread=${commentaryThreadId}`, "Carried threads deep-link to their origin round.");
+			await page.click(`[data-carried-host="${commentaryThreadId}"] [data-thread-accept-resolve]`);
+			await page.waitForFunction((id) => document.querySelector(`[data-carried-host="${id}"] .thread-card.resolved`), {}, commentaryThreadId);
+			assert.match(await page.evaluate(() => window.location.hash), new RegExp(`thread=${commentaryThreadId}`), "Focusing a thread must record it in the URL fragment.");
+			await page.goto(`${browserOrigin}/round/1#thread=${commentaryThreadId}`, { waitUntil: "domcontentloaded" });
+			await page.waitForFunction(() => document.body.dataset.round === "1");
+			await page.waitForFunction((id) => document.querySelector(`[data-thread-card="${id}"].thread-flash`), {}, commentaryThreadId);
+			assert.equal(await page.$eval('[data-review-file="0"]', (section) => section.hidden), false, "The origin deep link must open the thread's file section.");
+			await page.goBack();
+			await page.waitForFunction(() => document.body.dataset.round === "2");
+			await page.waitForFunction((id) => document.querySelector(`[data-thread-card="${id}"].thread-flash`), {}, commentaryThreadId);
+			assert.equal(await page.$eval('[data-review-file="0"]', (section) => section.hidden), false, "Browser Back must return to the carried thread, not the round's overview.");
 			await page.goto(`${browserOrigin}/round/1`, { waitUntil: "domcontentloaded" });
 			await page.waitForFunction(() => document.body.classList.contains("locked"));
 			assert.match(await page.$eval('[data-phase-banner-text]', (el) => el.textContent), /Round 1 is read-only — round 2 is current/);
@@ -678,7 +773,8 @@ try {
 			});
 			await driftPage.goto(`${browserOrigin}/round/2`, { waitUntil: "domcontentloaded" });
 			const heldEvents = await eventsHeld;
-			assert.equal(browserServer.addRound({ ...ordered, id: altId(ordered.id, 62) }, nextRoundReview.id).round, 3, "The session advances while the drift tab is disconnected.");
+			const round3Responses = browserServer.threads().filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user")).map((thread) => ({ respondsTo: thread.id, resolution: "needs-discussion", body: "Carrying into round 3." }));
+			assert.equal(browserServer.addRound({ ...ordered, id: altId(ordered.id, 62) }, nextRoundReview.id, round3Responses).round, 3, "The session advances while the drift tab is disconnected.");
 			heldEvents.continue().catch(() => {});
 			await driftPage.waitForFunction(() => document.body.dataset.round === "3", { timeout: 5_000 });
 			assert.match(await driftPage.$eval('[data-round-chip]', (chip) => chip.textContent), /round 3/, "A current-round tab that slept through round-ready must catch up on reconnect.");

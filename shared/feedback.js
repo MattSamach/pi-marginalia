@@ -22,6 +22,7 @@ function threadAttributes(thread) {
 	const values = [`thread="${attr(thread.id)}"`, `kind="${attr(thread.source)}"`, `status="${attr(thread.status)}"`];
 	if (thread.file !== undefined) values.push(`file="${attr(thread.file)}"`);
 	if (thread.commentaryId !== undefined) values.push(`commentary-id="${attr(thread.commentaryId)}"`);
+	if (thread.carried !== undefined) values.push(`carried-from-round="${Number(thread.carried.fromRound)}"`, `resolution="${attr(thread.carried.resolution)}"`);
 	return values.join(" ");
 }
 

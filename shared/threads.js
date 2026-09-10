@@ -15,8 +15,78 @@ function validRange(start, end) {
 	return (start === undefined && end === undefined) || (Number.isInteger(start) && start > 0 && Number.isInteger(end) && end >= start);
 }
 
+export const THREAD_RESOLUTIONS = Object.freeze(["addressed", "declined", "needs-discussion"]);
+
+/** Open threads with reviewer turns: the set a next round must respond to. */
+export function threadsAwaitingResponse(threads) {
+	return threads.filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user"));
+}
+
+/**
+ * Validate a next round's thread responses against the previous round's open
+ * threads and the next review's rendered diff, and build the carried thread
+ * records. Throws with an actionable message on any contract violation.
+ */
+export function buildCarriedThreads(responses, previousThreads, nextReview, fromRound, limits = THREAD_LIMITS) {
+	const list = responses ?? [];
+	if (!Array.isArray(list)) throw new Error("threadResponses must be an array.");
+	const eligible = new Map(threadsAwaitingResponse(previousThreads).map((thread) => [thread.id, thread]));
+	const files = new Map(nextReview.files.map((file) => [file.path, file]));
+	const seen = new Set();
+	const carried = list.map((response) => {
+		if (!response || typeof response !== "object" || typeof response.respondsTo !== "string") throw new Error("Each thread response needs a respondsTo thread id.");
+		const origin = eligible.get(response.respondsTo);
+		if (!origin) throw new Error(`Thread response ${response.respondsTo} does not match an open thread awaiting a response in round ${fromRound}.`);
+		if (seen.has(origin.id)) throw new Error(`Thread ${origin.id} has more than one response.`);
+		seen.add(origin.id);
+		if (!THREAD_RESOLUTIONS.includes(response.resolution)) throw new Error(`Thread response ${origin.id} needs a resolution of addressed, declined, or needs-discussion.`);
+		if (!validText(response.body, limits)) throw new Error(`Thread response ${origin.id} needs a non-empty bounded body.`);
+		let placement = "outdated";
+		const anchor = {};
+		if (response.file !== undefined) {
+			const file = files.get(response.file);
+			if (!file) throw new Error(`Thread response ${origin.id} anchors to ${response.file}, which is not part of this round; omit file when the anchor is gone.`);
+			placement = "file";
+			anchor.file = response.file;
+			if (response.startLine !== undefined) {
+				if (file.binary || file.omitted) throw new Error(`Thread response ${origin.id} cannot line-anchor to ${response.file}.`);
+				const side = response.side ?? "both";
+				if (!["old", "new", "both"].includes(side)) throw new Error(`Thread response ${origin.id} has an invalid side.`);
+				const endLine = response.endLine ?? response.startLine;
+				if (!Number.isInteger(response.startLine) || response.startLine < 1 || !Number.isInteger(endLine) || endLine < response.startLine) {
+					throw new Error(`Thread response ${origin.id} has an invalid line range.`);
+				}
+				const boundaryIsVisible = (targetLine) => file.lines.some((line) => (side !== "new" && line.oldLine === targetLine) || (side !== "old" && line.newLine === targetLine));
+				if (!boundaryIsVisible(response.startLine) || !boundaryIsVisible(endLine)) {
+					throw new Error(`Thread response ${origin.id} does not anchor to a visible complete ${side} range in ${response.file}.`);
+				}
+				placement = "anchored";
+				anchor.side = side;
+				anchor.startLine = response.startLine;
+				anchor.endLine = endLine;
+			} else if (response.endLine !== undefined || response.side !== undefined) {
+				throw new Error(`Thread response ${origin.id} cannot set side or endLine without startLine.`);
+			}
+		} else if (response.startLine !== undefined || response.endLine !== undefined || response.side !== undefined) {
+			throw new Error(`Thread response ${origin.id} cannot set an anchor range without a file.`);
+		}
+		return {
+			id: origin.id,
+			source: origin.source,
+			...(origin.highlight === undefined ? {} : { highlight: origin.highlight }),
+			...(anchor.file === undefined ? {} : { file: anchor.file }),
+			piProposedResolve: response.resolution === "addressed",
+			carried: { fromRound, resolution: response.resolution, placement, ...(anchor.side === undefined ? {} : { side: anchor.side, startLine: anchor.startLine, endLine: anchor.endLine }) },
+			turns: [...origin.turns.map((turn) => ({ ...turn })), { author: "pi", body: response.body.trim(), ts: Date.now(), resolution: response.resolution }],
+		};
+	});
+	const missing = [...eligible.keys()].filter((id) => !seen.has(id));
+	if (missing.length) throw new Error(`Every open thread needs exactly one response; missing: ${missing.join(", ")}.`);
+	return carried;
+}
+
 /** Live comment-thread store for one immutable review snapshot. */
-export function createThreadStore(review, limits = THREAD_LIMITS) {
+export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads = []) {
 	const threads = new Map();
 	const files = new Map(review.files.map((file) => [file.path, file]));
 	const commentaryThreadIds = new Map();
@@ -41,9 +111,23 @@ export function createThreadStore(review, limits = THREAD_LIMITS) {
 			commentaryThreadIds.set(`${file.path}\0${entry.id}`, thread.id);
 		}
 	}
+	// Carried threads keep their round-of-origin ids and are, like seeds, exempt
+	// from maxThreads: the cap bounds reviewer-created threads only.
+	for (const carriedThread of carriedThreads) {
+		threads.set(carriedThread.id, {
+			id: carriedThread.id,
+			status: "open",
+			piProposedResolve: carriedThread.piProposedResolve === true,
+			source: carriedThread.source,
+			...(carriedThread.highlight === undefined ? {} : { highlight: carriedThread.highlight }),
+			...(carriedThread.file === undefined ? {} : { file: carriedThread.file }),
+			carried: { ...carriedThread.carried },
+			turns: carriedThread.turns.map((turn) => ({ ...turn })),
+		});
+	}
 	const seededCount = threads.size;
 
-	const publicThread = (thread) => ({ ...thread, turns: thread.turns.map((turn) => ({ ...turn })) });
+	const publicThread = (thread) => ({ ...thread, ...(thread.carried ? { carried: { ...thread.carried } } : {}), turns: thread.turns.map((turn) => ({ ...turn })) });
 	const lastAuthor = (thread) => thread.turns[thread.turns.length - 1]?.author;
 
 	function validateSelection(item) {

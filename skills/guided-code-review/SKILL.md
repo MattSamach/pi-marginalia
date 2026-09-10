@@ -77,8 +77,12 @@ The review browser is conversational: reviewer comments arrive individually as `
 A review session is an ordered sequence of immutable rounds served in one browser session. Sending a pass locks the reviewer's posting controls behind a “Pi is revising” banner, so revise promptly.
 
 - After a `code-review-pass`, apply the feedback as one batch, validate, then call `open_code_review` again with `previousRoundId` set to the pass's `snapshot` id. The revised changes open as the next round and the reviewer's browser advances automatically; never open a fresh review mid-unit unless no session is live.
+- The next round must include `threadResponses`: exactly one `{respondsTo, resolution, body}` per open thread listed in the pass. The round is rejected if any open thread lacks a response, has duplicates, or anchors invalidly.
+- Anchor each response honestly to the code that proves it: `file` plus `startLine`/`endLine` for a precise anchor, `file` alone when only file-level placement is truthful, and no `file` only when the anchor is genuinely gone (the thread then lands in the overview's outdated strip). Never anchor somewhere unrelated to make a thread look addressed — the reviewer sees their original highlight beside your anchor and an unconvincing `addressed` claim simply stays open.
+- Use `addressed` only when the concern is actually fixed in this round (it renders as a one-click resolution proposal), `declined` with clear rationale when you are not making the change, and `needs-discussion` when the thread needs the reviewer's input before code can move.
+- Carried threads keep their ids: `reply_review_thread` continues to work on them in the new round.
 - `previousRoundId` must be the current round. If the tool reports the round superseded, a newer round already exists — investigate before opening another.
-- If nothing changed since the pass (for example, the threads needed only answers), reopening with an identical snapshot unlocks the existing round instead of adding a hollow one; keep answering its threads.
+- If nothing changed since the pass (for example, the threads needed only answers), reopening with an identical snapshot unlocks the existing round instead of adding a hollow one; keep answering its threads. The response contract deliberately does not apply here — with no code change there is nothing to re-anchor, so `threadResponses` are ignored and open threads are answered in place with `reply_review_thread`.
 - Threads from superseded rounds are read-only; `reply_review_thread` rejects them. Respond to outstanding topics in the current round.
 - Between the pass message and opening the next round, the current round is still live — you may still answer straggler threads there.
 

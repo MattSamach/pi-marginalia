@@ -141,9 +141,9 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			await stale.close();
 		}
 		const server = await createCodeReviewServer(review, {
-			onThreadPost: async (round: ReviewRound, thread: ReviewThread, turn: ReviewThreadTurn) => {
-				const queued = queue.post(formatThreadMessageXml(round.review, thread, turn, round.number), ctx.isIdle());
-				ctx.ui.notify(`Review thread ${thread.id}: new reviewer message${queued ? " (queued until Pi settles)" : ""}.`, "info");
+			onThreadPost: async (round: ReviewRound, thread: ReviewThread, turns: ReviewThreadTurn[]) => {
+				const queued = queue.post(formatThreadMessageXml(round.review, thread, turns, round.number), ctx.isIdle());
+				ctx.ui.notify(`Review thread ${thread.id}: ${turns.length === 1 ? "new reviewer message" : `${turns.length} reviewer messages`}${queued ? " (queued until Pi settles)" : ""}.`, "info");
 			},
 			onFinishPass: async (round: ReviewRound, note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
 				let stale = true;

@@ -179,7 +179,7 @@ try {
 	assert.match(threadXml, /A \]\]\]\]><!\[CDATA\[> marker/, "CDATA terminators must be split safely.");
 	assert.match(threadXml, /<message author="user"><!\[CDATA\[Actually, one more thing\.\]\]><\/message>/);
 	const passXml = formatReviewPassXml(ordered, store.list(), store.summary(), false, "Note ]]> here");
-	assert.match(passXml, /^<code-review-pass snapshot="[a-f0-9]{64}" stale="false" open="5" awaiting-user="1" awaiting-pi="4" resolved="0" unread-notes="1">/, "Header counts must reconcile with the omitted untouched notes.");
+	assert.match(passXml, /^<code-review-pass snapshot="[a-f0-9]{64}" stale="false" open="5" awaiting-user="1" awaiting-pi="4" resolved="0" unread-notes="1" queued="0">/, "Header counts must reconcile with the omitted untouched notes.");
 	assert.match(passXml, /<note><!\[CDATA\[Note \]\]\]\]><!\[CDATA\[> here\]\]><\/note>/, "Finish notes must be serialized safely.");
 	assert.match(passXml, /<open-thread thread="[a-f0-9]{8}-[a-f0-9]{6}-t1" kind="commentary" status="open" file="untracked.txt" commentary-id="new-file" last-author="user">/);
 	assert.doesNotMatch(passXml, /Why this exists/, "Pass summaries carry only the last message of each open thread.");
@@ -246,6 +246,30 @@ try {
 	assert.match(carryHtml, /Resolved in earlier rounds \(1\)/, "Prior-round resolutions collect in the overview archive.");
 	assert.match(carryHtml, /href="\/round\/1#thread=abc-t9"/);
 
+	const quietStore = createThreadStore(ordered);
+	const quietThread = quietStore.postUserTurn({ source: "overview", body: "First quiet.", quiet: true }).thread;
+	assert.equal(quietThread.queued, true, "Quiet posts stay undelivered.");
+	assert.equal(quietStore.postUserTurn({ threadId: quietThread.id, body: "Second quiet.", quiet: true }).thread.queued, true, "Quiet replies keep the thread queued.");
+	const escalatedResult = quietStore.postUserTurn({ threadId: quietThread.id, body: "Answer now." });
+	assert.equal(escalatedResult.escalated, true, "A live reply escalates the queued backlog.");
+	assert.equal(escalatedResult.thread.queued, false);
+	assert.equal(quietStore.postUserTurn({ source: "commentary", file: "untracked.txt", commentaryId: "new-file", body: "Quiet note reply.", quiet: true }).thread.queued, true, "Quiet replies to Pi notes queue as well.");
+	const quietTwo = quietStore.postUserTurn({ source: "overview", body: "Still quiet.", quiet: true }).thread;
+	const quietPassXml = formatReviewPassXml(ordered, quietStore.list(), quietStore.summary(), false, undefined, 1);
+	assert.match(quietPassXml, / queued="2">/, "The pass header counts queued threads.");
+	assert.match(quietPassXml, /<open-thread [^>]*queued="true"[^>]*>\n {4}<message author="user"><!\[CDATA\[Still quiet\.\]\]><\/message>/, "Queued threads carry their full reviewer content in the pass.");
+	assert.match(quietPassXml, /Quiet note reply\./, "Queued note replies reach Pi through the pass.");
+	assert.doesNotMatch(quietPassXml, /Second quiet\./, "Escalated threads were already delivered; the pass keeps only their last message.");
+	assert.doesNotMatch(quietPassXml, /Why this exists/, "Queued note threads must not echo Pi's own note back.");
+	assert.equal(quietStore.postUserTurn({ threadId: quietThread.id, body: "Quiet on live.", quiet: true }).thread.queued, false, "Live threads never become queued.");
+	assert.match(quietPassXml, / awaiting-pi="1" resolved="0" unread-notes="1" queued="2">/, "The pass header excludes queued threads from awaiting-pi.");
+	assert.equal(quietStore.markAllDelivered().length, 2, "Sending the round delivers every queued thread.");
+	assert.equal(quietStore.getThread(quietTwo.id).queued, false, "Delivered threads leave the queued state.");
+	const withdrawn = quietStore.postUserTurn({ source: "overview", body: "Withdrawn quiet.", quiet: true }).thread;
+	quietStore.setResolved(withdrawn.id, true);
+	assert.equal(quietStore.markAllDelivered().length, 0, "Resolved quiet threads are withdrawn, not delivered.");
+	assert.equal(quietStore.setResolved(withdrawn.id, false).queued, true, "Reopening a withdrawn quiet thread restores its queued state.");
+
 	const deliveredBatches = [];
 	const messageQueue = createReviewMessageQueue((batch) => deliveredBatches.push(batch));
 	assert.equal(messageQueue.post("a", true), false, "Idle posts deliver immediately.");
@@ -292,12 +316,12 @@ try {
 	const passes = [];
 	let failNextPost = false;
 	const server = await createCodeReviewServer(ordered, {
-		onThreadPost: async (round, thread, turn) => {
+		onThreadPost: async (round, thread, turns) => {
 			if (failNextPost) {
 				failNextPost = false;
 				throw new Error("delivery boom");
 			}
-			posts.push({ round: round.number, thread, turn });
+			posts.push({ round: round.number, thread, turns });
 		},
 		onFinishPass: async (round, note, threadList, summary) => { passes.push({ round: round.number, note, threadList, summary }); return { stale: false }; },
 	});
@@ -329,7 +353,7 @@ try {
 		const accepted = await acceptedResponse.json();
 		assert.equal(posts.length, 1, "Each reviewer post must be delivered to Pi exactly once.");
 		assert.equal(posts[0].thread.id, accepted.thread.id);
-		assert.equal(posts[0].turn.body, "Explain this line.");
+		assert.equal(posts[0].turns[0].body, "Explain this line.");
 
 		const eventsResponse = await fetch(`${origin}/__pi_code_review_events__`, { headers: { cookie } });
 		assert.equal(eventsResponse.status, 200);
@@ -377,6 +401,15 @@ try {
 		assert.equal(server.getThread(failedDeliveryJson.thread.id).turns.length, 2, "The turn must remain stored when delivery fails.");
 		assert.equal(posts.length, 1, "Failed delivery must not record a Pi message.");
 
+		const quietOv = await (await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ source: "overview", body: "Quiet start.", quiet: true }) })).json();
+		assert.equal(quietOv.queued, true);
+		failNextPost = true;
+		const failedEscalation = await (await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: quietOv.thread.id, body: "Escalate now." }) })).json();
+		assert.equal(failedEscalation.deliveryFailed, true);
+		assert.equal(failedEscalation.escalated, undefined, "A failed escalation must not report success.");
+		assert.equal(failedEscalation.thread.queued, true, "A failed escalation requeues the backlog.");
+		assert.equal(server.getThread(quietOv.thread.id).queued, true);
+
 		const finishEndpoint = `${origin}/__pi_code_review_finish__`;
 		assert.equal((await fetch(finishEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin: "https://example.com" }, body: "{}" })).status, 403);
 		assert.equal((await fetch(finishEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ note: "" }) })).status, 400, "Blank finish notes must be rejected.");
@@ -387,7 +420,8 @@ try {
 		assert.equal(passes[0].note, "Done for now.");
 		assert.equal(passes[0].round, 1, "The pass must report which round it closes.");
 		assert.equal(posts[0].round, 1, "Thread posts must report their round.");
-		assert.deepEqual(passes[0].summary, { open: 1, awaitingUser: 0, awaitingPi: 1, resolved: 2 });
+		assert.deepEqual(passes[0].summary, { open: 2, awaitingUser: 0, awaitingPi: 2, resolved: 2 });
+		assert.equal(server.getThread(quietOv.thread.id).queued, false, "The pass delivers the requeued backlog in full.");
 	} finally {
 		await server.close();
 	}
@@ -445,8 +479,9 @@ try {
 	}
 
 	const altId = (id, index) => `${id.slice(0, index)}${id[index] === "0" ? "1" : "0"}${id.slice(index + 1)}`;
+	const roundsDeliveries = [];
 	const roundsServer = await createCodeReviewServer(ordered, {
-		onThreadPost: async () => {},
+		onThreadPost: async (round, thread, turns) => { roundsDeliveries.push(turns.length); },
 		onFinishPass: async () => ({ stale: false }),
 	});
 	try {
@@ -524,6 +559,20 @@ try {
 		assert.equal(carriedReply.status, 200, "Reviewer replies land in the carried copy, not the archived one.");
 		assert.match(await (await fetch(`${origin}/round/3`, { headers: { cookie } })).text(), /Resolved in earlier rounds/, "Round pages surface the prior-round archive.");
 
+		const deliveriesBefore = roundsDeliveries.length;
+		const quietPost = await (await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 3, source: "overview", body: "Quiet topic.", quiet: true }) })).json();
+		assert.equal(quietPost.queued, true, "Quiet posts report their queued state.");
+		assert.equal(roundsDeliveries.length, deliveriesBefore, "Quiet posts must not deliver to Pi.");
+		assert.equal((await (await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: quietPost.thread.id, body: "More quiet detail.", quiet: true }) })).json()).thread.queued, true);
+		assert.equal(roundsDeliveries.length, deliveriesBefore, "Quiet replies must not deliver either.");
+		const escalateJson = await (await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: quietPost.thread.id, body: "Actually, answer now." }) })).json();
+		assert.equal(escalateJson.escalated, true);
+		assert.equal(roundsDeliveries.length, deliveriesBefore + 1, "Escalation delivers exactly once.");
+		assert.equal(roundsDeliveries[roundsDeliveries.length - 1], 3, "Escalation delivers the whole reviewer backlog at once.");
+		const quietSecond = await (await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 3, source: "overview", body: "Second quiet topic.", quiet: true }) })).json();
+		assert.equal((await fetch(finishEndpoint, { method: "POST", headers, body: "{}" })).status, 200);
+		assert.equal(roundsServer.getThread(quietSecond.thread.id).queued, false, "Sending the round delivers queued threads through the pass.");
+
 		const entry = roundsServer.entryUrl();
 		assert.equal((await fetch(entry, { redirect: "manual" })).status, 302, "Reissued entry links must authenticate.");
 		assert.equal((await fetch(entry, { redirect: "manual" })).status, 403, "Reissued entry links must be single-use.");
@@ -570,7 +619,7 @@ try {
 		const browserPosts = [];
 		let browserPass;
 		const browserServer = await createCodeReviewServer(ordered, {
-			onThreadPost: async (round, thread, turn) => { browserPosts.push({ thread, turn }); },
+			onThreadPost: async (round, thread, turns) => { browserPosts.push({ thread, turn: turns[0] }); },
 			onFinishPass: async (round, note, threadList, summary) => { browserPass = { round: round.number, note, threadList, summary }; return { stale: false }; },
 		});
 		const browser = await puppeteer.launch({ headless: true, executablePath, args: ["--no-sandbox"] });
@@ -780,7 +829,8 @@ try {
 			assert.match(await driftPage.$eval('[data-round-chip]', (chip) => chip.textContent), /round 3/, "A current-round tab that slept through round-ready must catch up on reconnect.");
 			await driftPage.close();
 
-			const plainServer = await createCodeReviewServer(plainReview, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+			const plainDeliveries = [];
+			const plainServer = await createCodeReviewServer(plainReview, { onThreadPost: async (round, thread, turns) => { plainDeliveries.push(turns); }, onFinishPass: async () => ({ stale: false }) });
 			try {
 				const plainPage = await browser.newPage();
 				await plainPage.goto(plainServer.url, { waitUntil: "domcontentloaded" });
@@ -796,6 +846,38 @@ try {
 				await plainPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false);
 				await plainPage.click(".review-file.active [data-selection-cancel]");
 				assert.equal(await plainPage.$eval(".review-file.active [data-selection-composer]", (composer) => composer.hidden), true, "Cancel must hide the visible file's composer even when file 0 is a reference.");
+				await plainPage.evaluate(() => {
+					const code = document.querySelector(".review-file.active tr.diff-add .diff-code span, .review-file.active tr.diff-del .diff-code span, .review-file.active tr.diff-context .diff-code span");
+					const range = document.createRange();
+					range.selectNodeContents(code);
+					const selection = window.getSelection();
+					selection.removeAllRanges(); selection.addRange(range);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false);
+				await plainPage.type(".review-file.active [data-selection-feedback]", "Quiet nit.");
+				await plainPage.$eval(".review-file.active [data-selection-feedback]", (textarea) => {
+					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelector(".thread-card.queued"));
+				assert.equal(plainDeliveries.length, 0, "Shift+Command+Enter must not message Pi.");
+				assert.match(await plainPage.$eval(".thread-card.queued .thread-status", (label) => label.textContent), /Queued for round/);
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 queued)", "The send button must count queued threads.");
+				await plainPage.type(".thread-card.queued [data-thread-reply]", "Answer now please.");
+				await plainPage.click(".thread-card.queued [data-thread-send]");
+				await plainPage.waitForFunction(() => !document.querySelector(".thread-card.queued"));
+				assert.equal(plainDeliveries.length, 1, "A live reply escalates with exactly one delivery.");
+				assert.equal(plainDeliveries[0].length, 2, "Escalation must deliver both reviewer messages.");
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi", "Escalation must clear the queued count.");
+				await plainPage.$eval(".thread-card [data-thread-reply]", (textarea) => {
+					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+				});
+				await plainPage.type(".thread-card [data-thread-reply]", "Mouse follow-up.");
+				await plainPage.click(".thread-card [data-thread-send]");
+				await plainPage.waitForFunction(() => document.querySelectorAll(".thread-card .thread-turn").length >= 3);
+				assert.equal(plainDeliveries.length, 2, "The mouse click must deliver immediately.");
+				assert.equal(plainDeliveries[1].length, 1, "A discarded quiet keystroke must not leak into a later mouse click.");
+				assert.equal(await plainPage.$(".thread-card.queued"), null, "Mouse clicks always post live.");
 				await plainPage.close();
 			} finally {
 				await plainServer.close();

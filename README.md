@@ -32,11 +32,11 @@ Everything that needs your attention is one uniform queue: every Pi commentary n
 1. Read the brief overview; each general comment you post there starts its own topic thread, and the tally tracks all threads (notes included) from first load.
 2. Use the left sidebar to follow Pi's primary review order; expand **Reference files** only when you want to inspect low-value generated or binary artifacts.
 3. Read the unified diff and Pi's commentary on the right.
-4. Select changed/context code within one file, write your comment, and press Command+Enter (Ctrl+Enter on other platforms) to post it. Each post opens a live thread with Pi.
+4. Select changed/context code within one file, write your comment, and press Command+Enter (Ctrl+Enter on other platforms) to post it. Each post opens a live thread with Pi. Add Shift (`⇧⌘⏎`) to **quiet-add** instead: the thread is created and visible but nothing reaches Pi until you send the round — GitHub-PR-style batch review without a mode toggle. Quiet replies keep a queued thread queued; replying with plain `⌘⏎` escalates it, delivering the whole backlog at once. The send button counts what's waiting (“Send round to Pi (3 queued)”), and the Phase 5 contract guarantees queued threads get anchored resolutions in the next round.
 5. Reply beneath any Pi commentary note to discuss it, or click its **Resolve** to settle it without messaging Pi.
 6. Pi's answers stream into each thread. The topbar counts everything awaiting you — unread notes and Pi replies alike; press `n` (or click the strip) to walk them. Sidebar badges count per file.
 7. Resolve threads yourself — Pi can only propose resolution. Replying to a resolved thread reopens it.
-8. Triage without the mouse: `Esc` leaves the text box (keeping your draft), `e` resolves the current thread or note, `n` continues, `Shift+n` steps backwards, and `?` shows the shortcuts guide.
+8. Triage without the mouse: `Esc` leaves the text box (keeping your draft), `e` resolves the current thread or note, `n` continues, `Shift+n` steps backwards, `⇧⌘⏎` quiet-adds, and `?` shows the shortcuts guide.
 9. Click **Send round to Pi** to hand Pi one summary of the pass. It lists open threads you engaged with; your untouched notes are never echoed back to Pi.
 
 While Pi is busy, posts queue and are delivered together the moment Pi settles, so a slow turn never blocks you; Pi then answers each queued thread in one pass.

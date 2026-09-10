@@ -223,13 +223,30 @@ export async function createCodeReviewServer(review, options) {
 					return;
 				}
 				broadcastThread(round, result.thread);
+				if (result.thread.queued) {
+					writeJson(res, 200, { thread: result.thread, summary: round.store.summary(), queued: true });
+					return;
+				}
 				let deliveryFailed = false;
+				let responseThread = result.thread;
+				const turnsToDeliver = result.escalated === true
+					? result.thread.turns.filter((turn) => turn.author === "user")
+					: [result.thread.turns[result.thread.turns.length - 1]];
 				try {
-					await options.onThreadPost(round, result.thread, result.thread.turns[result.thread.turns.length - 1]);
+					await options.onThreadPost(round, result.thread, turnsToDeliver);
 				} catch {
 					deliveryFailed = true;
+					if (result.escalated === true) {
+						// A failed escalation must not strand the quiet backlog: requeue it
+						// so the full history flows through the next escalation or the pass.
+						const requeued = round.store.requeue(result.thread.id);
+						if (requeued) {
+							responseThread = requeued;
+							broadcastThread(round, requeued);
+						}
+					}
 				}
-				writeJson(res, 200, { thread: result.thread, summary: round.store.summary(), ...(deliveryFailed ? { deliveryFailed: true } : {}) });
+				writeJson(res, 200, { thread: responseThread, summary: round.store.summary(), ...(result.escalated === true && !deliveryFailed ? { escalated: true } : {}), ...(deliveryFailed ? { deliveryFailed: true } : {}) });
 				return;
 			}
 			if (req.method === "POST" && requestUrl.pathname === RESOLVE_PATH) {
@@ -280,6 +297,8 @@ export async function createCodeReviewServer(review, options) {
 				}
 				// A new round may have opened while the handoff awaited; never lock it retroactively.
 				const superseded = current() !== round;
+				// The pass summary just delivered every queued thread in full.
+				for (const delivered of round.store.markAllDelivered()) broadcastThread(round, delivered);
 				if (!superseded) {
 					phase = "revising";
 					broadcastPhase();

@@ -101,6 +101,7 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 			const thread = {
 				id: mintId(),
 				status: "open",
+				live: false,
 				piProposedResolve: false,
 				source: "commentary",
 				file: file.path,
@@ -117,6 +118,7 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		threads.set(carriedThread.id, {
 			id: carriedThread.id,
 			status: "open",
+			live: true,
 			piProposedResolve: carriedThread.piProposedResolve === true,
 			source: carriedThread.source,
 			...(carriedThread.highlight === undefined ? {} : { highlight: carriedThread.highlight }),
@@ -127,7 +129,12 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 	}
 	const seededCount = threads.size;
 
-	const publicThread = (thread) => ({ ...thread, ...(thread.carried ? { carried: { ...thread.carried } } : {}), turns: thread.turns.map((turn) => ({ ...turn })) });
+	const publicThread = (thread) => ({
+		...thread,
+		queued: !thread.live && thread.turns.some((turn) => turn.author === "user"),
+		...(thread.carried ? { carried: { ...thread.carried } } : {}),
+		turns: thread.turns.map((turn) => ({ ...turn })),
+	});
 	const lastAuthor = (thread) => thread.turns[thread.turns.length - 1]?.author;
 
 	function validateSelection(item) {
@@ -149,21 +156,28 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		};
 	}
 
-	function createThread(fields, turns) {
+	function createThread(fields, turns, quiet) {
 		if (threads.size - seededCount >= limits.maxThreads) return { error: "too-many-threads" };
-		const thread = { id: mintId(), status: "open", piProposedResolve: false, ...fields, turns };
+		const thread = { id: mintId(), status: "open", live: quiet !== true, piProposedResolve: false, ...fields, turns };
 		threads.set(thread.id, thread);
 		return { thread: publicThread(thread), created: true };
 	}
 
-	function appendTurn(thread, author, body, ts) {
+	function appendTurn(thread, author, body, ts, quiet) {
 		if (thread.turns.length >= limits.maxTurnsPerThread) return { error: "thread-full" };
 		thread.turns.push({ author, body, ts });
+		let escalated = false;
 		if (author === "user") {
 			thread.status = "open";
 			thread.piProposedResolve = false;
+			// A quiet turn keeps an undelivered thread queued; a live turn on a queued
+			// thread escalates it so the whole backlog is delivered. Live threads stay live.
+			if (!thread.live && quiet !== true) {
+				thread.live = true;
+				escalated = thread.turns.filter((turn) => turn.author === "user").length > 1;
+			}
 		}
-		return { thread: publicThread(thread), created: false };
+		return { thread: publicThread(thread), created: false, ...(escalated ? { escalated: true } : {}) };
 	}
 
 	/** Validate and apply one reviewer post: a new thread or a reply to an existing one. */
@@ -171,24 +185,25 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		if (!value || typeof value !== "object" || !validText(value.body, limits)) return { error: "invalid" };
 		const body = value.body.trim();
 		const ts = Date.now();
+		const quiet = value.quiet === true;
 		if (value.threadId !== undefined) {
 			const thread = typeof value.threadId === "string" ? threads.get(value.threadId) : undefined;
 			if (!thread) return { error: "unknown-thread" };
-			return appendTurn(thread, "user", body, ts);
+			return appendTurn(thread, "user", body, ts, quiet);
 		}
 		if (value.source === "selection") {
 			const anchor = validateSelection(value);
 			if (!anchor) return { error: "invalid" };
-			return createThread({ source: "selection", ...anchor }, [{ author: "user", body, ts }]);
+			return createThread({ source: "selection", ...anchor }, [{ author: "user", body, ts }], quiet);
 		}
 		if (value.source === "commentary") {
 			const existing = typeof value.file === "string" ? threads.get(commentaryThreadIds.get(`${value.file}\0${value.commentaryId}`)) : undefined;
 			if (!existing) return { error: "invalid" };
-			return appendTurn(existing, "user", body, ts);
+			return appendTurn(existing, "user", body, ts, quiet);
 		}
 		if (value.source === "overview") {
 			if (!review.overview) return { error: "invalid" };
-			return createThread({ source: "overview" }, [{ author: "user", body, ts }]);
+			return createThread({ source: "overview" }, [{ author: "user", body, ts }], quiet);
 		}
 		return { error: "invalid" };
 	}
@@ -217,6 +232,21 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		return thread ? publicThread(thread) : undefined;
 	}
 
+	/**
+	 * Sending a round delivers every open queued thread through the pass summary.
+	 * Resolved quiet threads were withdrawn, not delivered; they keep their queued
+	 * state so a later reopen can still surface their content.
+	 */
+	function markAllDelivered() {
+		const delivered = [];
+		for (const thread of threads.values()) {
+			if (thread.live || thread.status === "resolved" || !thread.turns.some((turn) => turn.author === "user")) continue;
+			thread.live = true;
+			delivered.push(publicThread(thread));
+		}
+		return delivered;
+	}
+
 	function list() {
 		return [...threads.values()].map(publicThread);
 	}
@@ -234,5 +264,13 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		return counts;
 	}
 
-	return { postUserTurn, postPiReply, setResolved, getThread, list, summary };
+	/** Return a failed escalation's backlog to the queued state so nothing is lost. */
+	function requeue(threadId) {
+		const thread = threads.get(threadId);
+		if (!thread || thread.status !== "open") return undefined;
+		thread.live = false;
+		return publicThread(thread);
+	}
+
+	return { postUserTurn, postPiReply, setResolved, getThread, list, summary, markAllDelivered, requeue };
 }

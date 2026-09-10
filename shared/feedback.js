@@ -30,11 +30,13 @@ function roundAttribute(round) {
 	return round === undefined ? "" : ` round="${Number(round)}"`;
 }
 
-/** Format one reviewer thread post as the user message delivered to Pi. */
-export function formatThreadMessageXml(review, thread, turn, round) {
+/** Format one reviewer thread post (or an escalated backlog of turns) as the user message delivered to Pi. */
+export function formatThreadMessageXml(review, thread, turns, round) {
 	const lines = [`<code-review-thread snapshot="${attr(review.id)}"${roundAttribute(round)} ${threadAttributes(thread)}${anchorAttributes(thread)}>`];
 	if (thread.highlight !== undefined) lines.push(`  <highlight>${cdata(thread.highlight)}</highlight>`);
-	lines.push(`  <message author="${attr(turn.author)}">${cdata(turn.body)}</message>`);
+	for (const turn of Array.isArray(turns) ? turns : [turns]) {
+		lines.push(`  <message author="${attr(turn.author)}">${cdata(turn.body)}</message>`);
+	}
 	lines.push("</code-review-thread>");
 	return lines.join("\n");
 }
@@ -42,16 +44,28 @@ export function formatThreadMessageXml(review, thread, turn, round) {
 /** Format the finish-pass summary delivered to Pi when the reviewer completes a pass. */
 export function formatReviewPassXml(review, threads, summary, stale, note, round) {
 	const unreadNotes = threads.filter((thread) => thread.status === "open" && !thread.turns.some((turn) => turn.author === "user")).length;
+	const queued = threads.filter((thread) => thread.status === "open" && thread.queued === true).length;
 	const lines = [
-		`<code-review-pass snapshot="${attr(review.id)}"${roundAttribute(round)} stale="${stale ? "true" : "false"}" open="${summary.open}" awaiting-user="${summary.awaitingUser}" awaiting-pi="${summary.awaitingPi}" resolved="${summary.resolved}" unread-notes="${unreadNotes}">`,
+		`<code-review-pass snapshot="${attr(review.id)}"${roundAttribute(round)} stale="${stale ? "true" : "false"}" open="${summary.open}" awaiting-user="${summary.awaitingUser}" awaiting-pi="${summary.awaitingPi - queued}" resolved="${summary.resolved}" unread-notes="${unreadNotes}" queued="${queued}">`,
 	];
 	if (note) lines.push(`  <note>${cdata(note)}</note>`);
 	for (const thread of threads) {
 		if (thread.status !== "open") continue;
 		if (!thread.turns.some((turn) => turn.author === "user")) continue;
 		const last = thread.turns[thread.turns.length - 1];
-		lines.push(`  <open-thread ${threadAttributes(thread)} last-author="${attr(last?.author ?? "user")}">`);
-		if (last) lines.push(`    <last-message>${cdata(last.body)}</last-message>`);
+		if (thread.queued === true) {
+			// Quiet threads were never delivered individually; the pass carries their
+			// full reviewer content instead of only the newest message.
+			lines.push(`  <open-thread ${threadAttributes(thread)} queued="true" last-author="${attr(last?.author ?? "user")}">`);
+			if (thread.highlight !== undefined) lines.push(`    <highlight>${cdata(thread.highlight)}</highlight>`);
+			for (const turn of thread.turns) {
+				if (turn.author !== "user") continue;
+				lines.push(`    <message author="user">${cdata(turn.body)}</message>`);
+			}
+		} else {
+			lines.push(`  <open-thread ${threadAttributes(thread)} last-author="${attr(last?.author ?? "user")}">`);
+			if (last) lines.push(`    <last-message>${cdata(last.body)}</last-message>`);
+		}
 		lines.push("  </open-thread>");
 	}
 	lines.push("</code-review-pass>");

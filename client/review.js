@@ -83,7 +83,17 @@
   };
   const postedStatus = (result, message) => {
     if (result.deliveryFailed) setStatus('Posted, but delivery to Pi failed; it stays in this thread and the pass summary.', true);
+    else if (result.queued) setStatus('Queued — delivered when you send the round.');
+    else if (result.escalated) setStatus('Thread sent to Pi, including its quiet notes.');
     else setStatus(message);
+  };
+  // Shift on the posting keystroke marks the post quiet; consumed per click so
+  // plain button clicks always post live.
+  let quietIntent = false;
+  const consumeQuietIntent = () => {
+    const quiet = quietIntent;
+    quietIntent = false;
+    return quiet;
   };
 
   const isAwaiting = (thread) => thread.status === 'open' && thread.turns.length > 0 && thread.turns[thread.turns.length - 1].author === 'pi';
@@ -248,16 +258,21 @@
     textarea.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
       event.preventDefault();
-      if (!add.disabled) add.click();
+      if (!add.disabled) {
+        quietIntent = event.shiftKey;
+        add.click();
+      }
     });
     composer.querySelector('[data-selection-cancel]').addEventListener('click', cancelDraft);
     add.addEventListener('click', async () => {
+      const quiet = consumeQuietIntent();
       if (!draft || !textarea.value.trim() || add.dataset.busy) return;
       add.dataset.busy = '1';
       add.disabled = true;
       try {
         const result = await postJson(POST_PATH, {
           round: myRound,
+          ...(quiet ? { quiet: true } : {}),
           source: 'selection',
           file: draft.file,
           side: draft.side,
@@ -271,6 +286,7 @@
         textarea.value = '';
         upsertThread(result.thread);
         postedStatus(result, 'Comment sent to Pi.');
+        currentThreadId = result.thread.id;
       } catch (error) {
         add.disabled = false;
         setStatus(errorMessage(error), true);
@@ -335,7 +351,8 @@
     header.className = 'thread-card-header';
     const status = document.createElement('span');
     status.className = 'thread-status';
-    status.textContent = thread.status === 'resolved' ? 'Resolved' : awaiting ? 'Pi replied' : 'Waiting for Pi';
+    status.textContent = thread.status === 'resolved' ? 'Resolved' : awaiting ? 'Pi replied' : thread.queued ? 'Queued for round' : 'Waiting for Pi';
+    card.classList.toggle('queued', thread.status === 'open' && thread.queued === true);
     const actions = document.createElement('div');
     actions.className = 'composer-actions';
     const resolve = document.createElement('button');
@@ -393,15 +410,19 @@
       textarea.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
         event.preventDefault();
-        if (!send.disabled) send.click();
+        if (!send.disabled) {
+          quietIntent = event.shiftKey;
+          send.click();
+        }
       });
       send.addEventListener('click', async () => {
+        const quiet = consumeQuietIntent();
         const body = textarea.value.trim();
         if (!body) return;
         send.disabled = true;
         textarea.value = '';
         try {
-          const result = await postJson(POST_PATH, { threadId: thread.id, body });
+          const result = await postJson(POST_PATH, { threadId: thread.id, body, ...(quiet ? { quiet: true } : {}) });
           upsertThread(result.thread);
           postedStatus(result, 'Reply sent to Pi.');
         } catch (error) {
@@ -463,13 +484,18 @@
       referenceBadge.hidden = referenceCount === 0;
       referenceBadge.textContent = String(referenceCount);
     }
+    const queuedCount = all.filter((thread) => thread.status === 'open' && thread.queued === true).length;
+    if (finishButton && !finishButton.dataset.busy) {
+      finishButton.textContent = queuedCount ? 'Send round to Pi (' + queuedCount + ' queued)' : 'Send round to Pi';
+    }
     if (tally) {
       tally.hidden = all.length === 0;
       const counts = {
         open: all.filter((thread) => thread.status === 'open').length,
         'awaiting you': awaiting.length,
-        'awaiting Pi': all.filter((thread) => thread.status === 'open' && !isAwaiting(thread)).length,
+        'awaiting Pi': all.filter((thread) => thread.status === 'open' && !isAwaiting(thread) && thread.queued !== true).length,
         resolved: all.filter((thread) => thread.status === 'resolved').length,
+        ...(queuedCount ? { queued: queuedCount } : {}),
       };
       tally.replaceChildren(...Object.entries(counts).map(([label, value]) => {
         const item = document.createElement('span');
@@ -545,14 +571,18 @@
     textarea.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
       event.preventDefault();
-      if (!button.disabled) button.click();
+      if (!button.disabled) {
+        quietIntent = event.shiftKey;
+        button.click();
+      }
     });
     button.addEventListener('click', async () => {
+      const quiet = consumeQuietIntent();
       const body = textarea.value.trim();
       if (!body) return;
       button.disabled = true;
       try {
-        const result = await postJson(POST_PATH, { round: myRound, source: 'commentary', file: section.dataset.path, commentaryId: button.dataset.commentaryPost, body });
+        const result = await postJson(POST_PATH, { round: myRound, ...(quiet ? { quiet: true } : {}), source: 'commentary', file: section.dataset.path, commentaryId: button.dataset.commentaryPost, body });
         textarea.value = '';
         upsertThread(result.thread);
         postedStatus(result, 'Reply sent to Pi.');
@@ -577,14 +607,18 @@
     overviewTextarea.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
       event.preventDefault();
-      if (!overviewPost.disabled) overviewPost.click();
+      if (!overviewPost.disabled) {
+        quietIntent = event.shiftKey;
+        overviewPost.click();
+      }
     });
     overviewPost.addEventListener('click', async () => {
+      const quiet = consumeQuietIntent();
       const body = overviewTextarea.value.trim();
       if (!body) return;
       overviewPost.disabled = true;
       try {
-        const result = await postJson(POST_PATH, { round: myRound, source: 'overview', body });
+        const result = await postJson(POST_PATH, { round: myRound, ...(quiet ? { quiet: true } : {}), source: 'overview', body });
         overviewTextarea.value = '';
         upsertThread(result.thread);
         postedStatus(result, 'Feedback sent to Pi.');
@@ -764,6 +798,7 @@
     if (!window.confirm('Send this review pass to Pi?' + (openCount ? ' Open threads: ' + openCount + '.' : ''))) return;
     finishButton.disabled = true;
     const original = finishButton.textContent;
+    finishButton.dataset.busy = '1';
     finishButton.textContent = 'Sending…';
     setStatus('Handing the pass to Pi…');
     try {
@@ -773,7 +808,9 @@
       setStatus(errorMessage(error), true);
     } finally {
       finishButton.disabled = false;
+      delete finishButton.dataset.busy;
       finishButton.textContent = original;
+      updateAggregates();
     }
   });
   window.addEventListener('beforeunload', (event) => {

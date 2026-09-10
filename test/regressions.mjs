@@ -265,6 +265,36 @@ try {
 	assert.match(quietPassXml, / awaiting-pi="1" resolved="0" unread-notes="1" queued="2">/, "The pass header excludes queued threads from awaiting-pi.");
 	assert.equal(quietStore.markAllDelivered().length, 2, "Sending the round delivers every queued thread.");
 	assert.equal(quietStore.getThread(quietTwo.id).queued, false, "Delivered threads leave the queued state.");
+	const amendStore = createThreadStore(ordered);
+	const amendThread = amendStore.postUserTurn({ source: "overview", body: "First quiet.", quiet: true }).thread;
+	amendStore.postUserTurn({ threadId: amendThread.id, body: "Second quiet.", quiet: true });
+	const [firstTurn, secondTurn] = amendStore.getThread(amendThread.id).turns;
+	assert.notEqual(firstTurn.seq, secondTurn.seq, "Turns carry distinct sequence numbers.");
+	assert.equal(amendStore.amendQueuedTurn(amendThread.id, firstTurn.seq, "Edited quiet.").thread.turns[0].body, "Edited quiet.");
+	assert.equal(amendStore.amendQueuedTurn(amendThread.id, 99, "x").error, "unknown-turn");
+	assert.equal(amendStore.amendQueuedTurn(amendThread.id, firstTurn.seq, "  ").error, "invalid");
+	assert.equal(amendStore.amendQueuedTurn(amendThread.id, secondTurn.seq).thread.turns.length, 1, "Deleting one queued message keeps the rest.");
+	const thirdTurn = amendStore.postUserTurn({ threadId: amendThread.id, body: "Third quiet.", quiet: true }).thread.turns.at(-1);
+	assert.notEqual(thirdTurn.seq, secondTurn.seq, "Deleted sequence numbers are never reused.");
+	amendStore.amendQueuedTurn(amendThread.id, firstTurn.seq);
+	assert.deepEqual(amendStore.amendQueuedTurn(amendThread.id, thirdTurn.seq), { removed: true, threadId: amendThread.id });
+	assert.equal(amendStore.getThread(amendThread.id), undefined, "Deleting the last queued message removes the thread.");
+	const seedReply = amendStore.postUserTurn({ source: "commentary", file: "untracked.txt", commentaryId: "new-file", body: "Quiet note reply.", quiet: true }).thread;
+	const revertedSeed = amendStore.amendQueuedTurn(seedReply.id, seedReply.turns.at(-1).seq).thread;
+	assert.equal(revertedSeed.queued, false, "Deleting the only quiet reply reverts the note to a virgin seed.");
+	assert.equal(revertedSeed.turns.length, 1);
+	assert.equal(amendStore.amendQueuedTurn(seedReply.id, revertedSeed.turns[0].seq, "hack").error, "unknown-turn", "Pi's own note is not amendable.");
+	const liveAmendThread = amendStore.postUserTurn({ source: "overview", body: "Live now." }).thread;
+	assert.equal(amendStore.amendQueuedTurn(liveAmendThread.id, liveAmendThread.turns[0].seq, "rewrite").error, "not-queued", "Delivered messages are immutable.");
+	const withdrawnAmend = amendStore.postUserTurn({ source: "overview", body: "Withdraw me.", quiet: true }).thread;
+	amendStore.setResolved(withdrawnAmend.id, true);
+	assert.equal(amendStore.amendQueuedTurn(withdrawnAmend.id, withdrawnAmend.turns[0].seq, "edit").error, "thread-resolved");
+	const tinyStore = createThreadStore(ordered, { ...THREAD_LIMITS, maxThreads: 1 });
+	const tinyThread = tinyStore.postUserTurn({ source: "overview", body: "One.", quiet: true }).thread;
+	assert.equal(tinyStore.postUserTurn({ source: "overview", body: "Two." }).error, "too-many-threads");
+	tinyStore.amendQueuedTurn(tinyThread.id, tinyThread.turns[0].seq);
+	assert.equal(tinyStore.postUserTurn({ source: "overview", body: "Two." }).error, undefined, "Deleting a queued thread frees its slot.");
+
 	const withdrawn = quietStore.postUserTurn({ source: "overview", body: "Withdrawn quiet.", quiet: true }).thread;
 	quietStore.setResolved(withdrawn.id, true);
 	assert.equal(quietStore.markAllDelivered().length, 0, "Resolved quiet threads are withdrawn, not delivered.");
@@ -410,6 +440,35 @@ try {
 		assert.equal(failedEscalation.thread.queued, true, "A failed escalation requeues the backlog.");
 		assert.equal(server.getThread(quietOv.thread.id).queued, true);
 
+		const amendEndpoint = `${origin}/__pi_code_review_amend__`;
+		const quietTurns = server.getThread(quietOv.thread.id).turns;
+		assert.equal((await fetch(amendEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: quietOv.thread.id, seq: "1", body: "x" }) })).status, 400, "Amend seq must be an integer.");
+		assert.equal((await fetch(amendEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: quietOv.thread.id, seq: quietTurns[0].seq, delete: true, body: "x" }) })).status, 400, "Delete cannot carry a body.");
+		const editedQuiet = await (await fetch(amendEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: quietOv.thread.id, seq: quietTurns[0].seq, body: "Rewritten quiet start." }) })).json();
+		assert.equal(editedQuiet.thread.turns[0].body, "Rewritten quiet start.");
+		const liveUserSeq = server.getThread(accepted.thread.id).turns.find((turn) => turn.author === "user").seq;
+		assert.equal((await fetch(amendEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: accepted.thread.id, seq: liveUserSeq, body: "rewrite history" }) })).status, 409, "Delivered messages are immutable over HTTP.");
+		const disposable = await (await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ source: "overview", body: "Disposable.", quiet: true }) })).json();
+		const removalEvents = await fetch(`${origin}/__pi_code_review_events__`, { headers: { cookie } });
+		const removalReader = removalEvents.body.getReader();
+		const removalDecoder = new TextDecoder();
+		let removalBuffer = "";
+		const readRemoval = async (marker) => {
+			const deadline = Date.now() + 5_000;
+			while (!removalBuffer.includes(marker)) {
+				if (Date.now() > deadline) throw new Error(`Timed out waiting for SSE marker: ${marker}`);
+				const { value, done } = await removalReader.read();
+				if (done) throw new Error("SSE stream ended early.");
+				removalBuffer += removalDecoder.decode(value, { stream: true });
+			}
+		};
+		const removedResp = await (await fetch(amendEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: disposable.thread.id, seq: disposable.thread.turns[0].seq, delete: true }) })).json();
+		assert.equal(removedResp.removed, true);
+		assert.equal(server.getThread(disposable.thread.id), undefined, "Deleting the last queued message removes the thread server-side.");
+		await readRemoval("event: thread-removed");
+		assert.ok(removalBuffer.includes(disposable.thread.id), "Removals must broadcast the thread id to connected tabs.");
+		await removalReader.cancel();
+
 		const viewedEndpoint = `${origin}/__pi_code_review_viewed__`;
 		assert.equal((await fetch(viewedEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ file: "untracked.txt", viewed: "yes" }) })).status, 400, "Viewed must be an explicit boolean.");
 		assert.equal((await fetch(viewedEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ file: "missing.txt", viewed: true }) })).status, 404, "Viewed only tracks files in the snapshot.");
@@ -430,6 +489,9 @@ try {
 		assert.equal(posts[0].round, 1, "Thread posts must report their round.");
 		assert.deepEqual(passes[0].summary, { open: 2, awaitingUser: 0, awaitingPi: 2, resolved: 2 });
 		assert.equal(server.getThread(quietOv.thread.id).queued, false, "The pass delivers the requeued backlog in full.");
+		const passQuiet = passes[0].threadList.find((thread) => thread.id === quietOv.thread.id);
+		assert.equal(passQuiet.turns[0].body, "Rewritten quiet start.", "The pass delivers the edited text, not the original.");
+		assert.equal((await fetch(amendEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: quietOv.thread.id, seq: quietTurns[1].seq, body: "too late" }) })).status, 409, "Round delivery freezes queued messages.");
 		assert.equal((await fetch(viewedEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ round: 1, file: "unstaged.txt", viewed: true }) })).status, 200, "Viewed bookkeeping stays available while Pi revises.");
 	} finally {
 		await server.close();
@@ -453,13 +515,20 @@ try {
 		const bootstrap = await fetch(concurrentServer.url, { redirect: "manual" });
 		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
 		const request = { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: "{}" };
+		const jsonRequest = (payload) => ({ method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify(payload) });
+		const preQuiet = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ source: "overview", body: "Pre-finish quiet.", quiet: true }))).json();
 		const firstFinish = fetch(`${origin}/__pi_code_review_finish__`, request);
 		await concurrentFinishEntered;
 		const secondFinish = await fetch(`${origin}/__pi_code_review_finish__`, request);
 		assert.equal(secondFinish.status, 409, "A concurrent finish must be rejected while the first handoff is pending.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_amend__`, jsonRequest({ threadId: preQuiet.thread.id, seq: preQuiet.thread.turns[0].seq, body: "sneaky edit" }))).status, 409, "Amends are serialized against an in-flight finish pass.");
+		const midQuiet = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ source: "overview", body: "Mid-finish quiet.", quiet: true }))).json();
+		assert.equal(midQuiet.queued, true, "Quiet posts stay possible while the handoff awaits.");
 		releaseConcurrentFinish();
 		assert.equal((await firstFinish).status, 200);
 		assert.equal(concurrentFinishCalls, 1, "Concurrent finish requests must invoke the handoff exactly once.");
+		assert.equal(concurrentServer.getThread(preQuiet.thread.id).queued, false, "Queued threads captured by the pass are delivered.");
+		assert.equal(concurrentServer.getThread(midQuiet.thread.id).queued, true, "A quiet thread created during the handoff was not in the pass and must stay queued.");
 	} finally {
 		releaseConcurrentFinish?.();
 		await concurrentServer.close();
@@ -895,6 +964,65 @@ try {
 				assert.equal(plainDeliveries.length, 2, "The mouse click must deliver immediately.");
 				assert.equal(plainDeliveries[1].length, 1, "A discarded quiet keystroke must not leak into a later mouse click.");
 				assert.equal(await plainPage.$(".thread-card.queued"), null, "Mouse clicks always post live.");
+				// The active file's only selectable line already hosts the escalated
+				// thread's highlight and overlapping selections are rejected, so run the
+				// amend flow in a different review file.
+				const otherIndex = await plainPage.evaluate(() => {
+					const target = [...document.querySelectorAll("[data-review-file]")].find((section) => !section.classList.contains("active") && section.dataset.reviewMode === "review" && section.querySelector("tr.diff-add .diff-code span, tr.diff-del .diff-code span, tr.diff-context .diff-code span"));
+					return target ? Number(target.dataset.reviewFile) : -1;
+				});
+				assert.notEqual(otherIndex, -1, "The fixture needs a second selectable review file.");
+				await plainPage.click(`[data-file-nav="${otherIndex}"]`);
+				await plainPage.evaluate(() => {
+					const code = document.querySelector(".review-file.active tr.diff-add .diff-code span, .review-file.active tr.diff-del .diff-code span, .review-file.active tr.diff-context .diff-code span");
+					const range = document.createRange();
+					range.selectNodeContents(code);
+					const selection = window.getSelection();
+					selection.removeAllRanges(); selection.addRange(range);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false);
+				await plainPage.type(".review-file.active [data-selection-feedback]", "Editable nit.");
+				await plainPage.$eval(".review-file.active [data-selection-feedback]", (textarea) => {
+					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelector(".thread-card.queued [data-turn-edit]"));
+				await plainPage.type(".thread-card.queued [data-thread-reply]", "Second nit.");
+				await plainPage.$eval(".thread-card.queued [data-thread-reply]", (textarea) => {
+					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelectorAll(".thread-card.queued [data-turn-edit]").length === 2, {}, undefined);
+				await plainPage.click(".thread-card.queued [data-turn-edit]");
+				await plainPage.evaluate(() => {
+					const editor = document.querySelector("[data-turn-editor]");
+					editor.value = "Draft one.";
+					editor.dispatchEvent(new Event("input", { bubbles: true }));
+				});
+				await plainPage.click(".thread-card.queued [data-turn-edit]");
+				await plainPage.evaluate(() => {
+					const editors = [...document.querySelectorAll("[data-turn-editor]")];
+					const editor = editors[editors.length - 1];
+					editor.value = "Sharper nit.";
+					editor.dispatchEvent(new Event("input", { bubbles: true }));
+					editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, cancelable: true }));
+				});
+				await plainPage.waitForFunction(() => {
+					const editors = document.querySelectorAll("[data-turn-editor]");
+					return editors.length === 1 && editors[0].value === "Draft one." && document.querySelector(".thread-card.queued").textContent.includes("Sharper nit.");
+				});
+				assert.equal(plainDeliveries.length, 2, "Editing queued content must not message Pi.");
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 queued)");
+				await plainPage.$eval("[data-turn-editor]", (editor) => {
+					editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+				});
+				await plainPage.waitForFunction(() => !document.querySelector("[data-turn-editor]") && document.querySelectorAll(".thread-card.queued [data-turn-edit]").length === 2);
+				await plainPage.$$eval(".thread-card.queued [data-turn-delete]", (buttons) => buttons[buttons.length - 1].click());
+				await plainPage.waitForFunction(() => document.querySelectorAll(".thread-card.queued [data-turn-delete]").length === 1);
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 queued)", "A partially deleted thread stays queued.");
+				await plainPage.click(".thread-card.queued [data-turn-delete]");
+				await plainPage.waitForFunction(() => !document.querySelector(".thread-card.queued"));
+				assert.equal(plainDeliveries.length, 2, "Deleting queued content must not message Pi.");
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi", "Deleting the queued thread clears the count.");
 				const plainTotal = plainReview.files.length;
 				assert.equal(await plainPage.$eval("[data-viewed-count]", (label) => label.textContent), `0 / ${plainTotal} viewed`);
 				await plainPage.keyboard.press("x");

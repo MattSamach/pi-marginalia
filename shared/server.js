@@ -8,6 +8,7 @@ const RESOLVE_PATH = "/__pi_code_review_resolve__";
 const FINISH_PATH = "/__pi_code_review_finish__";
 const RESUME_PATH = "/__pi_code_review_resume__";
 const VIEWED_PATH = "/__pi_code_review_viewed__";
+const AMEND_PATH = "/__pi_code_review_amend__";
 const EVENTS_PATH = "/__pi_code_review_events__";
 const SSE_HEARTBEAT_MS = 25_000;
 const SECURITY_HEADERS = {
@@ -22,6 +23,9 @@ const STORE_ERRORS = {
 	"unknown-thread": { status: 404, message: "Unknown thread." },
 	"thread-full": { status: 409, message: "This thread has reached its turn limit." },
 	"too-many-threads": { status: 409, message: "This review has reached its thread limit." },
+	"not-queued": { status: 409, message: "This message was already delivered to Pi and can no longer be changed." },
+	"thread-resolved": { status: 409, message: "Reopen this thread before changing its queued messages." },
+	"unknown-turn": { status: 404, message: "Unknown message." },
 };
 
 function htmlHeaders(nonce) {
@@ -278,6 +282,43 @@ export async function createCodeReviewServer(review, options) {
 				writeJson(res, 200, { viewedFiles: [...round.viewed] });
 				return;
 			}
+			if (req.method === "POST" && requestUrl.pathname === AMEND_PATH) {
+				if (!guardMutation(req, res)) return;
+				const body = await readGuardedBody(req, res);
+				if (body === undefined) return;
+				const deleting = body?.delete === true;
+				if (!body || typeof body !== "object" || typeof body.threadId !== "string" || !Number.isInteger(body.seq) || (deleting ? body.body !== undefined : typeof body.body !== "string")) {
+					writeText(res, 400, "Invalid amend payload.");
+					return;
+				}
+				if (!guardReviewingPhase(res)) return;
+				// An in-flight finish pass has already captured the queued content it is
+				// delivering; amending inside that window would diverge store and pass.
+				if (finishing) {
+					writeText(res, 409, "The round is being handed to Pi; try again in a moment.");
+					return;
+				}
+				const round = current();
+				const owner = roundOfThread(body.threadId);
+				if (owner && owner !== round) {
+					writeText(res, 409, `This thread belongs to superseded round ${owner.number}; continue in round ${round.number}.`);
+					return;
+				}
+				const result = round.store.amendQueuedTurn(body.threadId, body.seq, deleting ? undefined : body.body);
+				if (result.error) {
+					const mapped = STORE_ERRORS[result.error] ?? STORE_ERRORS.invalid;
+					writeText(res, mapped.status, mapped.message);
+					return;
+				}
+				if (result.removed) {
+					broadcast("thread-removed", { round: round.number, threadId: result.threadId, summary: round.store.summary() });
+					writeJson(res, 200, { removed: true, threadId: result.threadId, summary: round.store.summary() });
+					return;
+				}
+				broadcastThread(round, result.thread);
+				writeJson(res, 200, { thread: result.thread, summary: round.store.summary() });
+				return;
+			}
 			if (req.method === "POST" && requestUrl.pathname === RESOLVE_PATH) {
 				if (!guardMutation(req, res)) return;
 				const body = await readGuardedBody(req, res);
@@ -318,16 +359,19 @@ export async function createCodeReviewServer(review, options) {
 				}
 				finishing = true;
 				const round = current();
+				const passThreads = round.store.list();
 				let result;
 				try {
-					result = await options.onFinishPass(round, note, round.store.list(), round.store.summary());
+					result = await options.onFinishPass(round, note, passThreads, round.store.summary());
 				} finally {
 					finishing = false;
 				}
 				// A new round may have opened while the handoff awaited; never lock it retroactively.
 				const superseded = current() !== round;
-				// The pass summary just delivered every queued thread in full.
-				for (const delivered of round.store.markAllDelivered()) broadcastThread(round, delivered);
+				// The pass summary just delivered every queued thread it contained — and
+				// only those: a quiet thread created while the handoff awaited stays queued.
+				const passThreadIds = new Set(passThreads.map((thread) => thread.id));
+				for (const delivered of round.store.markAllDelivered(passThreadIds)) broadcastThread(round, delivered);
 				if (!superseded) {
 					phase = "revising";
 					broadcastPhase();

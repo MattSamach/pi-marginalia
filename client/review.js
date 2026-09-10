@@ -10,6 +10,7 @@
   const FINISH_PATH = '/__pi_code_review_finish__';
   const RESUME_PATH = '/__pi_code_review_resume__';
   const VIEWED_PATH = '/__pi_code_review_viewed__';
+  const AMEND_PATH = '/__pi_code_review_amend__';
 
   const myRound = Number(document.body.dataset.round || 1);
   let currentRound = Number(document.body.dataset.currentRound || myRound);
@@ -283,6 +284,7 @@
           highlight: draft.highlight,
           body: textarea.value.trim(),
         });
+        threadHighlights.set(result.thread.id, draft.highlightId);
         draft = undefined;
         composer.hidden = true;
         textarea.value = '';
@@ -299,6 +301,80 @@
   });
 
   // Threads ------------------------------------------------------------------
+  const threadHighlights = new Map();
+  const removeThread = (threadId) => {
+    threads.delete(threadId);
+    document.querySelector('[data-thread-card="' + threadId + '"]')?.remove();
+    const highlightId = threadHighlights.get(threadId);
+    if (highlightId !== undefined) {
+      highlights.delete(highlightId);
+      threadHighlights.delete(threadId);
+      renderHighlights();
+    }
+    if (currentThreadId === threadId) currentThreadId = undefined;
+    updateAggregates();
+  };
+  // Queued (undelivered) reviewer messages stay editable until Pi sees them.
+  const openTurnEditor = (entry, thread, turn, value, focus) => {
+    entry.replaceChildren();
+    const author = document.createElement('span');
+    author.className = 'turn-author';
+    author.textContent = 'You';
+    const textarea = document.createElement('textarea');
+    textarea.maxLength = 20000;
+    textarea.dataset.turnEditor = String(turn.seq);
+    textarea.value = value;
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.textContent = 'Save';
+    save.disabled = !value.trim();
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    textarea.addEventListener('input', () => { save.disabled = !textarea.value.trim(); });
+    // Drop the marker before re-rendering, or renderThread's editor
+    // preservation would immediately reopen the editor being closed.
+    const closeEditor = () => {
+      delete textarea.dataset.turnEditor;
+      renderThread(threads.get(thread.id));
+    };
+    textarea.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeEditor();
+        return;
+      }
+      if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
+      event.preventDefault();
+      if (!save.disabled) save.click();
+    });
+    cancel.addEventListener('click', closeEditor);
+    save.addEventListener('click', async () => {
+      const body = textarea.value.trim();
+      if (!body) return;
+      save.disabled = true;
+      try {
+        const result = await postJson(AMEND_PATH, { threadId: thread.id, seq: turn.seq, body });
+        // Close this turn's editor before re-rendering; renderThread would
+        // otherwise restore it (the guard that keeps in-progress edits alive
+        // across SSE re-renders — which may already have replaced this textarea
+        // element). Scoped by seq so sibling editors keep their drafts.
+        const liveEditor = document.querySelector('[data-thread-card="' + thread.id + '"] [data-turn-editor="' + turn.seq + '"]');
+        if (liveEditor) delete liveEditor.dataset.turnEditor;
+        upsertThread(result.thread);
+        setStatus('Queued message updated — Pi will see the new text.');
+      } catch (error) {
+        save.disabled = false;
+        setStatus(errorMessage(error), true);
+      }
+    });
+    const row = document.createElement('div');
+    row.className = 'composer-actions';
+    row.append(cancel, save);
+    entry.append(author, textarea, row);
+    if (focus) textarea.focus();
+  };
   const threadHost = (thread) => {
     if (thread.carried) return [...document.querySelectorAll('[data-carried-host]')].find((host) => host.dataset.carriedHost === thread.id);
     if (thread.source === 'overview') return document.querySelector('[data-overview-thread]');
@@ -339,6 +415,10 @@
     const previousDraft = previousReply?.value ?? '';
     const hadFocus = Boolean(previousReply) && document.activeElement === previousReply;
     const previousSelection = hadFocus ? [previousReply.selectionStart, previousReply.selectionEnd] : undefined;
+    const editorStates = new Map();
+    card?.querySelectorAll('[data-turn-editor]').forEach((editor) => {
+      editorStates.set(Number(editor.dataset.turnEditor), { value: editor.value, focus: document.activeElement === editor });
+    });
     if (!card) {
       card = document.createElement('article');
       card.className = 'thread-card';
@@ -382,6 +462,39 @@
       const body = document.createElement('div');
       body.textContent = turn.body;
       entry.append(author, body);
+      const amendable = thread.status === 'open' && thread.queued === true && turn.author === 'user' && !isLocked();
+      const editing = amendable ? editorStates.get(turn.seq) : undefined;
+      if (editing) {
+        openTurnEditor(entry, thread, turn, editing.value, editing.focus);
+      } else if (amendable) {
+        const tools = document.createElement('div');
+        tools.className = 'turn-tools';
+        const edit = document.createElement('button');
+        edit.type = 'button';
+        edit.dataset.turnEdit = String(turn.seq);
+        edit.textContent = 'Edit';
+        edit.addEventListener('click', () => openTurnEditor(entry, thread, turn, turn.body, true));
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.dataset.turnDelete = String(turn.seq);
+        del.textContent = 'Delete';
+        del.addEventListener('click', async () => {
+          try {
+            const result = await postJson(AMEND_PATH, { threadId: thread.id, seq: turn.seq, delete: true });
+            if (result.removed) {
+              removeThread(thread.id);
+              setStatus('Queued comment deleted — Pi never saw it.');
+            } else {
+              upsertThread(result.thread);
+              setStatus('Queued message deleted.');
+            }
+          } catch (error) {
+            setStatus(errorMessage(error), true);
+          }
+        });
+        tools.append(edit, del);
+        entry.append(tools);
+      }
       card.append(entry);
     }
     if (thread.piProposedResolve && thread.status === 'open') {
@@ -794,6 +907,11 @@
       for (const path of data.viewedFiles) viewedFiles.add(path);
       applyViewed();
     }
+    // A reconnect replays init; prune cards for threads deleted while this tab
+    // was disconnected so no interactive stale card survives.
+    document.querySelectorAll('[data-thread-card]').forEach((cardElement) => {
+      if (!threads.has(cardElement.dataset.threadCard)) removeThread(cardElement.dataset.threadCard);
+    });
     updateAggregates();
     applyDeepLink();
   });
@@ -807,6 +925,11 @@
     if (last?.author === 'pi' && (previous?.turns.length ?? 0) < thread.turns.length) {
       setStatus('Pi replied — press n to view.');
     }
+  });
+  events.addEventListener('thread-removed', (event) => {
+    const data = JSON.parse(event.data);
+    if (data.round !== myRound) return;
+    removeThread(data.threadId);
   });
   events.addEventListener('viewed', (event) => {
     const data = JSON.parse(event.data);

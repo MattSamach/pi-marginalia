@@ -93,6 +93,9 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 	let counter = 0;
 	const storeSalt = randomBytes(3).toString("hex");
 	const mintId = () => `${review.id.slice(0, 8)}-${storeSalt}-t${++counter}`;
+	// Turns carry a per-thread sequence number so amendments target a stable
+	// identity even after a sibling deletion shifts array positions.
+	const stampTurns = (turns) => turns.map((turn, index) => ({ ...turn, seq: index + 1 }));
 
 	// Every commentary note seeds an open thread awaiting the reviewer. Seeds are
 	// exempt from maxThreads, which bounds reviewer-created threads only.
@@ -106,7 +109,8 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 				source: "commentary",
 				file: file.path,
 				commentaryId: entry.id,
-				turns: [{ author: "pi", body: entry.body, ts: Date.now() }],
+				nextSeq: 2,
+				turns: [{ author: "pi", body: entry.body, ts: Date.now(), seq: 1 }],
 			};
 			threads.set(thread.id, thread);
 			commentaryThreadIds.set(`${file.path}\0${entry.id}`, thread.id);
@@ -124,17 +128,23 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 			...(carriedThread.highlight === undefined ? {} : { highlight: carriedThread.highlight }),
 			...(carriedThread.file === undefined ? {} : { file: carriedThread.file }),
 			carried: { ...carriedThread.carried },
-			turns: carriedThread.turns.map((turn) => ({ ...turn })),
+			nextSeq: carriedThread.turns.length + 1,
+			turns: stampTurns(carriedThread.turns),
 		});
 	}
 	const seededCount = threads.size;
 
-	const publicThread = (thread) => ({
-		...thread,
-		queued: !thread.live && thread.turns.some((turn) => turn.author === "user"),
-		...(thread.carried ? { carried: { ...thread.carried } } : {}),
-		turns: thread.turns.map((turn) => ({ ...turn })),
-	});
+	const publicThread = (thread) => {
+		const visible = {
+			...thread,
+			queued: !thread.live && thread.turns.some((turn) => turn.author === "user"),
+			...(thread.carried ? { carried: { ...thread.carried } } : {}),
+			turns: thread.turns.map((turn) => ({ ...turn })),
+		};
+		// nextSeq is store bookkeeping, not wire format.
+		delete visible.nextSeq;
+		return visible;
+	};
 	const lastAuthor = (thread) => thread.turns[thread.turns.length - 1]?.author;
 
 	function validateSelection(item) {
@@ -158,14 +168,14 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 
 	function createThread(fields, turns, quiet) {
 		if (threads.size - seededCount >= limits.maxThreads) return { error: "too-many-threads" };
-		const thread = { id: mintId(), status: "open", live: quiet !== true, piProposedResolve: false, ...fields, turns };
+		const thread = { id: mintId(), status: "open", live: quiet !== true, piProposedResolve: false, ...fields, nextSeq: turns.length + 1, turns: stampTurns(turns) };
 		threads.set(thread.id, thread);
 		return { thread: publicThread(thread), created: true };
 	}
 
 	function appendTurn(thread, author, body, ts, quiet) {
 		if (thread.turns.length >= limits.maxTurnsPerThread) return { error: "thread-full" };
-		thread.turns.push({ author, body, ts });
+		thread.turns.push({ author, body, ts, seq: thread.nextSeq++ });
 		let escalated = false;
 		if (author === "user") {
 			thread.status = "open";
@@ -235,11 +245,14 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 	/**
 	 * Sending a round delivers every open queued thread through the pass summary.
 	 * Resolved quiet threads were withdrawn, not delivered; they keep their queued
-	 * state so a later reopen can still surface their content.
+	 * state so a later reopen can still surface their content. When an id set is
+	 * given, only those threads count as delivered — quiet threads created after
+	 * the pass content was captured were not in it and must stay queued.
 	 */
-	function markAllDelivered() {
+	function markAllDelivered(ids) {
 		const delivered = [];
 		for (const thread of threads.values()) {
+			if (ids && !ids.has(thread.id)) continue;
 			if (thread.live || thread.status === "resolved" || !thread.turns.some((turn) => turn.author === "user")) continue;
 			thread.live = true;
 			delivered.push(publicThread(thread));
@@ -264,6 +277,31 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		return counts;
 	}
 
+	/**
+	 * Edit (body given) or delete (body undefined) one reviewer message that Pi
+	 * has not seen yet. Only open, undelivered (queued) threads are amendable;
+	 * deleting a thread's last turn removes the thread itself.
+	 */
+	function amendQueuedTurn(threadId, seq, body) {
+		const thread = typeof threadId === "string" ? threads.get(threadId) : undefined;
+		if (!thread) return { error: "unknown-thread" };
+		if (thread.status !== "open") return { error: "thread-resolved" };
+		if (thread.live) return { error: "not-queued" };
+		const index = Number.isInteger(seq) ? thread.turns.findIndex((turn) => turn.seq === seq && turn.author === "user") : -1;
+		if (index === -1) return { error: "unknown-turn" };
+		if (body === undefined) {
+			thread.turns.splice(index, 1);
+			if (thread.turns.length === 0) {
+				threads.delete(thread.id);
+				return { removed: true, threadId: thread.id };
+			}
+			return { thread: publicThread(thread) };
+		}
+		if (!validText(body, limits)) return { error: "invalid" };
+		thread.turns[index] = { ...thread.turns[index], body: body.trim() };
+		return { thread: publicThread(thread) };
+	}
+
 	/** Return a failed escalation's backlog to the queued state so nothing is lost. */
 	function requeue(threadId) {
 		const thread = threads.get(threadId);
@@ -272,5 +310,5 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		return publicThread(thread);
 	}
 
-	return { postUserTurn, postPiReply, setResolved, getThread, list, summary, markAllDelivered, requeue };
+	return { postUserTurn, postPiReply, setResolved, getThread, list, summary, markAllDelivered, requeue, amendQueuedTurn };
 }

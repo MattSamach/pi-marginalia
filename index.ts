@@ -143,7 +143,12 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		const server = await createCodeReviewServer(review, {
 			onThreadPost: async (round: ReviewRound, thread: ReviewThread, turns: ReviewThreadTurn[]) => {
 				const queued = queue.post(formatThreadMessageXml(round.review, thread, turns, round.number), ctx.isIdle());
-				ctx.ui.notify(`Review thread ${thread.id}: ${turns.length === 1 ? "new reviewer message" : `${turns.length} reviewer messages`}${queued ? " (queued until Pi settles)" : ""}.`, "info");
+				// The message is accepted once queue.post returns; a notify failure must
+				// not be reported as a delivery failure (the server would requeue an
+				// escalation whose content is already on its way).
+				try {
+					ctx.ui.notify(`Review thread ${thread.id}: ${turns.length === 1 ? "new reviewer message" : `${turns.length} reviewer messages`}${queued ? " (queued until Pi settles)" : ""}.`, "info");
+				} catch {}
 			},
 			onFinishPass: async (round: ReviewRound, note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
 				let stale = true;

@@ -53,7 +53,7 @@
         gotoCurrent.href = '/round/' + currentRound;
       } else if (phase === 'revising') {
         phaseBanner.hidden = false;
-        phaseBannerText.textContent = 'Pi is revising — round ' + (myRound + 1) + ' pending.';
+        phaseBannerText.textContent = 'Pi is revising — round ' + (myRound + 1) + ' pending. Reading stays open; to keep commenting on this round, resume it.';
         resumeButton.hidden = false;
         gotoCurrent.hidden = true;
       } else {
@@ -967,7 +967,7 @@
     phase = data.phase;
     currentRound = data.currentRound;
     applySessionState();
-    if (myRound === currentRound) setStatus(phase === 'revising' ? 'Pass sent — Pi is revising.' : 'Round ' + myRound + ' is live again.');
+    if (myRound === currentRound) setStatus(phase === 'revising' ? 'Pass sent — Pi is revising. Resume the round to keep commenting.' : 'Round ' + myRound + ' is live again — posting is unlocked.');
   });
   events.addEventListener('round-ready', (event) => {
     const data = JSON.parse(event.data);
@@ -1002,7 +1002,7 @@
     setStatus('Handing the pass to Pi…');
     try {
       const result = await postJson(FINISH_PATH, {});
-      setStatus(result.stale ? 'Pass sent. Warning: the working tree changed after this snapshot.' : 'Review pass sent to Pi. Threads stay live.');
+      setStatus(result.stale ? 'Pass sent. Warning: the working tree changed after this snapshot.' : 'Pass sent — Pi is revising. Resume the round to keep commenting.');
     } catch (error) {
       setStatus(errorMessage(error), true);
     } finally {

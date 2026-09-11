@@ -155,7 +155,7 @@ export async function createCodeReviewServer(review, options) {
 	};
 	const guardReviewingPhase = (res) => {
 		if (phase === "reviewing") return true;
-		writeText(res, 409, "Pi is revising this review. Wait for the next round or resume this one.");
+		writeText(res, 409, "Pi is revising this review. Press \u201cResume reviewing this round\u201d to comment while you wait, or hold on for the next round.");
 		return false;
 	};
 	const readGuardedBody = async (req, res) => {

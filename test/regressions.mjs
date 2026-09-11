@@ -659,7 +659,9 @@ try {
 		assert.equal((await fetch(resumeEndpoint, { method: "POST", headers, body: "{}" })).status, 409, "Resume outside the revising phase must be rejected.");
 		assert.equal((await fetch(finishEndpoint, { method: "POST", headers, body: "{}" })).status, 200);
 		await readUntil('"phase":"revising"');
-		assert.equal((await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 1, source: "overview", body: "late" }) })).status, 409, "Posting is locked while Pi revises.");
+		const lockedPost = await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 1, source: "overview", body: "late" }) });
+		assert.equal(lockedPost.status, 409, "Posting is locked while Pi revises.");
+		assert.match(await lockedPost.text(), /Resume reviewing this round/, "The lock message must teach the way back.");
 		assert.equal((await fetch(resolveEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: roundsPost.thread.id, resolved: true }) })).status, 409, "Resolution is locked while Pi revises.");
 		assert.equal((await fetch(resumeEndpoint, { method: "POST", headers, body: "{}" })).status, 200);
 		await readUntil('"phase":"reviewing"');
@@ -924,7 +926,7 @@ try {
 			assert.equal(browserPass.round, 1);
 			assert.deepEqual(browserPass.summary, { open: 3, awaitingUser: 0, awaitingPi: 3, resolved: 2 });
 			assert.equal(await page.evaluate(() => document.body.classList.contains("locked")), true, "Sending the pass locks posting.");
-			assert.match(await page.$eval('[data-phase-banner-text]', (el) => el.textContent), /Pi is revising — round 2 pending/);
+			assert.match(await page.$eval('[data-phase-banner-text]', (el) => el.textContent), /Pi is revising — round 2 pending\. Reading stays open; to keep commenting on this round, resume it\./);
 			assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('[data-finish]')).display), "none", "Posting controls must hide while Pi revises.");
 			await page.click('[data-resume]');
 			await page.waitForFunction(() => document.querySelector('[data-phase-banner]')?.hidden === true);

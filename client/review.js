@@ -11,6 +11,7 @@
   const RESUME_PATH = '/__pi_code_review_resume__';
   const VIEWED_PATH = '/__pi_code_review_viewed__';
   const AMEND_PATH = '/__pi_code_review_amend__';
+  const SEND_PATH = '/__pi_code_review_send__';
 
   const myRound = Number(document.body.dataset.round || 1);
   let currentRound = Number(document.body.dataset.currentRound || myRound);
@@ -87,7 +88,8 @@
   const postedStatus = (result, message) => {
     if (result.deliveryFailed) setStatus('Posted, but delivery to Pi failed; it stays in this thread and the pass summary.', true);
     else if (result.queued) setStatus('Queued — delivered when you send the round.');
-    else if (result.escalated) setStatus('Thread sent to Pi, including its quiet notes.');
+    else if (result.pending) setStatus('Pending — delivered with the round, a live reply, or Send now.');
+    else if (result.escalated) setStatus('Thread sent to Pi, including its pending messages.');
     else setStatus(message);
   };
   // Shift on the posting keystroke marks the post quiet; consumed per click so
@@ -433,8 +435,13 @@
     header.className = 'thread-card-header';
     const status = document.createElement('span');
     status.className = 'thread-status';
-    status.textContent = thread.status === 'resolved' ? 'Resolved' : awaiting ? 'Pi replied' : thread.queued ? 'Queued for round' : 'Waiting for Pi';
+    const pendingCount = thread.status === 'open' ? thread.pending ?? 0 : 0;
+    status.textContent = thread.status === 'resolved' ? 'Resolved'
+      : thread.queued ? 'Queued for round'
+      : pendingCount > 0 ? pendingCount + ' pending for round'
+      : awaiting ? 'Pi replied' : 'Waiting for Pi';
     card.classList.toggle('queued', thread.status === 'open' && thread.queued === true);
+    card.classList.toggle('pending', pendingCount > 0 && thread.queued !== true);
     const actions = document.createElement('div');
     actions.className = 'composer-actions';
     const resolve = document.createElement('button');
@@ -462,7 +469,7 @@
       const body = document.createElement('div');
       body.textContent = turn.body;
       entry.append(author, body);
-      const amendable = thread.status === 'open' && thread.queued === true && turn.author === 'user' && !isLocked();
+      const amendable = thread.status === 'open' && turn.author === 'user' && turn.delivered === false && !isLocked();
       const editing = amendable ? editorStates.get(turn.seq) : undefined;
       if (editing) {
         openTurnEditor(entry, thread, turn, editing.value, editing.focus);
@@ -492,7 +499,21 @@
             setStatus(errorMessage(error), true);
           }
         });
-        tools.append(edit, del);
+        const sendNow = document.createElement('button');
+        sendNow.type = 'button';
+        sendNow.dataset.turnSend = String(turn.seq);
+        sendNow.textContent = 'Send now';
+        sendNow.title = thread.pending > 1 ? 'Delivers all ' + thread.pending + ' of this thread\u2019s pending messages, in order' : 'Deliver this message to Pi now';
+        sendNow.addEventListener('click', async () => {
+          try {
+            const result = await postJson(SEND_PATH, { threadId: thread.id });
+            upsertThread(result.thread);
+            postedStatus(result, result.sent > 1 ? result.sent + ' pending messages sent to Pi.' : 'Message sent to Pi.');
+          } catch (error) {
+            setStatus(errorMessage(error), true);
+          }
+        });
+        tools.append(edit, del, sendNow);
         entry.append(tools);
       }
       card.append(entry);
@@ -600,17 +621,20 @@
       referenceBadge.textContent = String(referenceCount);
     }
     const queuedCount = all.filter((thread) => thread.status === 'open' && thread.queued === true).length;
+    const undeliveredCount = all.filter((thread) => thread.status === 'open').reduce((count, thread) => count + (thread.pending ?? 0), 0);
+    const pendingOnLive = all.filter((thread) => thread.status === 'open' && thread.queued !== true).reduce((count, thread) => count + (thread.pending ?? 0), 0);
     if (finishButton && !finishButton.dataset.busy) {
-      finishButton.textContent = queuedCount ? 'Send round to Pi (' + queuedCount + ' queued)' : 'Send round to Pi';
+      finishButton.textContent = undeliveredCount ? 'Send round to Pi (' + undeliveredCount + ' to send)' : 'Send round to Pi';
     }
     if (tally) {
       tally.hidden = all.length === 0;
       const counts = {
         open: all.filter((thread) => thread.status === 'open').length,
         'awaiting you': awaiting.length,
-        'awaiting Pi': all.filter((thread) => thread.status === 'open' && !isAwaiting(thread) && thread.queued !== true).length,
+        'awaiting Pi': all.filter((thread) => thread.status === 'open' && !isAwaiting(thread) && thread.queued !== true && !(thread.pending > 0)).length,
         resolved: all.filter((thread) => thread.status === 'resolved').length,
         ...(queuedCount ? { queued: queuedCount } : {}),
+        ...(pendingOnLive ? { pending: pendingOnLive } : {}),
       };
       tally.replaceChildren(...Object.entries(counts).map(([label, value]) => {
         const item = document.createElement('span');

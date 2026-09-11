@@ -179,7 +179,7 @@ try {
 	assert.match(threadXml, /A \]\]\]\]><!\[CDATA\[> marker/, "CDATA terminators must be split safely.");
 	assert.match(threadXml, /<message author="user"><!\[CDATA\[Actually, one more thing\.\]\]><\/message>/);
 	const passXml = formatReviewPassXml(ordered, store.list(), store.summary(), false, "Note ]]> here");
-	assert.match(passXml, /^<code-review-pass snapshot="[a-f0-9]{64}" stale="false" open="5" awaiting-user="1" awaiting-pi="4" resolved="0" unread-notes="1" queued="0">/, "Header counts must reconcile with the omitted untouched notes.");
+	assert.match(passXml, /^<code-review-pass snapshot="[a-f0-9]{64}" stale="false" open="5" awaiting-user="1" awaiting-pi="4" resolved="0" unread-notes="1" queued="0" pending="0">/, "Header counts must reconcile with the omitted untouched notes.");
 	assert.match(passXml, /<note><!\[CDATA\[Note \]\]\]\]><!\[CDATA\[> here\]\]><\/note>/, "Finish notes must be serialized safely.");
 	assert.match(passXml, /<open-thread thread="[a-f0-9]{8}-[a-f0-9]{6}-t1" kind="commentary" status="open" file="untracked.txt" commentary-id="new-file" last-author="user">/);
 	assert.doesNotMatch(passXml, /Why this exists/, "Pass summaries carry only the last message of each open thread.");
@@ -256,15 +256,48 @@ try {
 	assert.equal(quietStore.postUserTurn({ source: "commentary", file: "untracked.txt", commentaryId: "new-file", body: "Quiet note reply.", quiet: true }).thread.queued, true, "Quiet replies to Pi notes queue as well.");
 	const quietTwo = quietStore.postUserTurn({ source: "overview", body: "Still quiet.", quiet: true }).thread;
 	const quietPassXml = formatReviewPassXml(ordered, quietStore.list(), quietStore.summary(), false, undefined, 1);
-	assert.match(quietPassXml, / queued="2">/, "The pass header counts queued threads.");
+	assert.match(quietPassXml, / queued="2" pending="0">/, "The pass header counts queued threads.");
 	assert.match(quietPassXml, /<open-thread [^>]*queued="true"[^>]*>\n {4}<message author="user"><!\[CDATA\[Still quiet\.\]\]><\/message>/, "Queued threads carry their full reviewer content in the pass.");
 	assert.match(quietPassXml, /Quiet note reply\./, "Queued note replies reach Pi through the pass.");
 	assert.doesNotMatch(quietPassXml, /Second quiet\./, "Escalated threads were already delivered; the pass keeps only their last message.");
 	assert.doesNotMatch(quietPassXml, /Why this exists/, "Queued note threads must not echo Pi's own note back.");
-	assert.equal(quietStore.postUserTurn({ threadId: quietThread.id, body: "Quiet on live.", quiet: true }).thread.queued, false, "Live threads never become queued.");
-	assert.match(quietPassXml, / awaiting-pi="1" resolved="0" unread-notes="1" queued="2">/, "The pass header excludes queued threads from awaiting-pi.");
-	assert.equal(quietStore.markAllDelivered().length, 2, "Sending the round delivers every queued thread.");
+	const quietOnLive = quietStore.postUserTurn({ threadId: quietThread.id, body: "Quiet on live.", quiet: true }).thread;
+	assert.equal(quietOnLive.queued, false, "Live threads never revert to queued.");
+	assert.equal(quietOnLive.pending, 1, "A quiet reply on a live thread becomes a pending message.");
+	assert.match(quietPassXml, / awaiting-pi="1" resolved="0" unread-notes="1" queued="2" pending="0">/, "The pass header excludes queued threads from awaiting-pi.");
+	const pendingPassXml = formatReviewPassXml(ordered, quietStore.list(), quietStore.summary(), false, undefined, 1);
+	assert.match(pendingPassXml, / queued="2" pending="1">/, "The pass header counts pending messages on live threads.");
+	assert.match(pendingPassXml, /<open-thread [^>]*pending="1"[^>]*>\n {4}<message author="user" pending="true"><!\[CDATA\[Quiet on live\.\]\]><\/message>/, "Live threads deliver exactly their pending tail through the pass.");
+	assert.doesNotMatch(pendingPassXml, /<last-message><!\[CDATA\[Quiet on live\.\]\]>/, "Pending tails replace last-message serialization.");
+	assert.equal(quietStore.markAllDelivered().length, 3, "Sending the round delivers every thread with undelivered messages.");
 	assert.equal(quietStore.getThread(quietTwo.id).queued, false, "Delivered threads leave the queued state.");
+	assert.equal(quietStore.getThread(quietThread.id).pending, 0, "Pending tails are delivered by the round send.");
+	const sendStore = createThreadStore(ordered);
+	const liveBase = sendStore.postUserTurn({ source: "overview", body: "Live base." }).thread;
+	assert.equal(sendStore.deliverPending(liveBase.id).error, "nothing-pending");
+	sendStore.postUserTurn({ threadId: liveBase.id, body: "Tail one.", quiet: true });
+	sendStore.postUserTurn({ threadId: liveBase.id, body: "Tail two.", quiet: true });
+	const sendResult = sendStore.deliverPending(liveBase.id);
+	assert.deepEqual(sendResult.deliveredTurns.map((turn) => turn.body), ["Tail one.", "Tail two."], "Send now delivers the whole pending backlog in order.");
+	assert.equal(sendResult.thread.pending, 0);
+	assert.equal(sendResult.prevLive, true);
+	sendStore.requeue(liveBase.id, sendResult.deliveredTurns.map((turn) => turn.seq), sendResult.prevLive);
+	assert.equal(sendStore.getThread(liveBase.id).pending, 2, "A failed send-now restores the pending tail.");
+	assert.equal(sendStore.getThread(liveBase.id).queued, false, "A failed send-now keeps the thread live.");
+	const tailSeq = sendStore.getThread(liveBase.id).turns.find((turn) => turn.delivered === false).seq;
+	assert.equal(sendStore.amendQueuedTurn(liveBase.id, tailSeq, "Tail one, sharper.").thread.turns.find((turn) => turn.seq === tailSeq).body, "Tail one, sharper.", "Pending messages on live threads are amendable.");
+	const deliveredSeq = sendStore.getThread(liveBase.id).turns.find((turn) => turn.author === "user" && turn.delivered === true).seq;
+	assert.equal(sendStore.amendQueuedTurn(liveBase.id, deliveredSeq, "rewrite").error, "not-queued", "Delivered messages on the same thread stay immutable.");
+	const liveReply = sendStore.postUserTurn({ threadId: liveBase.id, body: "And go." });
+	assert.deepEqual(liveReply.deliveredTurns.map((turn) => turn.body), ["Tail one, sharper.", "Tail two.", "And go."], "A live reply delivers the pending backlog plus itself, in order.");
+	assert.equal(liveReply.escalated, true);
+
+	sendStore.postUserTurn({ threadId: liveBase.id, body: "After-answer tail.", quiet: true });
+	sendStore.postPiReply(liveBase.id, "Answering the delivered part.", false);
+	const piTailPass = formatReviewPassXml(ordered, sendStore.list(), sendStore.summary(), false, undefined, 1);
+	assert.match(piTailPass, /<open-thread [^>]*pending="1"[^>]*last-author="pi">\n {4}<message author="user" pending="true"><!\[CDATA\[After-answer tail\.\]\]><\/message>/, "A pending block records when Pi answered without seeing the tail.");
+	assert.match(piTailPass, / awaiting-user="3" /, "A pi-answered pending thread counts as awaiting the reviewer, not as pending-awaiting.");
+
 	const amendStore = createThreadStore(ordered);
 	const amendThread = amendStore.postUserTurn({ source: "overview", body: "First quiet.", quiet: true }).thread;
 	amendStore.postUserTurn({ threadId: amendThread.id, body: "Second quiet.", quiet: true });
@@ -469,6 +502,25 @@ try {
 		assert.ok(removalBuffer.includes(disposable.thread.id), "Removals must broadcast the thread id to connected tabs.");
 		await removalReader.cancel();
 
+		const sendEndpoint = `${origin}/__pi_code_review_send__`;
+		const liveOv = await (await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ source: "overview", body: "Live topic." }) })).json();
+		const postsBeforeTail = posts.length;
+		const tailPost = await (await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: liveOv.thread.id, body: "Pending tail.", quiet: true }) })).json();
+		assert.equal(tailPost.pending, true, "A quiet reply on a live thread reports pending, not queued.");
+		assert.equal(tailPost.thread.pending, 1);
+		assert.equal(posts.length, postsBeforeTail, "Pending replies must not deliver.");
+		failNextPost = true;
+		const failedSend = await (await fetch(sendEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: liveOv.thread.id }) })).json();
+		assert.equal(failedSend.deliveryFailed, true);
+		assert.equal(failedSend.thread.pending, 1, "A failed send-now restores the pending tail.");
+		assert.equal(failedSend.thread.queued, false, "A failed send-now keeps the thread live.");
+		const okSend = await (await fetch(sendEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: liveOv.thread.id }) })).json();
+		assert.equal(okSend.sent, 1);
+		assert.equal(okSend.thread.pending, 0);
+		assert.equal(posts.at(-1).turns.length, 1);
+		assert.equal(posts.at(-1).turns[0].body, "Pending tail.", "Send now delivers the pending message itself.");
+		assert.equal((await fetch(sendEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ threadId: liveOv.thread.id }) })).status, 409, "Send now with nothing pending is rejected.");
+
 		const viewedEndpoint = `${origin}/__pi_code_review_viewed__`;
 		assert.equal((await fetch(viewedEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ file: "untracked.txt", viewed: "yes" }) })).status, 400, "Viewed must be an explicit boolean.");
 		assert.equal((await fetch(viewedEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify({ file: "missing.txt", viewed: true }) })).status, 404, "Viewed only tracks files in the snapshot.");
@@ -487,7 +539,7 @@ try {
 		assert.equal(passes[0].note, "Done for now.");
 		assert.equal(passes[0].round, 1, "The pass must report which round it closes.");
 		assert.equal(posts[0].round, 1, "Thread posts must report their round.");
-		assert.deepEqual(passes[0].summary, { open: 2, awaitingUser: 0, awaitingPi: 2, resolved: 2 });
+		assert.deepEqual(passes[0].summary, { open: 3, awaitingUser: 0, awaitingPi: 3, resolved: 2 });
 		assert.equal(server.getThread(quietOv.thread.id).queued, false, "The pass delivers the requeued backlog in full.");
 		const passQuiet = passes[0].threadList.find((thread) => thread.id === quietOv.thread.id);
 		assert.equal(passQuiet.turns[0].body, "Rewritten quiet start.", "The pass delivers the edited text, not the original.");
@@ -517,18 +569,29 @@ try {
 		const request = { method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: "{}" };
 		const jsonRequest = (payload) => ({ method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify(payload) });
 		const preQuiet = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ source: "overview", body: "Pre-finish quiet.", quiet: true }))).json();
+		const seedReply = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ source: "commentary", file: "untracked.txt", commentaryId: "new-file", body: "Quiet on the note.", quiet: true }))).json();
 		const firstFinish = fetch(`${origin}/__pi_code_review_finish__`, request);
 		await concurrentFinishEntered;
 		const secondFinish = await fetch(`${origin}/__pi_code_review_finish__`, request);
 		assert.equal(secondFinish.status, 409, "A concurrent finish must be rejected while the first handoff is pending.");
 		assert.equal((await fetch(`${origin}/__pi_code_review_amend__`, jsonRequest({ threadId: preQuiet.thread.id, seq: preQuiet.thread.turns[0].seq, body: "sneaky edit" }))).status, 409, "Amends are serialized against an in-flight finish pass.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_send__`, jsonRequest({ threadId: preQuiet.thread.id }))).status, 409, "Send now is serialized against an in-flight finish pass.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ threadId: preQuiet.thread.id, body: "Escalate mid-finish." }))).status, 409, "A live reply that would re-deliver a captured backlog waits for the handoff.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ source: "commentary", file: "untracked.txt", commentaryId: "new-file", body: "Live on the note." }))).status, 409, "The commentary path cannot bypass the finishing guard.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_resolve__`, jsonRequest({ threadId: preQuiet.thread.id, resolved: true }))).status, 409, "Resolution waits for the handoff to keep capture and stamping in sync.");
+		const midTail = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ threadId: preQuiet.thread.id, body: "Mid-finish tail.", quiet: true }))).json();
+		assert.equal(midTail.thread.pending, 2, "Quiet replies to captured threads stay possible while the handoff awaits.");
 		const midQuiet = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ source: "overview", body: "Mid-finish quiet.", quiet: true }))).json();
 		assert.equal(midQuiet.queued, true, "Quiet posts stay possible while the handoff awaits.");
 		releaseConcurrentFinish();
 		assert.equal((await firstFinish).status, 200);
 		assert.equal(concurrentFinishCalls, 1, "Concurrent finish requests must invoke the handoff exactly once.");
-		assert.equal(concurrentServer.getThread(preQuiet.thread.id).queued, false, "Queued threads captured by the pass are delivered.");
+		const preAfter = concurrentServer.getThread(preQuiet.thread.id);
+		assert.equal(preAfter.queued, false, "Queued threads captured by the pass are delivered.");
+		assert.equal(preAfter.pending, 1, "A quiet reply posted during the handoff was not in the pass and must stay pending, not be stamped delivered.");
+		assert.equal(preAfter.turns.find((turn) => turn.body === "Mid-finish tail.").delivered, false);
 		assert.equal(concurrentServer.getThread(midQuiet.thread.id).queued, true, "A quiet thread created during the handoff was not in the pass and must stay queued.");
+		assert.equal(concurrentServer.getThread(seedReply.thread.id).pending, 0, "Captured note replies are delivered by the pass.");
 	} finally {
 		releaseConcurrentFinish?.();
 		await concurrentServer.close();
@@ -631,6 +694,7 @@ try {
 		const eligibleIds = roundsServer.threads().filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user")).map((thread) => thread.id);
 		assert.equal(eligibleIds.length, 2);
 		assert.equal((await fetch(roundsViewedEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 2, file: "unstaged.txt", viewed: true }) })).status, 200);
+		assert.equal((await (await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: eligibleIds[0], body: "Carried pending tail.", quiet: true }) })).json()).thread.pending, 1, "A live thread can hold a pending tail when the round advances.");
 		const thirdRoundReview = { ...ordered, id: altId(ordered.id, 61), files: ordered.files.map((file) => (file.path === "unstaged.txt" ? { ...file, lines: file.lines.slice(0, -1) } : file)) };
 		const carriedAdd = roundsServer.addRound(thirdRoundReview, secondRoundReview.id, eligibleIds.map((id, index) => ({ respondsTo: id, resolution: index === 0 ? "addressed" : "declined", body: `Response ${index}.`, ...(index === 0 ? { file: "untracked.txt", side: "new", startLine: 1 } : {}) })));
 		assert.equal(carriedAdd.round, 3, "Complete responses open the next round with carried threads.");
@@ -639,9 +703,15 @@ try {
 		assert.equal(carriedThread.carried.placement, "anchored");
 		assert.equal(carriedThread.piProposedResolve, true);
 		assert.deepEqual(roundsServer.locateThread(eligibleIds[0]), { round: 3, current: true }, "Carried ids resolve to the living copy in the newest round.");
+		const carriedWithTail = roundsServer.getThread(eligibleIds[0]);
+		assert.equal(carriedWithTail.pending, 1, "Carried threads keep their pending tail instead of stamping it delivered.");
+		assert.equal(carriedWithTail.turns.find((turn) => turn.body === "Carried pending tail.").delivered, false);
 		assert.ok(roundsServer.postPiReply(eligibleIds[0], "Follow-up.", false), "Pi replies to carried threads in the current round.");
 		const carriedReply = await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: eligibleIds[0], body: "Reviewer follow-up." }) });
 		assert.equal(carriedReply.status, 200, "Reviewer replies land in the carried copy, not the archived one.");
+		assert.equal(roundsDeliveries[roundsDeliveries.length - 1], 2, "The live follow-up delivers the carried pending tail with it, in order.");
+		assert.equal(roundsServer.getThread(eligibleIds[0]).pending, 0, "The live follow-up leaves nothing pending.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_send__`, { method: "POST", headers, body: JSON.stringify({ threadId: roundsPost.thread.id }) })).status, 409, "Send now into superseded rounds is rejected.");
 		assert.match(await (await fetch(`${origin}/round/3`, { headers: { cookie } })).text(), /Resolved in earlier rounds/, "Round pages surface the prior-round archive.");
 		assert.deepEqual(roundsServer.viewedFiles(), ["untracked.txt"], "A changed diff drops its checkmark while identical files keep theirs.");
 
@@ -683,9 +753,16 @@ try {
 		const bootstrap = await fetch(raceServer.url, { redirect: "manual" });
 		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
 		const headers = { cookie, "content-type": "application/json", origin };
+		const raceLive = await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ source: "overview", body: "Race live." }) })).json();
+		assert.equal((await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ threadId: raceLive.thread.id, body: "Captured tail.", quiet: true }) })).json()).thread.pending, 1);
 		const finishPromise = fetch(`${origin}/__pi_code_review_finish__`, { method: "POST", headers, body: "{}" });
 		await raceFinishEntered;
-		assert.equal(raceServer.addRound({ ...ordered, id: altId(ordered.id, 63) }, ordered.id).round, 2, "Pi may open the next round while the finish handoff is in flight.");
+		assert.equal((await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ threadId: raceLive.thread.id, body: "Uncaptured tail.", quiet: true }) })).json()).thread.pending, 2);
+		assert.equal(raceServer.addRound({ ...ordered, id: altId(ordered.id, 63) }, ordered.id, [{ respondsTo: raceLive.thread.id, resolution: "needs-discussion", body: "Carrying through the race." }]).round, 2, "Pi may open the next round while the finish handoff is in flight.");
+		const carriedRace = raceServer.getThread(raceLive.thread.id);
+		assert.equal(carriedRace.pending, 1, "Only the uncaptured mid-handoff tail stays pending in the carried copy.");
+		assert.equal(carriedRace.turns.find((turn) => turn.body === "Captured tail.").delivered, true, "The carried copy must not re-deliver what the in-flight pass carries.");
+		assert.equal(carriedRace.turns.find((turn) => turn.body === "Uncaptured tail.").delivered, false);
 		releaseRaceFinish();
 		const finishResponse = await finishPromise;
 		assert.equal(finishResponse.status, 200);
@@ -948,7 +1025,7 @@ try {
 				await plainPage.waitForFunction(() => document.querySelector(".thread-card.queued"));
 				assert.equal(plainDeliveries.length, 0, "Shift+Command+Enter must not message Pi.");
 				assert.match(await plainPage.$eval(".thread-card.queued .thread-status", (label) => label.textContent), /Queued for round/);
-				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 queued)", "The send button must count queued threads.");
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 to send)", "The send button must count queued threads.");
 				await plainPage.type(".thread-card.queued [data-thread-reply]", "Answer now please.");
 				await plainPage.click(".thread-card.queued [data-thread-send]");
 				await plainPage.waitForFunction(() => !document.querySelector(".thread-card.queued"));
@@ -964,6 +1041,19 @@ try {
 				assert.equal(plainDeliveries.length, 2, "The mouse click must deliver immediately.");
 				assert.equal(plainDeliveries[1].length, 1, "A discarded quiet keystroke must not leak into a later mouse click.");
 				assert.equal(await plainPage.$(".thread-card.queued"), null, "Mouse clicks always post live.");
+				await plainPage.type(".thread-card [data-thread-reply]", "Pending tail.");
+				await plainPage.$eval(".thread-card [data-thread-reply]", (textarea) => {
+					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelector(".thread-card.pending"));
+				assert.match(await plainPage.$eval(".thread-card.pending .thread-status", (label) => label.textContent), /1 pending for round/);
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 to send)", "Pending messages count toward the round send.");
+				assert.equal(plainDeliveries.length, 2, "Pending replies on live threads must not message Pi.");
+				await plainPage.click(".thread-card.pending [data-turn-send]");
+				await plainPage.waitForFunction(() => !document.querySelector(".thread-card.pending"));
+				assert.equal(plainDeliveries.length, 3, "Send now delivers to Pi.");
+				assert.equal(plainDeliveries[2].length, 1, "Send now delivered exactly the pending message.");
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi", "Send now clears the pending count.");
 				// The active file's only selectable line already hosts the escalated
 				// thread's highlight and overlapping selections are rejected, so run the
 				// amend flow in a different review file.
@@ -1010,18 +1100,18 @@ try {
 					const editors = document.querySelectorAll("[data-turn-editor]");
 					return editors.length === 1 && editors[0].value === "Draft one." && document.querySelector(".thread-card.queued").textContent.includes("Sharper nit.");
 				});
-				assert.equal(plainDeliveries.length, 2, "Editing queued content must not message Pi.");
-				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 queued)");
+				assert.equal(plainDeliveries.length, 3, "Editing queued content must not message Pi.");
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (2 to send)", "The send count tallies undelivered messages, not threads.");
 				await plainPage.$eval("[data-turn-editor]", (editor) => {
 					editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
 				});
 				await plainPage.waitForFunction(() => !document.querySelector("[data-turn-editor]") && document.querySelectorAll(".thread-card.queued [data-turn-edit]").length === 2);
 				await plainPage.$$eval(".thread-card.queued [data-turn-delete]", (buttons) => buttons[buttons.length - 1].click());
 				await plainPage.waitForFunction(() => document.querySelectorAll(".thread-card.queued [data-turn-delete]").length === 1);
-				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 queued)", "A partially deleted thread stays queued.");
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 to send)", "A partially deleted thread stays queued.");
 				await plainPage.click(".thread-card.queued [data-turn-delete]");
 				await plainPage.waitForFunction(() => !document.querySelector(".thread-card.queued"));
-				assert.equal(plainDeliveries.length, 2, "Deleting queued content must not message Pi.");
+				assert.equal(plainDeliveries.length, 3, "Deleting queued content must not message Pi.");
 				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi", "Deleting the queued thread clears the count.");
 				const plainTotal = plainReview.files.length;
 				assert.equal(await plainPage.$eval("[data-viewed-count]", (label) => label.textContent), `0 / ${plainTotal} viewed`);

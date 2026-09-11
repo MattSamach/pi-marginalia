@@ -9,6 +9,7 @@ const FINISH_PATH = "/__pi_code_review_finish__";
 const RESUME_PATH = "/__pi_code_review_resume__";
 const VIEWED_PATH = "/__pi_code_review_viewed__";
 const AMEND_PATH = "/__pi_code_review_amend__";
+const SEND_PATH = "/__pi_code_review_send__";
 const EVENTS_PATH = "/__pi_code_review_events__";
 const SSE_HEARTBEAT_MS = 25_000;
 const SECURITY_HEADERS = {
@@ -26,6 +27,7 @@ const STORE_ERRORS = {
 	"not-queued": { status: 409, message: "This message was already delivered to Pi and can no longer be changed." },
 	"thread-resolved": { status: 409, message: "Reopen this thread before changing its queued messages." },
 	"unknown-turn": { status: 404, message: "Unknown message." },
+	"nothing-pending": { status: 409, message: "This thread has no pending messages." },
 };
 
 function htmlHeaders(nonce) {
@@ -98,6 +100,10 @@ export async function createCodeReviewServer(review, options) {
 	const cookieValue = randomBytes(24).toString("base64url");
 	let port = 0;
 	let finishing = false;
+	// While a finish handoff is awaiting, the exact undelivered messages the pass
+	// captured (thread id → Set of turn seqs); addRound consults it so carried
+	// copies never re-deliver what the in-flight pass already carries.
+	let inFlightCapture;
 	let closed = false;
 	const sockets = new Set();
 	const sseClients = new Set();
@@ -122,6 +128,19 @@ export async function createCodeReviewServer(review, options) {
 		for (const client of sseClients) client.write(": ping\n\n");
 	}, SSE_HEARTBEAT_MS);
 	heartbeat.unref?.();
+
+	// Hand delivered turns to Pi; on failure return them to the pending state so
+	// nothing is stranded — they flow through the next delivery or the pass.
+	const deliverToPi = async (round, result) => {
+		try {
+			await options.onThreadPost(round, result.thread, result.deliveredTurns);
+			return { thread: result.thread, failed: false };
+		} catch {
+			const requeued = round.store.requeue(result.thread.id, result.deliveredTurns.map((turn) => turn.seq), result.prevLive);
+			if (requeued) broadcastThread(round, requeued);
+			return { thread: requeued ?? result.thread, failed: true };
+		}
+	};
 
 	const guardMutation = (req, res) => {
 		if (req.headers.origin !== `http://127.0.0.1:${port}`) {
@@ -223,6 +242,20 @@ export async function createCodeReviewServer(review, options) {
 					writeText(res, 409, `This page shows superseded round ${body.round}; comment in round ${round.number}.`);
 					return;
 				}
+				// While a finish pass is in flight, a live reply that would deliver a
+				// backlog the pass already captured must wait — Pi would get it twice.
+				// Quiet posts and backlog-free live posts stay allowed.
+				if (finishing && body?.quiet !== true) {
+					const target = typeof body?.threadId === "string"
+						? round.store.getThread(body.threadId)
+						: body?.source === "commentary" && typeof body?.file === "string"
+							? round.store.list().find((thread) => thread.source === "commentary" && thread.file === body.file && thread.commentaryId === body.commentaryId)
+							: undefined;
+					if (target && target.pending > 0) {
+						writeText(res, 409, "The round is being handed to Pi; try again in a moment.");
+						return;
+					}
+				}
 				const { round: _round, ...payload } = body && typeof body === "object" ? body : {};
 				const result = round.store.postUserTurn(payload);
 				if (result.error) {
@@ -231,30 +264,12 @@ export async function createCodeReviewServer(review, options) {
 					return;
 				}
 				broadcastThread(round, result.thread);
-				if (result.thread.queued) {
-					writeJson(res, 200, { thread: result.thread, summary: round.store.summary(), queued: true });
+				if (!result.deliveredTurns) {
+					writeJson(res, 200, { thread: result.thread, summary: round.store.summary(), ...(result.thread.queued ? { queued: true } : { pending: true }) });
 					return;
 				}
-				let deliveryFailed = false;
-				let responseThread = result.thread;
-				const turnsToDeliver = result.escalated === true
-					? result.thread.turns.filter((turn) => turn.author === "user")
-					: [result.thread.turns[result.thread.turns.length - 1]];
-				try {
-					await options.onThreadPost(round, result.thread, turnsToDeliver);
-				} catch {
-					deliveryFailed = true;
-					if (result.escalated === true) {
-						// A failed escalation must not strand the quiet backlog: requeue it
-						// so the full history flows through the next escalation or the pass.
-						const requeued = round.store.requeue(result.thread.id);
-						if (requeued) {
-							responseThread = requeued;
-							broadcastThread(round, requeued);
-						}
-					}
-				}
-				writeJson(res, 200, { thread: responseThread, summary: round.store.summary(), ...(result.escalated === true && !deliveryFailed ? { escalated: true } : {}), ...(deliveryFailed ? { deliveryFailed: true } : {}) });
+				const delivery = await deliverToPi(round, result);
+				writeJson(res, 200, { thread: delivery.thread, summary: round.store.summary(), ...(result.escalated === true && !delivery.failed ? { escalated: true } : {}), ...(delivery.failed ? { deliveryFailed: true } : {}) });
 				return;
 			}
 			if (req.method === "POST" && requestUrl.pathname === VIEWED_PATH) {
@@ -280,6 +295,36 @@ export async function createCodeReviewServer(review, options) {
 				else round.viewed.delete(body.file);
 				broadcast("viewed", { round: round.number, viewedFiles: [...round.viewed] });
 				writeJson(res, 200, { viewedFiles: [...round.viewed] });
+				return;
+			}
+			if (req.method === "POST" && requestUrl.pathname === SEND_PATH) {
+				if (!guardMutation(req, res)) return;
+				const body = await readGuardedBody(req, res);
+				if (body === undefined) return;
+				if (!body || typeof body !== "object" || typeof body.threadId !== "string") {
+					writeText(res, 400, "Invalid send payload.");
+					return;
+				}
+				if (!guardReviewingPhase(res)) return;
+				if (finishing) {
+					writeText(res, 409, "The round is being handed to Pi; try again in a moment.");
+					return;
+				}
+				const round = current();
+				const owner = roundOfThread(body.threadId);
+				if (owner && owner !== round) {
+					writeText(res, 409, `This thread belongs to superseded round ${owner.number}; continue in round ${round.number}.`);
+					return;
+				}
+				const result = round.store.deliverPending(body.threadId);
+				if (result.error) {
+					const mapped = STORE_ERRORS[result.error] ?? STORE_ERRORS.invalid;
+					writeText(res, mapped.status, mapped.message);
+					return;
+				}
+				broadcastThread(round, result.thread);
+				const delivery = await deliverToPi(round, result);
+				writeJson(res, 200, { thread: delivery.thread, summary: round.store.summary(), ...(delivery.failed ? { deliveryFailed: true } : { sent: result.deliveredTurns.length }) });
 				return;
 			}
 			if (req.method === "POST" && requestUrl.pathname === AMEND_PATH) {
@@ -328,6 +373,13 @@ export async function createCodeReviewServer(review, options) {
 					return;
 				}
 				if (!guardReviewingPhase(res)) return;
+				// Resolution changes mid-handoff would desync the captured pass from the
+				// stamping that follows it (withdrawn backlogs re-stamped, captured ones
+				// skipped); hold them for the few seconds the handoff takes.
+				if (finishing) {
+					writeText(res, 409, "The round is being handed to Pi; try again in a moment.");
+					return;
+				}
 				const round = current();
 				const owner = roundOfThread(body.threadId);
 				if (owner && owner !== round) {
@@ -360,18 +412,22 @@ export async function createCodeReviewServer(review, options) {
 				finishing = true;
 				const round = current();
 				const passThreads = round.store.list();
+				// The pass delivers exactly the undelivered messages it captured — and
+				// only those: quiet messages posted while the handoff awaits (new threads
+				// or new turns on captured threads) stay pending. Only open threads are
+				// in the pass; resolved ones were withdrawn.
+				const capturedPending = new Map(passThreads.filter((thread) => thread.status === "open").map((thread) => [thread.id, new Set(thread.turns.filter((turn) => turn.author === "user" && turn.delivered === false).map((turn) => turn.seq))]));
+				inFlightCapture = capturedPending;
 				let result;
 				try {
 					result = await options.onFinishPass(round, note, passThreads, round.store.summary());
 				} finally {
 					finishing = false;
+					inFlightCapture = undefined;
 				}
 				// A new round may have opened while the handoff awaited; never lock it retroactively.
 				const superseded = current() !== round;
-				// The pass summary just delivered every queued thread it contained — and
-				// only those: a quiet thread created while the handoff awaited stays queued.
-				const passThreadIds = new Set(passThreads.map((thread) => thread.id));
-				for (const delivered of round.store.markAllDelivered(passThreadIds)) broadcastThread(round, delivered);
+				for (const delivered of round.store.markAllDelivered(capturedPending)) broadcastThread(round, delivered);
 				if (!superseded) {
 					phase = "revising";
 					broadcastPhase();
@@ -458,6 +514,18 @@ export async function createCodeReviewServer(review, options) {
 				carried = buildCarriedThreads(threadResponses, active.store.list(), nextReview, active.number);
 			} catch (error) {
 				return { error: "invalid-responses", message: error instanceof Error ? error.message : String(error) };
+			}
+			// A round opened while a finish handoff is in flight must not re-deliver
+			// messages the in-flight pass already carries: stamp the captured seqs
+			// delivered in the carried copies (uncaptured mid-handoff turns stay pending).
+			if (inFlightCapture) {
+				for (const record of carried) {
+					const capturedSeqs = inFlightCapture.get(record.id);
+					if (!capturedSeqs) continue;
+					for (const turn of record.turns) {
+						if (turn.author === "user" && turn.delivered === false && capturedSeqs.has(turn.seq)) turn.delivered = true;
+					}
+				}
 			}
 			const previousSignatures = new Map(active.review.files.map((file) => [file.path, diffSignature(file)]));
 			const viewed = new Set(nextReview.files.filter((file) => active.viewed.has(file.path) && previousSignatures.get(file.path) === diffSignature(file)).map((file) => file.path));

@@ -45,8 +45,14 @@ export function formatThreadMessageXml(review, thread, turns, round) {
 export function formatReviewPassXml(review, threads, summary, stale, note, round) {
 	const unreadNotes = threads.filter((thread) => thread.status === "open" && !thread.turns.some((turn) => turn.author === "user")).length;
 	const queued = threads.filter((thread) => thread.status === "open" && thread.queued === true).length;
+	// Pending: undelivered messages on threads Pi already knows (queued threads
+	// carry their whole content separately). Threads whose newest message is
+	// pending are not "awaiting Pi" — Pi has not seen the ask yet.
+	const pendingThreads = threads.filter((thread) => thread.status === "open" && thread.queued !== true && (thread.pending ?? 0) > 0);
+	const pending = pendingThreads.reduce((count, thread) => count + thread.pending, 0);
+	const pendingAwaiting = pendingThreads.filter((thread) => thread.turns[thread.turns.length - 1]?.author === "user").length;
 	const lines = [
-		`<code-review-pass snapshot="${attr(review.id)}"${roundAttribute(round)} stale="${stale ? "true" : "false"}" open="${summary.open}" awaiting-user="${summary.awaitingUser}" awaiting-pi="${summary.awaitingPi - queued}" resolved="${summary.resolved}" unread-notes="${unreadNotes}" queued="${queued}">`,
+		`<code-review-pass snapshot="${attr(review.id)}"${roundAttribute(round)} stale="${stale ? "true" : "false"}" open="${summary.open}" awaiting-user="${summary.awaitingUser}" awaiting-pi="${summary.awaitingPi - queued - pendingAwaiting}" resolved="${summary.resolved}" unread-notes="${unreadNotes}" queued="${queued}" pending="${pending}">`,
 	];
 	if (note) lines.push(`  <note>${cdata(note)}</note>`);
 	for (const thread of threads) {
@@ -61,6 +67,14 @@ export function formatReviewPassXml(review, threads, summary, stale, note, round
 			for (const turn of thread.turns) {
 				if (turn.author !== "user") continue;
 				lines.push(`    <message author="user">${cdata(turn.body)}</message>`);
+			}
+		} else if ((thread.pending ?? 0) > 0) {
+			// Pi knows this thread but has not seen its pending tail; the pass
+			// delivers exactly the new messages.
+			lines.push(`  <open-thread ${threadAttributes(thread)} pending="${thread.pending}" last-author="${attr(last?.author ?? "user")}">`);
+			for (const turn of thread.turns) {
+				if (turn.author !== "user" || turn.delivered !== false) continue;
+				lines.push(`    <message author="user" pending="true">${cdata(turn.body)}</message>`);
 			}
 		} else {
 			lines.push(`  <open-thread ${threadAttributes(thread)} last-author="${attr(last?.author ?? "user")}">`);

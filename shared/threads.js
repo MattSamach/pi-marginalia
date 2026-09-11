@@ -94,8 +94,10 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 	const storeSalt = randomBytes(3).toString("hex");
 	const mintId = () => `${review.id.slice(0, 8)}-${storeSalt}-t${++counter}`;
 	// Turns carry a per-thread sequence number so amendments target a stable
-	// identity even after a sibling deletion shifts array positions.
-	const stampTurns = (turns) => turns.map((turn, index) => ({ ...turn, seq: index + 1 }));
+	// identity even after a sibling deletion shifts array positions. User turns
+	// track per-message delivery: a message is mutable until Pi has seen it.
+	const stampTurns = (turns, delivered) => turns.map((turn, index) => ({ ...turn, seq: index + 1, ...(turn.author === "user" ? { delivered } : {}) }));
+	const undeliveredTurns = (thread) => thread.turns.filter((turn) => turn.author === "user" && turn.delivered === false);
 
 	// Every commentary note seeds an open thread awaiting the reviewer. Seeds are
 	// exempt from maxThreads, which bounds reviewer-created threads only.
@@ -129,7 +131,10 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 			...(carriedThread.file === undefined ? {} : { file: carriedThread.file }),
 			carried: { ...carriedThread.carried },
 			nextSeq: carriedThread.turns.length + 1,
-			turns: stampTurns(carriedThread.turns),
+			// Carried turns keep their per-message delivery state: a pending tail the
+			// reviewer wrote just before the round advanced must survive as pending,
+			// not be silently stamped delivered.
+			turns: carriedThread.turns.map((turn, index) => ({ ...turn, seq: index + 1, ...(turn.author === "user" ? { delivered: turn.delivered !== false } : {}) })),
 		});
 	}
 	const seededCount = threads.size;
@@ -137,7 +142,10 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 	const publicThread = (thread) => {
 		const visible = {
 			...thread,
+			// queued: Pi does not know this thread exists yet. pending: undelivered
+			// reviewer messages (all of a queued thread's, or a live thread's tail).
 			queued: !thread.live && thread.turns.some((turn) => turn.author === "user"),
+			pending: undeliveredTurns(thread).length,
 			...(thread.carried ? { carried: { ...thread.carried } } : {}),
 			turns: thread.turns.map((turn) => ({ ...turn })),
 		};
@@ -168,26 +176,30 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 
 	function createThread(fields, turns, quiet) {
 		if (threads.size - seededCount >= limits.maxThreads) return { error: "too-many-threads" };
-		const thread = { id: mintId(), status: "open", live: quiet !== true, piProposedResolve: false, ...fields, nextSeq: turns.length + 1, turns: stampTurns(turns) };
+		const thread = { id: mintId(), status: "open", live: quiet !== true, piProposedResolve: false, ...fields, nextSeq: turns.length + 1, turns: stampTurns(turns, quiet !== true) };
 		threads.set(thread.id, thread);
-		return { thread: publicThread(thread), created: true };
+		const delivered = quiet !== true ? thread.turns.filter((turn) => turn.author === "user").map((turn) => ({ ...turn })) : undefined;
+		return { thread: publicThread(thread), created: true, ...(delivered ? { deliveredTurns: delivered, prevLive: false } : {}) };
 	}
 
 	function appendTurn(thread, author, body, ts, quiet) {
 		if (thread.turns.length >= limits.maxTurnsPerThread) return { error: "thread-full" };
-		thread.turns.push({ author, body, ts, seq: thread.nextSeq++ });
-		let escalated = false;
-		if (author === "user") {
-			thread.status = "open";
-			thread.piProposedResolve = false;
-			// A quiet turn keeps an undelivered thread queued; a live turn on a queued
-			// thread escalates it so the whole backlog is delivered. Live threads stay live.
-			if (!thread.live && quiet !== true) {
-				thread.live = true;
-				escalated = thread.turns.filter((turn) => turn.author === "user").length > 1;
-			}
-		}
-		return { thread: publicThread(thread), created: false, ...(escalated ? { escalated: true } : {}) };
+		const turn = { author, body, ts, seq: thread.nextSeq++ };
+		if (author === "user") turn.delivered = quiet === true ? false : true;
+		thread.turns.push(turn);
+		if (author !== "user") return { thread: publicThread(thread), created: false };
+		thread.status = "open";
+		thread.piProposedResolve = false;
+		// A quiet message stays pending. A live message delivers the thread's whole
+		// undelivered backlog with it, in order, so Pi never sees a gap.
+		if (quiet === true) return { thread: publicThread(thread), created: false };
+		const prevLive = thread.live;
+		const backlog = undeliveredTurns(thread);
+		for (const pendingTurn of backlog) pendingTurn.delivered = true;
+		turn.delivered = true;
+		thread.live = true;
+		const deliveredNow = [...backlog.map((pendingTurn) => ({ ...pendingTurn })), { ...turn }];
+		return { thread: publicThread(thread), created: false, deliveredTurns: deliveredNow, prevLive, ...(deliveredNow.length > 1 ? { escalated: true } : {}) };
 	}
 
 	/** Validate and apply one reviewer post: a new thread or a reply to an existing one. */
@@ -243,21 +255,44 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 	}
 
 	/**
-	 * Sending a round delivers every open queued thread through the pass summary.
-	 * Resolved quiet threads were withdrawn, not delivered; they keep their queued
-	 * state so a later reopen can still surface their content. When an id set is
-	 * given, only those threads count as delivered — quiet threads created after
-	 * the pass content was captured were not in it and must stay queued.
+	 * Sending a round delivers every undelivered reviewer message through the
+	 * pass summary — whole queued threads and pending tails on live threads
+	 * alike. Resolved quiet threads were withdrawn, not delivered; they keep
+	 * their pending state so a later reopen can still surface their content.
+	 * When a captured map (thread id → Set of turn seqs) is given, only those
+	 * exact messages count as delivered — quiet messages posted after the pass
+	 * content was captured were not in it and must stay pending.
 	 */
-	function markAllDelivered(ids) {
+	function markAllDelivered(captured) {
 		const delivered = [];
 		for (const thread of threads.values()) {
-			if (ids && !ids.has(thread.id)) continue;
-			if (thread.live || thread.status === "resolved" || !thread.turns.some((turn) => turn.author === "user")) continue;
+			if (captured && !captured.has(thread.id)) continue;
+			if (thread.status === "resolved") continue;
+			const allowed = captured?.get(thread.id);
+			const backlog = undeliveredTurns(thread).filter((turn) => !allowed || allowed.has(turn.seq));
+			if (backlog.length === 0) continue;
+			for (const turn of backlog) turn.delivered = true;
 			thread.live = true;
 			delivered.push(publicThread(thread));
 		}
 		return delivered;
+	}
+
+	/**
+	 * "Send now": deliver a thread's pending backlog without adding a message.
+	 * Returns the delivered turns so the caller can hand them to Pi (and requeue
+	 * them if that handoff fails).
+	 */
+	function deliverPending(threadId) {
+		const thread = typeof threadId === "string" ? threads.get(threadId) : undefined;
+		if (!thread) return { error: "unknown-thread" };
+		if (thread.status !== "open") return { error: "thread-resolved" };
+		const backlog = undeliveredTurns(thread);
+		if (backlog.length === 0) return { error: "nothing-pending" };
+		const prevLive = thread.live;
+		for (const turn of backlog) turn.delivered = true;
+		thread.live = true;
+		return { thread: publicThread(thread), deliveredTurns: backlog.map((turn) => ({ ...turn })), prevLive };
 	}
 
 	function list() {
@@ -286,9 +321,9 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		const thread = typeof threadId === "string" ? threads.get(threadId) : undefined;
 		if (!thread) return { error: "unknown-thread" };
 		if (thread.status !== "open") return { error: "thread-resolved" };
-		if (thread.live) return { error: "not-queued" };
 		const index = Number.isInteger(seq) ? thread.turns.findIndex((turn) => turn.seq === seq && turn.author === "user") : -1;
 		if (index === -1) return { error: "unknown-turn" };
+		if (thread.turns[index].delivered !== false) return { error: "not-queued" };
 		if (body === undefined) {
 			thread.turns.splice(index, 1);
 			if (thread.turns.length === 0) {
@@ -302,13 +337,17 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		return { thread: publicThread(thread) };
 	}
 
-	/** Return a failed escalation's backlog to the queued state so nothing is lost. */
-	function requeue(threadId) {
+	/** Return a failed delivery's messages to the pending state so nothing is lost. */
+	function requeue(threadId, seqs, prevLive) {
 		const thread = threads.get(threadId);
 		if (!thread || thread.status !== "open") return undefined;
-		thread.live = false;
+		const targets = new Set(seqs);
+		for (const turn of thread.turns) {
+			if (turn.author === "user" && targets.has(turn.seq)) turn.delivered = false;
+		}
+		thread.live = prevLive === true;
 		return publicThread(thread);
 	}
 
-	return { postUserTurn, postPiReply, setResolved, getThread, list, summary, markAllDelivered, requeue, amendQueuedTurn };
+	return { postUserTurn, postPiReply, setResolved, getThread, list, summary, markAllDelivered, deliverPending, requeue, amendQueuedTurn };
 }

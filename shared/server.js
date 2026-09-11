@@ -244,7 +244,11 @@ export async function createCodeReviewServer(review, options) {
 				}
 				// While a finish pass is in flight, a live reply that would deliver a
 				// backlog the pass already captured must wait — Pi would get it twice.
-				// Quiet posts and backlog-free live posts stay allowed.
+				// Quiet posts and backlog-free live posts stay allowed. Tolerated
+				// ordering quirk: a backlog-free live post here delivers a counter one
+				// higher than the already-captured pass block for the same thread, so Pi
+				// can see a later transmission with a LOWER counter; loss detection only
+				// acts when the tally falls below the counter, so this is benign.
 				if (finishing && body?.quiet !== true) {
 					const target = typeof body?.threadId === "string"
 						? round.store.getThread(body.threadId)

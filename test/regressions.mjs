@@ -175,13 +175,17 @@ try {
 
 	const selectionThread = store.getThread(selectionPost.thread.id);
 	const threadXml = formatThreadMessageXml(ordered, selectionThread, selectionThread.turns[selectionThread.turns.length - 1]);
-	assert.match(threadXml, /^<code-review-thread snapshot="[a-f0-9]{64}" thread="[a-f0-9]{8}-[a-f0-9]{6}-t3" kind="selection" status="open" file="untracked.txt" side="new" new-start="1" new-end="2">/);
+	assert.match(threadXml, /^<code-review-thread snapshot="[a-f0-9]{64}" thread="[a-f0-9]{8}-[a-f0-9]{6}-t3" kind="selection" status="open" file="untracked.txt" delivered-user-turns="\d+" side="new" new-start="1" new-end="2">/);
 	assert.match(threadXml, /A \]\]\]\]><!\[CDATA\[> marker/, "CDATA terminators must be split safely.");
-	assert.match(threadXml, /<message author="user"><!\[CDATA\[Actually, one more thing\.\]\]><\/message>/);
+	assert.match(threadXml, /<message author="user" turn="\d+"><!\[CDATA\[Actually, one more thing\.\]\]><\/message>/, "Messages carry their creation-time turn number.");
+	const noteThread = seeded.find((thread) => thread.commentaryId === "new-file");
+	const noteXml = formatThreadMessageXml(ordered, noteThread, noteThread.turns[0]);
+	assert.match(noteXml, / commentary-id="new-file" delivered-user-turns="0" side="new" start-line="1" end-line="2">/, "Commentary messages carry the note's anchor, never just its id.");
 	const passXml = formatReviewPassXml(ordered, store.list(), store.summary(), false, "Note ]]> here");
 	assert.match(passXml, /^<code-review-pass snapshot="[a-f0-9]{64}" stale="false" open="5" awaiting-user="1" awaiting-pi="4" resolved="0" unread-notes="1" queued="0" pending="0">/, "Header counts must reconcile with the omitted untouched notes.");
 	assert.match(passXml, /<note><!\[CDATA\[Note \]\]\]\]><!\[CDATA\[> here\]\]><\/note>/, "Finish notes must be serialized safely.");
-	assert.match(passXml, /<open-thread thread="[a-f0-9]{8}-[a-f0-9]{6}-t1" kind="commentary" status="open" file="untracked.txt" commentary-id="new-file" last-author="user">/);
+	assert.match(passXml, /<open-thread thread="[a-f0-9]{8}-[a-f0-9]{6}-t1" kind="commentary" status="open" file="untracked.txt" commentary-id="new-file" delivered-user-turns="\d+" side="new" start-line="1" end-line="2" last-author="user">/, "Pass blocks are self-contained: the note's anchor rides along.");
+	assert.match(passXml, /<last-message turn="\d+">/, "Last-message blocks carry the turn number for the audit ledger.");
 	assert.doesNotMatch(passXml, /Why this exists/, "Pass summaries carry only the last message of each open thread.");
 	assert.doesNotMatch(passXml, /commentary-id="second-note"/, "Untouched notes are never echoed back to Pi.");
 
@@ -257,7 +261,9 @@ try {
 	const quietTwo = quietStore.postUserTurn({ source: "overview", body: "Still quiet.", quiet: true }).thread;
 	const quietPassXml = formatReviewPassXml(ordered, quietStore.list(), quietStore.summary(), false, undefined, 1);
 	assert.match(quietPassXml, / queued="2" pending="0">/, "The pass header counts queued threads.");
-	assert.match(quietPassXml, /<open-thread [^>]*queued="true"[^>]*>\n {4}<message author="user"><!\[CDATA\[Still quiet\.\]\]><\/message>/, "Queued threads carry their full reviewer content in the pass.");
+	assert.match(quietPassXml, /<open-thread [^>]*queued="true"[^>]*>\n {4}<message author="user" turn="\d+"><!\[CDATA\[Still quiet\.\]\]><\/message>/, "Queued threads carry their full reviewer content in the pass.");
+	assert.match(quietPassXml, /<open-thread [^>]*delivered-user-turns="1"[^>]*queued="true"[^>]*>\n {4}<message author="user" turn="\d+"><!\[CDATA\[Still quiet\.\]\]>/, "A queued block's counter reports the state after this pass delivers it.");
+	assert.match(quietPassXml, /<open-thread [^>]*delivered-user-turns="3"[^>]*last-author="user">\n {4}<last-message turn="\d+"><!\[CDATA\[Answer now\.\]\]>/, "Plain blocks report the exact lifetime delivered count.");
 	assert.match(quietPassXml, /Quiet note reply\./, "Queued note replies reach Pi through the pass.");
 	assert.doesNotMatch(quietPassXml, /Second quiet\./, "Escalated threads were already delivered; the pass keeps only their last message.");
 	assert.doesNotMatch(quietPassXml, /Why this exists/, "Queued note threads must not echo Pi's own note back.");
@@ -267,7 +273,8 @@ try {
 	assert.match(quietPassXml, / awaiting-pi="1" resolved="0" unread-notes="1" queued="2" pending="0">/, "The pass header excludes queued threads from awaiting-pi.");
 	const pendingPassXml = formatReviewPassXml(ordered, quietStore.list(), quietStore.summary(), false, undefined, 1);
 	assert.match(pendingPassXml, / queued="2" pending="1">/, "The pass header counts pending messages on live threads.");
-	assert.match(pendingPassXml, /<open-thread [^>]*pending="1"[^>]*>\n {4}<message author="user" pending="true"><!\[CDATA\[Quiet on live\.\]\]><\/message>/, "Live threads deliver exactly their pending tail through the pass.");
+	assert.match(pendingPassXml, /<open-thread [^>]*pending="1"[^>]*>\n {4}<message author="user" pending="true" turn="\d+"><!\[CDATA\[Quiet on live\.\]\]><\/message>/, "Live threads deliver exactly their pending tail through the pass.");
+	assert.match(pendingPassXml, /<open-thread [^>]*delivered-user-turns="4"[^>]*pending="1"[^>]*>/, "A pending block's counter includes the tail this pass delivers (3 delivered + 1 pending).");
 	assert.doesNotMatch(pendingPassXml, /<last-message><!\[CDATA\[Quiet on live\.\]\]>/, "Pending tails replace last-message serialization.");
 	assert.equal(quietStore.markAllDelivered().length, 3, "Sending the round delivers every thread with undelivered messages.");
 	assert.equal(quietStore.getThread(quietTwo.id).queued, false, "Delivered threads leave the queued state.");
@@ -291,11 +298,29 @@ try {
 	const liveReply = sendStore.postUserTurn({ threadId: liveBase.id, body: "And go." });
 	assert.deepEqual(liveReply.deliveredTurns.map((turn) => turn.body), ["Tail one, sharper.", "Tail two.", "And go."], "A live reply delivers the pending backlog plus itself, in order.");
 	assert.equal(liveReply.escalated, true);
+	const escalationXml = formatThreadMessageXml(ordered, liveReply.thread, liveReply.deliveredTurns, 1);
+	const escalationTurns = [...escalationXml.matchAll(/<message author="user" turn="(\d+)">/g)].map((match) => Number(match[1]));
+	assert.equal(escalationTurns.length, 3, "Every escalated turn carries its own turn attribute.");
+	assert.deepEqual([...escalationTurns].sort((left, right) => left - right), escalationTurns, "Escalated turns are serialized in seq order.");
+	const liveBaseDelivered = liveReply.thread.turns.filter((turn) => turn.author === "user" && turn.delivered === true).length;
+	assert.match(escalationXml, new RegExp(` delivered-user-turns="${liveBaseDelivered}"`), "The escalation counter equals Pi's tally after processing all its turns.");
+
+	const seqStore = createThreadStore(ordered);
+	const seqThread = seqStore.postUserTurn({ source: "overview", body: "one", quiet: true }).thread;
+	seqStore.postUserTurn({ threadId: seqThread.id, body: "two", quiet: true });
+	seqStore.postUserTurn({ threadId: seqThread.id, body: "three", quiet: true });
+	seqStore.amendQueuedTurn(seqThread.id, 1);
+	seqStore.amendQueuedTurn(seqThread.id, 2);
+	seqStore.postUserTurn({ threadId: seqThread.id, body: "four" });
+	const seqCarried = buildCarriedThreads([{ respondsTo: seqThread.id, resolution: "needs-discussion", body: "resp" }], seqStore.list(), ordered, 1);
+	const seqNextStore = createThreadStore(ordered, THREAD_LIMITS, seqCarried);
+	assert.deepEqual(seqNextStore.getThread(seqThread.id).turns.map((turn) => turn.seq), [3, 4, 5], "Carried turns keep their original seqs; deleted gaps are never compacted away.");
+	assert.equal(seqNextStore.postUserTurn({ threadId: seqThread.id, body: "five" }).thread.turns.at(-1).seq, 6, "New turns never reuse a seq Pi may have tallied.");
 
 	sendStore.postUserTurn({ threadId: liveBase.id, body: "After-answer tail.", quiet: true });
 	sendStore.postPiReply(liveBase.id, "Answering the delivered part.", false);
 	const piTailPass = formatReviewPassXml(ordered, sendStore.list(), sendStore.summary(), false, undefined, 1);
-	assert.match(piTailPass, /<open-thread [^>]*pending="1"[^>]*last-author="pi">\n {4}<message author="user" pending="true"><!\[CDATA\[After-answer tail\.\]\]><\/message>/, "A pending block records when Pi answered without seeing the tail.");
+	assert.match(piTailPass, /<open-thread [^>]*pending="1"[^>]*last-author="pi">\n {4}<message author="user" pending="true" turn="\d+"><!\[CDATA\[After-answer tail\.\]\]><\/message>/, "A pending block records when Pi answered without seeing the tail.");
 	assert.match(piTailPass, / awaiting-user="3" /, "A pi-answered pending thread counts as awaiting the reviewer, not as pending-awaiting.");
 
 	const amendStore = createThreadStore(ordered);
@@ -708,11 +733,15 @@ try {
 		const carriedWithTail = roundsServer.getThread(eligibleIds[0]);
 		assert.equal(carriedWithTail.pending, 1, "Carried threads keep their pending tail instead of stamping it delivered.");
 		assert.equal(carriedWithTail.turns.find((turn) => turn.body === "Carried pending tail.").delivered, false);
+		const deliveredCount = (thread) => thread.turns.filter((turn) => turn.author === "user" && turn.delivered === true).length;
+		const deliveredAtCarry = deliveredCount(carriedWithTail);
+		assert.match(formatThreadMessageXml(thirdRoundReview, carriedWithTail, carriedWithTail.turns[carriedWithTail.turns.length - 1]), new RegExp(` delivered-user-turns="${deliveredAtCarry}" side="new" start-line="1" end-line="1">`), "Carried messages carry Pi's re-declared anchor and the lifetime delivered counter.");
 		assert.ok(roundsServer.postPiReply(eligibleIds[0], "Follow-up.", false), "Pi replies to carried threads in the current round.");
 		const carriedReply = await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: eligibleIds[0], body: "Reviewer follow-up." }) });
 		assert.equal(carriedReply.status, 200, "Reviewer replies land in the carried copy, not the archived one.");
 		assert.equal(roundsDeliveries[roundsDeliveries.length - 1], 2, "The live follow-up delivers the carried pending tail with it, in order.");
 		assert.equal(roundsServer.getThread(eligibleIds[0]).pending, 0, "The live follow-up leaves nothing pending.");
+		assert.equal(deliveredCount(roundsServer.getThread(eligibleIds[0])), deliveredAtCarry + 2, "The delivered counter is a lifetime count that survives round carry and grows monotonically.");
 		assert.equal((await fetch(`${origin}/__pi_code_review_send__`, { method: "POST", headers, body: JSON.stringify({ threadId: roundsPost.thread.id }) })).status, 409, "Send now into superseded rounds is rejected.");
 		assert.match(await (await fetch(`${origin}/round/3`, { headers: { cookie } })).text(), /Resolved in earlier rounds/, "Round pages surface the prior-round archive.");
 		assert.deepEqual(roundsServer.viewedFiles(), ["untracked.txt"], "A changed diff drops its checkmark while identical files keep theirs.");

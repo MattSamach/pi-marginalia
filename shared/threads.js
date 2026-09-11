@@ -111,6 +111,9 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 				source: "commentary",
 				file: file.path,
 				commentaryId: entry.id,
+				// The note's anchor travels on the thread so wire messages are
+				// self-contained; a bare commentary-id is never Pi's only context.
+				...(entry.startLine === undefined ? {} : { side: entry.side, startLine: entry.startLine, endLine: entry.endLine }),
 				nextSeq: 2,
 				turns: [{ author: "pi", body: entry.body, ts: Date.now(), seq: 1 }],
 			};
@@ -121,6 +124,16 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 	// Carried threads keep their round-of-origin ids and are, like seeds, exempt
 	// from maxThreads: the cap bounds reviewer-created threads only.
 	for (const carriedThread of carriedThreads) {
+		// Carried turns keep their per-message delivery state (a pending tail the
+		// reviewer wrote just before the round advanced must survive as pending)
+		// AND their original seqs: Pi dedupes on (thread, turn), so compacting the
+		// gaps left by deleted messages would re-issue numbers Pi already tallied.
+		let maxSeq = 0;
+		const turns = carriedThread.turns.map((turn) => {
+			const seq = turn.seq ?? maxSeq + 1;
+			maxSeq = Math.max(maxSeq, seq);
+			return { ...turn, seq, ...(turn.author === "user" ? { delivered: turn.delivered !== false } : {}) };
+		});
 		threads.set(carriedThread.id, {
 			id: carriedThread.id,
 			status: "open",
@@ -130,11 +143,8 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 			...(carriedThread.highlight === undefined ? {} : { highlight: carriedThread.highlight }),
 			...(carriedThread.file === undefined ? {} : { file: carriedThread.file }),
 			carried: { ...carriedThread.carried },
-			nextSeq: carriedThread.turns.length + 1,
-			// Carried turns keep their per-message delivery state: a pending tail the
-			// reviewer wrote just before the round advanced must survive as pending,
-			// not be silently stamped delivered.
-			turns: carriedThread.turns.map((turn, index) => ({ ...turn, seq: index + 1, ...(turn.author === "user" ? { delivered: turn.delivered !== false } : {}) })),
+			nextSeq: maxSeq + 1,
+			turns,
 		});
 	}
 	const seededCount = threads.size;

@@ -59,18 +59,20 @@ If files change during the review, the pass message is marked `stale="true"`. Th
 Each posted comment or reply arrives as one focused XML message — never the diff or manifest:
 
 ```xml
-<code-review-thread snapshot="…" round="1" thread="1a2b3c4d-t1" kind="selection" status="open" file="src/service.ts" side="new" new-start="42" new-end="44">
+<code-review-thread snapshot="…" round="1" thread="1a2b3c4d-t1" kind="selection" status="open" file="src/service.ts" delivered-user-turns="1" side="new" new-start="42" new-end="44">
   <highlight><![CDATA[const result = await execute(input);]]></highlight>
-  <message author="user"><![CDATA[Why is this serial?]]></message>
+  <message author="user" turn="1"><![CDATA[Why is this serial?]]></message>
 </code-review-thread>
 ```
+
+Every message is self-contained: commentary threads carry their note's anchor (`side`/`start-line`/`end-line`) and carried threads carry Pi's re-declared anchor, so no message ever arrives as a bare thread id. Two attributes make delivery auditable: `turn` is each message's creation-time sequence number (stable under deletion of undelivered messages — gaps are innocent), and `delivered-user-turns` is the thread's lifetime count of delivered reviewer messages as of that transmission — if Pi's own tally of received `<message>` elements ever falls short of it, a message was lost.
 
 Pi answers with the `reply_review_thread` tool, optionally proposing resolution. Sending a round produces one pass summary; its `snapshot` id is what Pi passes back as `previousRoundId` to open the next round:
 
 ```xml
-<code-review-pass snapshot="…" round="1" stale="false" open="2" awaiting-user="0" awaiting-pi="2" resolved="3" unread-notes="0">
-  <open-thread thread="1a2b3c4d-t2" kind="commentary" file="src/service.ts" commentary-id="error-handling" last-author="user">
-    <last-message><![CDATA[Could we preserve the original error?]]></last-message>
+<code-review-pass snapshot="…" round="1" stale="false" open="2" awaiting-user="0" awaiting-pi="2" resolved="3" unread-notes="0" queued="0" pending="0">
+  <open-thread thread="1a2b3c4d-t2" kind="commentary" status="open" file="src/service.ts" commentary-id="error-handling" delivered-user-turns="2" side="new" start-line="18" end-line="22" last-author="user">
+    <last-message turn="3"><![CDATA[Could we preserve the original error?]]></last-message>
   </open-thread>
 </code-review-pass>
 ```

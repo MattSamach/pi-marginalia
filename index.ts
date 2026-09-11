@@ -3,10 +3,10 @@ import { Type, type Static } from "typebox";
 import { spawn } from "node:child_process";
 import { applyReviewManifest, collectReviewSnapshot } from "./shared/git-review.js";
 import { createReviewMessageQueue } from "./shared/delivery-queue.js";
-import { formatReviewPassXml, formatThreadMessageXml } from "./shared/feedback.js";
+import { formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "./shared/feedback.js";
 import { createCodeReviewServer } from "./shared/server.js";
 
-type ReviewThreadTurn = { author: "user" | "pi"; body: string; ts: number };
+type ReviewThreadTurn = { author: "user" | "pi"; body: string; ts: number; seq?: number; delivered?: boolean };
 type ReviewThread = {
 	id: string;
 	source: "selection" | "commentary" | "overview";
@@ -15,6 +15,16 @@ type ReviewThread = {
 	file?: string;
 	commentaryId?: string;
 	highlight?: string;
+	queued?: boolean;
+	pending?: number;
+	side?: string;
+	startLine?: number;
+	endLine?: number;
+	oldStart?: number;
+	oldEnd?: number;
+	newStart?: number;
+	newEnd?: number;
+	carried?: { fromRound: number; resolution: string; placement: string; side?: string; startLine?: number; endLine?: number };
 	turns: ReviewThreadTurn[];
 };
 type ReviewThreadSummary = { open: number; awaitingUser: number; awaitingPi: number; resolved: number };
@@ -55,6 +65,15 @@ const openCodeReviewSchema = Type.Object({
 	}), { maxItems: 400, description: "Required with previousRoundId when the previous round has open threads: exactly one response per open thread, carrying the conversation into this round at an explicitly designated anchor." })),
 });
 export type OpenCodeReviewInput = Static<typeof openCodeReviewSchema>;
+const listReviewThreadsSchema = Type.Object({
+	includeResolved: Type.Optional(Type.Boolean({ description: "Also list resolved threads (default: open threads only)." })),
+});
+
+const getReviewThreadSchema = Type.Object({
+	threadId: Type.String({ minLength: 1, maxLength: 200, description: "Thread id from any code-review message or list_review_threads." }),
+	lastTurns: Type.Optional(Type.Integer({ minimum: 1, description: "Return only the newest N messages — a cheaper context lever for long threads." })),
+});
+
 const replyReviewThreadSchema = Type.Object({
 	threadId: Type.String({ minLength: 1, maxLength: 200, description: "Thread id from a code-review-thread message." }),
 	body: Type.String({ minLength: 1, maxLength: 20_000, description: "Concise reply shown inside the reviewer's thread." }),
@@ -226,6 +245,70 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 					content: [{ type: "text", text: `Replied in thread ${thread.id} (${thread.status}${thread.piProposedResolve ? ", resolution proposed" : ""}). Review now has ${summary.open} open and ${summary.resolved} resolved thread(s).` }],
 					details: { thread: thread.id, status: thread.status, piProposedResolve: thread.piProposedResolve },
 				};
+			}
+			throw new Error(`No open code review contains thread ${params.threadId}.`);
+		},
+	});
+
+	pi.registerTool({
+		name: "list_review_threads",
+		label: "List Review Threads",
+		description: "List the comment threads of the open browser code review: id, kind, file, anchor, status, queued/pending state, delivered-message counter, and the newest message. Prior thread context is normally already in your conversation — every message arrived when it was posted. Use this as the deliberate fallback when threads become confusing or hard to track (after compaction, long gaps, or many parallel threads), then get_review_thread for one thread's full history.",
+		promptSnippet: "List the open code review's comment threads",
+		promptGuidelines: [
+			"Use list_review_threads only when review threads become confusing or hard to track — after compaction, a long gap, or many parallel threads; prior messages are normally already in your context.",
+		],
+		parameters: listReviewThreadsSchema,
+		async execute(_toolCallId, params) {
+			const sections: string[] = [];
+			for (const server of servers) {
+				const review = server.currentReview();
+				const summary = server.threadSummary();
+				const threads = server.threads().filter((thread: ReviewThread) => params.includeResolved === true || thread.status === "open");
+				const rows = threads.map((thread: ReviewThread) => {
+					const anchor = thread.carried?.startLine !== undefined
+						? `${thread.carried.side}:${thread.carried.startLine}-${thread.carried.endLine}`
+						: thread.startLine !== undefined
+							? `${thread.side}:${thread.startLine}-${thread.endLine}`
+							: thread.newStart !== undefined
+								? `new:${thread.newStart}-${thread.newEnd}`
+								: thread.oldStart !== undefined
+									? `old:${thread.oldStart}-${thread.oldEnd}`
+									: "file";
+					const last = thread.turns[thread.turns.length - 1];
+					const deliveredCount = thread.turns.filter((turn: ReviewThreadTurn) => turn.author === "user" && turn.delivered === true).length;
+					const flags = [thread.status === "resolved" ? "resolved" : undefined, thread.queued ? "queued" : undefined, (thread.pending ?? 0) > 0 && !thread.queued ? `${thread.pending} pending` : undefined, thread.carried ? `carried r${thread.carried.fromRound}/${thread.carried.resolution}` : undefined].filter(Boolean).join(", ");
+					const location = thread.source === "overview" ? "overview" : thread.file ?? "(anchor gone)";
+					const snippetSource = last ? [...last.body.replace(/\s+/g, " ").trim()] : [];
+					const snippet = snippetSource.length > 90 ? `${snippetSource.slice(0, 90).join("")}…` : snippetSource.join("");
+					const draft = last?.author === "user" && last.delivered === false ? "(draft) " : "";
+					return `  ${thread.id} [${thread.source}] ${location} @${anchor} delivered=${deliveredCount}${flags ? ` (${flags})` : ""} — ${last ? `${last.author} t${last.seq}: ${draft}${snippet}` : "no messages"}`;
+				});
+				sections.push(`Review "${review.title}" snapshot ${review.id.slice(0, 12)} round ${server.currentRoundNumber()}: ${summary.open} open, ${summary.resolved} resolved.\n${rows.join("\n") || "  (no matching threads)"}`);
+			}
+			if (sections.length === 0) throw new Error("No open code review session.");
+			return { content: [{ type: "text", text: sections.join("\n\n") }], details: { reviews: sections.length } };
+		},
+	});
+
+	pi.registerTool({
+		name: "get_review_thread",
+		label: "Get Review Thread",
+		description: "Fetch one review thread's full unified context: anchor, highlight, and complete message history with turn numbers and per-message delivery state. Prior turns are normally already in your conversation; use this as the deliberate recovery path when a thread's context is no longer in your attention window (after compaction or a long gap). lastTurns limits the fetch to the newest N messages when you only need the recent tail.",
+		promptSnippet: "Fetch one code-review thread's full history",
+		promptGuidelines: [
+			"Use get_review_thread when a thread message arrives whose earlier context you can no longer see (post-compaction, long gaps) instead of guessing; prefer lastTurns when only the recent tail is needed.",
+		],
+		parameters: getReviewThreadSchema,
+		async execute(_toolCallId, params) {
+			for (const server of servers) {
+				const context = server.threadContext(params.threadId);
+				if (!context) continue;
+				const xml = formatThreadContextXml(context.review, context.thread, context.round, params.lastTurns);
+				// Carried ids always resolve to the living copy (newest-first lookup), so
+				// reaching a superseded round means the thread was NOT carried forward.
+				const note = context.current ? "" : `\nNote: this thread lives in superseded round ${context.round} and is read-only; it was not carried into current round ${server.currentRoundNumber()}. Answer the reviewer in the current round's threads or in chat.`;
+				return { content: [{ type: "text", text: `${xml}${note}` }], details: { thread: params.threadId, round: context.round, current: context.current } };
 			}
 			throw new Error(`No open code review contains thread ${params.threadId}.`);
 		},

@@ -55,6 +55,23 @@ export function formatThreadMessageXml(review, thread, turns, round) {
 	return lines.join("\n");
 }
 
+/**
+ * Full unified context of one thread, for on-demand recovery (the get tool).
+ * lastTurns returns only the newest N messages; omitted-turns reports the cut.
+ */
+export function formatThreadContextXml(review, thread, round, lastTurns) {
+	const turns = thread.turns;
+	const shown = Number.isInteger(lastTurns) && lastTurns > 0 && lastTurns < turns.length ? turns.slice(turns.length - lastTurns) : turns;
+	const omitted = turns.length - shown.length;
+	const lines = [`<review-thread snapshot="${attr(review.id)}"${roundAttribute(round)} ${threadAttributes(thread)}${anchorAttributes(thread)} pending="${thread.pending ?? 0}"${omitted > 0 ? ` omitted-turns="${omitted}"` : ""}>`];
+	if (thread.highlight !== undefined) lines.push(`  <highlight>${cdata(thread.highlight)}</highlight>`);
+	for (const turn of shown) {
+		lines.push(`  <message author="${attr(turn.author)}"${turn.seq === undefined ? "" : ` turn="${turn.seq}"`}${turn.author === "user" && turn.delivered === false ? " pending=\"true\"" : ""}>${cdata(turn.body)}</message>`);
+	}
+	lines.push("</review-thread>");
+	return lines.join("\n");
+}
+
 /** Format the finish-pass summary delivered to Pi when the reviewer completes a pass. */
 export function formatReviewPassXml(review, threads, summary, stale, note, round) {
 	const unreadNotes = threads.filter((thread) => thread.status === "open" && !thread.turns.some((turn) => turn.author === "user")).length;

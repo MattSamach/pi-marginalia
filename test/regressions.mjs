@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import puppeteer from "puppeteer-core";
 import { applyReviewManifest, collectReviewSnapshot, parseUnifiedPatch, REVIEW_LIMITS } from "../shared/git-review.js";
-import { formatReviewPassXml, formatThreadMessageXml } from "../shared/feedback.js";
+import { formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "../shared/feedback.js";
 import { renderReviewHtml } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
 import { buildCarriedThreads, createThreadStore, THREAD_LIMITS } from "../shared/threads.js";
@@ -322,6 +322,19 @@ try {
 	const piTailPass = formatReviewPassXml(ordered, sendStore.list(), sendStore.summary(), false, undefined, 1);
 	assert.match(piTailPass, /<open-thread [^>]*pending="1"[^>]*last-author="pi">\n {4}<message author="user" pending="true" turn="\d+"><!\[CDATA\[After-answer tail\.\]\]><\/message>/, "A pending block records when Pi answered without seeing the tail.");
 	assert.match(piTailPass, / awaiting-user="3" /, "A pi-answered pending thread counts as awaiting the reviewer, not as pending-awaiting.");
+
+	const contextXml = formatThreadContextXml(ordered, sendStore.getThread(liveBase.id), 1);
+	assert.match(contextXml, /^<review-thread snapshot="[a-f0-9]{64}" round="1" thread=/, "Thread context opens with the snapshot and round.");
+	assert.match(contextXml, /<message author="user" turn="\d+" pending="true"><!\[CDATA\[After-answer tail\.\]\]>/, "Undelivered messages are marked pending in the fetched context.");
+	assert.match(contextXml, /<message author="pi" turn="\d+"><!\[CDATA\[Answering the delivered part\.\]\]>/, "Pi turns appear in the fetched context.");
+	const tailXml = formatThreadContextXml(ordered, sendStore.getThread(liveBase.id), 1, 2);
+	assert.match(tailXml, / omitted-turns="4"/, "lastTurns reports how many older messages were cut.");
+	assert.equal([...tailXml.matchAll(/<message /g)].length, 2, "lastTurns returns exactly the newest N messages.");
+	assert.doesNotMatch(tailXml, /Live base\./, "Cut messages are absent from the tail fetch.");
+	assert.doesNotMatch(formatThreadContextXml(ordered, sendStore.getThread(liveBase.id), 1, 999), / omitted-turns=/, "lastTurns beyond the history returns everything without an omitted marker.");
+	const resolvedContextThread = sendStore.postUserTurn({ source: "overview", body: "Resolve then fetch." }).thread;
+	sendStore.setResolved(resolvedContextThread.id, true);
+	assert.match(formatThreadContextXml(ordered, sendStore.getThread(resolvedContextThread.id), 1), / status="resolved"/, "Fetched context reports resolved threads honestly.");
 
 	const amendStore = createThreadStore(ordered);
 	const amendThread = amendStore.postUserTurn({ source: "overview", body: "First quiet.", quiet: true }).thread;
@@ -743,6 +756,17 @@ try {
 		assert.equal(roundsServer.getThread(eligibleIds[0]).pending, 0, "The live follow-up leaves nothing pending.");
 		assert.equal(deliveredCount(roundsServer.getThread(eligibleIds[0])), deliveredAtCarry + 2, "The delivered counter is a lifetime count that survives round carry and grows monotonically.");
 		assert.equal((await fetch(`${origin}/__pi_code_review_send__`, { method: "POST", headers, body: JSON.stringify({ threadId: roundsPost.thread.id }) })).status, 409, "Send now into superseded rounds is rejected.");
+		const supersededContext = roundsServer.threadContext(roundsPost.thread.id);
+		assert.equal(supersededContext.current, false, "Thread context reports superseded rounds honestly.");
+		assert.equal(supersededContext.round, 1);
+		assert.equal(supersededContext.review.id, ordered.id, "Thread context returns the owning round's snapshot, not the newest.");
+		assert.equal(roundsServer.threadContext("missing"), undefined);
+		assert.equal(roundsServer.threadContext(eligibleIds[0]).current, true, "Carried ids resolve to the living copy.");
+		const carriedContextXml = formatThreadContextXml(thirdRoundReview, roundsServer.getThread(eligibleIds[0]), 3);
+		assert.match(carriedContextXml, / carried-from-round="2" resolution="addressed"[^>]* side="new" start-line="1" end-line="1"/, "Fetched carried context carries Pi's re-declared anchor and provenance.");
+		const outdatedContextXml = formatThreadContextXml(thirdRoundReview, roundsServer.getThread(eligibleIds[1]), 3);
+		assert.match(outdatedContextXml, / carried-from-round="2" resolution="declined"/, "Outdated carried context keeps its provenance.");
+		assert.doesNotMatch(outdatedContextXml, / side=| start-line=| old-start=| new-start=/, "An anchorless carried thread emits no stale anchor.");
 		assert.match(await (await fetch(`${origin}/round/3`, { headers: { cookie } })).text(), /Resolved in earlier rounds/, "Round pages surface the prior-round archive.");
 		assert.deepEqual(roundsServer.viewedFiles(), ["untracked.txt"], "A changed diff drops its checkmark while identical files keep theirs.");
 

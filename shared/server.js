@@ -485,6 +485,11 @@ export async function createCodeReviewServer(review, options) {
 			return round ? { round: round.number, current: round === current() } : undefined;
 		},
 		getThread: (threadId) => roundOfThread(threadId)?.store.getThread(threadId),
+		threadContext(threadId) {
+			const round = roundOfThread(threadId);
+			if (!round) return undefined;
+			return { thread: round.store.getThread(threadId), round: round.number, current: round === current(), review: round.review };
+		},
 		threads: () => current().store.list(),
 		threadSummary: () => current().store.summary(),
 		viewedFiles: () => [...current().viewed],

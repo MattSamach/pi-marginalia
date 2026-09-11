@@ -9,7 +9,7 @@ import { applyReviewManifest, collectReviewSnapshot, parseUnifiedPatch, REVIEW_L
 import { formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "../shared/feedback.js";
 import { renderReviewHtml } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
-import { buildCarriedThreads, createThreadStore, THREAD_LIMITS } from "../shared/threads.js";
+import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS, threadsAwaitingResponse } from "../shared/threads.js";
 import { createReviewMessageQueue } from "../shared/delivery-queue.js";
 
 const exec = promisify(execFile);
@@ -365,6 +365,34 @@ try {
 	assert.equal(tinyStore.postUserTurn({ source: "overview", body: "Two." }).error, "too-many-threads");
 	tinyStore.amendQueuedTurn(tinyThread.id, tinyThread.turns[0].seq);
 	assert.equal(tinyStore.postUserTurn({ source: "overview", body: "Two." }).error, undefined, "Deleting a queued thread frees its slot.");
+
+	const heldNext = { ...ordered, files: ordered.files.map((file) => (file.path === "untracked.txt" ? { ...file, lines: file.lines.filter((line) => line.newLine !== 2) } : file)) };
+	const heldSource = createThreadStore(ordered);
+	const keepAnchor = heldSource.postUserTurn({ source: "selection", file: "untracked.txt", side: "new", newStart: 1, newEnd: 1, highlight: "keep", body: "keep me", quiet: true }).thread;
+	const loseAnchor = heldSource.postUserTurn({ source: "selection", file: "untracked.txt", side: "new", newStart: 2, newEnd: 2, highlight: "lose", body: "lose me", quiet: true }).thread;
+	heldSource.postUserTurn({ source: "commentary", file: "untracked.txt", commentaryId: "new-file", body: "note quiet", quiet: true });
+	assert.equal(threadsAwaitingResponse(heldSource.list()).length, 0, "Undelivered threads are never awaiting a response.");
+	assert.throws(() => buildCarriedThreads([{ respondsTo: keepAnchor.id, resolution: "addressed", body: "x" }], heldSource.list(), ordered, 1), /does not match an open thread awaiting a response/, "Pi cannot respond to a thread it never received.");
+	const heldRecords = buildHeldThreads(heldSource.list(), heldNext, 1);
+	assert.equal(heldRecords.length, 3, "Every undelivered open thread is held over.");
+	const heldKeep = heldRecords.find((record) => record.id === keepAnchor.id);
+	assert.equal(heldKeep.newStart, 1, "A still-visible anchor survives the hold.");
+	const heldLose = heldRecords.find((record) => record.id === loseAnchor.id);
+	assert.equal(heldLose.newStart, undefined, "A vanished anchor is dropped.");
+	assert.equal(heldLose.file, "untracked.txt", "The file association survives an anchor drop.");
+	const heldNote = heldRecords.find((record) => record.source === "commentary");
+	assert.equal(heldNote.commentaryId, undefined, "Held note threads never collide with the new round's commentary ids.");
+	assert.equal(heldNote.turns.length, 2, "Pi's note travels with the held conversation.");
+	assert.equal(heldNote.startLine, undefined, "The note's anchor is revalidated like any other.");
+	const heldStore = createThreadStore(heldNext, THREAD_LIMITS, [], heldRecords);
+	const heldImported = heldStore.getThread(keepAnchor.id);
+	assert.equal(heldImported.queued, true, "Held threads arrive still queued.");
+	assert.equal(heldImported.heldFrom, 1);
+	assert.equal(threadsAwaitingResponse(heldStore.list()).length, 0, "Held threads stay outside the response contract until delivered.");
+	const heldEscalation = heldStore.postUserTurn({ threadId: keepAnchor.id, body: "now live" });
+	assert.deepEqual(heldEscalation.deliveredTurns.map((turn) => turn.body), ["keep me", "now live"], "Delivering a held thread carries its full backlog in order.");
+	assert.match(formatThreadMessageXml(heldNext, heldEscalation.thread, heldEscalation.deliveredTurns, 2), / held-from-round="1"/, "Delivered held threads disclose their origin round.");
+	assert.equal(threadsAwaitingResponse(heldStore.list()).length, 1, "Once delivered, a held thread joins the response contract.");
 
 	const withdrawn = quietStore.postUserTurn({ source: "overview", body: "Withdrawn quiet.", quiet: true }).thread;
 	quietStore.setResolved(withdrawn.id, true);
@@ -731,10 +759,11 @@ try {
 		assert.equal(roundsServer.addRound({ ...secondRoundReview }, secondRoundReview.id, [{ respondsTo: "not-a-thread", resolution: "addressed", body: "x" }]).identical, true, "Identical reopens skip the response contract even with open threads; conversations continue in place.");
 		assert.equal((await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 2, source: "overview", body: "unlocked again" }) })).status, 200, "An identical reopen resumes the current round.");
 		assert.equal(roundsServer.addRound({ ...ordered, id: altId(ordered.id, 61) }, secondRoundReview.id).error, "invalid-responses", "Open threads demand responses before the next round opens.");
-		const eligibleIds = roundsServer.threads().filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user")).map((thread) => thread.id);
+		const eligibleIds = roundsServer.threads().filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user" && turn.delivered === true)).map((thread) => thread.id);
 		assert.equal(eligibleIds.length, 2);
 		assert.equal((await fetch(roundsViewedEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 2, file: "unstaged.txt", viewed: true }) })).status, 200);
 		assert.equal((await (await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ threadId: eligibleIds[0], body: "Carried pending tail.", quiet: true }) })).json()).thread.pending, 1, "A live thread can hold a pending tail when the round advances.");
+		const heldOverview = await (await fetch(postEndpoint, { method: "POST", headers, body: JSON.stringify({ round: 2, source: "overview", body: "Held over.", quiet: true }) })).json();
 		const thirdRoundReview = { ...ordered, id: altId(ordered.id, 61), files: ordered.files.map((file) => (file.path === "unstaged.txt" ? { ...file, lines: file.lines.slice(0, -1) } : file)) };
 		const carriedAdd = roundsServer.addRound(thirdRoundReview, secondRoundReview.id, eligibleIds.map((id, index) => ({ respondsTo: id, resolution: index === 0 ? "addressed" : "declined", body: `Response ${index}.`, ...(index === 0 ? { file: "untracked.txt", side: "new", startLine: 1 } : {}) })));
 		assert.equal(carriedAdd.round, 3, "Complete responses open the next round with carried threads.");
@@ -762,6 +791,10 @@ try {
 		assert.equal(supersededContext.review.id, ordered.id, "Thread context returns the owning round's snapshot, not the newest.");
 		assert.equal(roundsServer.threadContext("missing"), undefined);
 		assert.equal(roundsServer.threadContext(eligibleIds[0]).current, true, "Carried ids resolve to the living copy.");
+		const heldInRound3 = roundsServer.getThread(heldOverview.thread.id);
+		assert.equal(heldInRound3.queued, true, "A never-delivered thread crosses the round still queued.");
+		assert.equal(heldInRound3.heldFrom, 2, "Held threads disclose the round they were written in.");
+		assert.equal(roundsServer.threadContext(heldOverview.thread.id).current, true, "The held copy is the living one.");
 		const carriedContextXml = formatThreadContextXml(thirdRoundReview, roundsServer.getThread(eligibleIds[0]), 3);
 		assert.match(carriedContextXml, / carried-from-round="2" resolution="addressed"[^>]* side="new" start-line="1" end-line="1"/, "Fetched carried context carries Pi's re-declared anchor and provenance.");
 		const outdatedContextXml = formatThreadContextXml(thirdRoundReview, roundsServer.getThread(eligibleIds[1]), 3);
@@ -810,10 +843,19 @@ try {
 		const headers = { cookie, "content-type": "application/json", origin };
 		const raceLive = await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ source: "overview", body: "Race live." }) })).json();
 		assert.equal((await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ threadId: raceLive.thread.id, body: "Captured tail.", quiet: true }) })).json()).thread.pending, 1);
+		const raceQueued = await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ source: "overview", body: "Race queued.", quiet: true }) })).json();
 		const finishPromise = fetch(`${origin}/__pi_code_review_finish__`, { method: "POST", headers, body: "{}" });
 		await raceFinishEntered;
 		assert.equal((await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ threadId: raceLive.thread.id, body: "Uncaptured tail.", quiet: true }) })).json()).thread.pending, 2);
-		assert.equal(raceServer.addRound({ ...ordered, id: altId(ordered.id, 63) }, ordered.id, [{ respondsTo: raceLive.thread.id, resolution: "needs-discussion", body: "Carrying through the race." }]).round, 2, "Pi may open the next round while the finish handoff is in flight.");
+		assert.equal((await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ threadId: raceQueued.thread.id, body: "Race tail.", quiet: true }) })).json()).thread.pending, 2);
+		assert.equal(raceServer.addRound({ ...ordered, id: altId(ordered.id, 63) }, ordered.id, [{ respondsTo: raceLive.thread.id, resolution: "needs-discussion", body: "Carrying through the race." }]).round, 2, "Pi may open the next round while the finish handoff is in flight; queued threads need no response.");
+		const heldRace = raceServer.getThread(raceQueued.thread.id);
+		assert.equal(heldRace.heldFrom, 1, "The queued thread is held over, not responded to.");
+		assert.equal(heldRace.turns.find((turn) => turn.body === "Race queued.").delivered, true, "Held copies of pass-captured messages import as delivered — the in-flight pass carries them.");
+		assert.equal(heldRace.queued, false, "A pass-captured held thread is no longer queued.");
+		assert.equal(heldRace.pending, 1, "The uncaptured mid-handoff tail stays pending across the held import.");
+		assert.equal(heldRace.turns.find((turn) => turn.body === "Race tail.").delivered, false);
+		assert.ok(threadsAwaitingResponse(raceServer.threads()).some((thread) => thread.id === raceQueued.thread.id), "Once the pass delivers it, a held thread joins the next response contract.");
 		const carriedRace = raceServer.getThread(raceLive.thread.id);
 		assert.equal(carriedRace.pending, 1, "Only the uncaptured mid-handoff tail stays pending in the carried copy.");
 		assert.equal(carriedRace.turns.find((turn) => turn.body === "Captured tail.").delivered, true, "The carried copy must not re-deliver what the in-flight pass carries.");
@@ -1040,7 +1082,7 @@ try {
 			});
 			await driftPage.goto(`${browserOrigin}/round/2`, { waitUntil: "domcontentloaded" });
 			const heldEvents = await eventsHeld;
-			const round3Responses = browserServer.threads().filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user")).map((thread) => ({ respondsTo: thread.id, resolution: "needs-discussion", body: "Carrying into round 3." }));
+			const round3Responses = browserServer.threads().filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user" && turn.delivered === true)).map((thread) => ({ respondsTo: thread.id, resolution: "needs-discussion", body: "Carrying into round 3." }));
 			assert.equal(browserServer.addRound({ ...ordered, id: altId(ordered.id, 62) }, nextRoundReview.id, round3Responses).round, 3, "The session advances while the drift tab is disconnected.");
 			heldEvents.continue().catch(() => {});
 			await driftPage.waitForFunction(() => document.body.dataset.round === "3", { timeout: 5_000 });

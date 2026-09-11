@@ -17,9 +17,61 @@ function validRange(start, end) {
 
 export const THREAD_RESOLUTIONS = Object.freeze(["addressed", "declined", "needs-discussion"]);
 
-/** Open threads with reviewer turns: the set a next round must respond to. */
+/**
+ * Open threads with DELIVERED reviewer turns: the set a next round must
+ * respond to. A thread Pi never received is not awaiting a response — it is
+ * awaiting delivery, and rounds carry it forward still queued instead.
+ */
 export function threadsAwaitingResponse(threads) {
-	return threads.filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user"));
+	return threads.filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user" && turn.delivered === true));
+}
+
+/**
+ * Build the held-thread records for a next round: open threads whose reviewer
+ * content was never delivered to Pi. They cross rounds still queued, keeping
+ * their id, history, and seqs; anchors are revalidated against the new
+ * snapshot and dropped (file kept) when the anchored lines are gone.
+ */
+export function buildHeldThreads(previousThreads, nextReview, fromRound) {
+	const files = new Map(nextReview.files.map((file) => [file.path, file]));
+	return previousThreads
+		.filter((thread) => thread.status === "open" && thread.queued === true)
+		.map((thread) => {
+			const file = thread.file === undefined ? undefined : files.get(thread.file);
+			const anchorable = file !== undefined && !file.binary && !file.omitted;
+			const held = {
+				id: thread.id,
+				source: thread.source,
+				heldFrom: thread.heldFrom ?? fromRound,
+				...(thread.highlight === undefined ? {} : { highlight: thread.highlight }),
+				...(file === undefined ? {} : { file: thread.file }),
+				turns: thread.turns.map((turn) => ({ ...turn })),
+			};
+			const lineVisible = (key, start, end) => [start, end].every((boundary) => file.lines.some((line) => line[key] === boundary));
+			if (anchorable && (thread.oldStart !== undefined || thread.newStart !== undefined)) {
+				const oldOk = thread.oldStart === undefined || lineVisible("oldLine", thread.oldStart, thread.oldEnd);
+				const newOk = thread.newStart === undefined || lineVisible("newLine", thread.newStart, thread.newEnd);
+				if (oldOk && newOk) {
+					held.side = thread.side;
+					if (thread.oldStart !== undefined) {
+						held.oldStart = thread.oldStart;
+						held.oldEnd = thread.oldEnd;
+					}
+					if (thread.newStart !== undefined) {
+						held.newStart = thread.newStart;
+						held.newEnd = thread.newEnd;
+					}
+				}
+			} else if (anchorable && thread.startLine !== undefined) {
+				const boundaryVisible = (line) => file.lines.some((candidate) => (thread.side !== "new" && candidate.oldLine === line) || (thread.side !== "old" && candidate.newLine === line));
+				if (boundaryVisible(thread.startLine) && boundaryVisible(thread.endLine)) {
+					held.side = thread.side;
+					held.startLine = thread.startLine;
+					held.endLine = thread.endLine;
+				}
+			}
+			return held;
+		});
 }
 
 /**
@@ -86,7 +138,7 @@ export function buildCarriedThreads(responses, previousThreads, nextReview, from
 }
 
 /** Live comment-thread store for one immutable review snapshot. */
-export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads = []) {
+export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads = [], heldThreads = []) {
 	const threads = new Map();
 	const files = new Map(review.files.map((file) => [file.path, file]));
 	const commentaryThreadIds = new Map();
@@ -143,6 +195,26 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 			...(carriedThread.highlight === undefined ? {} : { highlight: carriedThread.highlight }),
 			...(carriedThread.file === undefined ? {} : { file: carriedThread.file }),
 			carried: { ...carriedThread.carried },
+			nextSeq: maxSeq + 1,
+			turns,
+		});
+	}
+	// Held threads cross rounds still undelivered (queued). Like carried threads
+	// they keep their id and original seqs, preserve per-turn delivery state, and
+	// are exempt from the reviewer-thread cap (they were budgeted at creation).
+	for (const heldThread of heldThreads) {
+		let maxSeq = 0;
+		const turns = heldThread.turns.map((turn) => {
+			const seq = turn.seq ?? maxSeq + 1;
+			maxSeq = Math.max(maxSeq, seq);
+			return { ...turn, seq, ...(turn.author === "user" ? { delivered: turn.delivered === true } : {}) };
+		});
+		const { turns: _turns, ...fields } = heldThread;
+		threads.set(heldThread.id, {
+			...fields,
+			status: "open",
+			live: turns.some((turn) => turn.author === "user" && turn.delivered === true),
+			piProposedResolve: false,
 			nextSeq: maxSeq + 1,
 			turns,
 		});

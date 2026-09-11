@@ -379,13 +379,14 @@
   };
   const threadHost = (thread) => {
     if (thread.carried) return [...document.querySelectorAll('[data-carried-host]')].find((host) => host.dataset.carriedHost === thread.id);
-    if (thread.source === 'overview') return document.querySelector('[data-overview-thread]');
+    if (thread.source === 'overview') return document.querySelector('[data-overview-thread]') || reviewRoot.querySelector('[data-selection-threads]');
     const section = sectionForPath(thread.file);
-    if (!section) return undefined;
     if (thread.source === 'commentary') {
-      return [...section.querySelectorAll('[data-commentary-thread]')].find((host) => host.dataset.commentaryThread === thread.commentaryId);
+      const noteHost = section && [...section.querySelectorAll('[data-commentary-thread]')].find((host) => host.dataset.commentaryThread === thread.commentaryId);
+      // Held threads (and any orphan) fall back so no conversation is ever invisible.
+      return noteHost || section?.querySelector('[data-selection-threads]') || document.querySelector('[data-overview-thread]') || reviewRoot.querySelector('[data-selection-threads]');
     }
-    return section.querySelector('[data-selection-threads]');
+    return section?.querySelector('[data-selection-threads]') || document.querySelector('[data-overview-thread]') || reviewRoot.querySelector('[data-selection-threads]');
   };
   const resolveThread = async (threadId, resolved) => {
     if (isLocked()) {
@@ -405,7 +406,7 @@
     const host = threadHost(thread);
     if (!host) return;
     let card = host.querySelector('[data-thread-card="' + thread.id + '"]');
-    if (thread.source === 'commentary' && !thread.carried && thread.turns.length === 1 && thread.status === 'open') {
+    if (thread.source === 'commentary' && !thread.carried && !thread.heldFrom && thread.turns.length === 1 && thread.status === 'open') {
       // A note the reviewer has not engaged with yet: the commentary card itself
       // is the thread's visual, so show its composer instead of an empty card.
       if (card) card.remove();
@@ -458,7 +459,9 @@
       quote.textContent = thread.highlight;
       card.append(quote);
     }
-    const turns = thread.source === 'commentary' && !thread.carried ? thread.turns.slice(1) : thread.turns;
+    // Held commentary threads keep Pi's note turn visible: the originating
+    // commentary card does not exist in this round.
+    const turns = thread.source === 'commentary' && !thread.carried && !thread.heldFrom ? thread.turns.slice(1) : thread.turns;
     for (const turn of turns) {
       const entry = document.createElement('div');
       entry.className = 'thread-turn turn-' + turn.author;
@@ -579,7 +582,7 @@
         try { textarea.setSelectionRange(previousSelection[0], previousSelection[1]); } catch {}
       }
     }
-    if (thread.source === 'commentary' && !thread.carried) {
+    if (thread.source === 'commentary' && !thread.carried && !thread.heldFrom) {
       const section = sectionForPath(thread.file);
       const origin = [...(section?.querySelectorAll('[data-commentary-composer]') ?? [])].find((element) => element.dataset.commentaryComposer === thread.commentaryId);
       if (origin) origin.hidden = true;

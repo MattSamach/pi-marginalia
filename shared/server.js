@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { renderReviewHtml } from "./render.js";
-import { buildCarriedThreads, createThreadStore, THREAD_LIMITS } from "./threads.js";
+import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS } from "./threads.js";
 
 const POST_PATH = "/__pi_code_review_post__";
 const RESOLVE_PATH = "/__pi_code_review_resolve__";
@@ -524,11 +524,15 @@ export async function createCodeReviewServer(review, options) {
 			} catch (error) {
 				return { error: "invalid-responses", message: error instanceof Error ? error.message : String(error) };
 			}
+			// Open threads whose reviewer content Pi never received are not part of
+			// the response contract; they cross into the new round still queued.
+			const held = buildHeldThreads(active.store.list(), nextReview, active.number);
 			// A round opened while a finish handoff is in flight must not re-deliver
 			// messages the in-flight pass already carries: stamp the captured seqs
-			// delivered in the carried copies (uncaptured mid-handoff turns stay pending).
+			// delivered in the carried and held copies (uncaptured mid-handoff turns
+			// stay pending).
 			if (inFlightCapture) {
-				for (const record of carried) {
+				for (const record of [...carried, ...held]) {
 					const capturedSeqs = inFlightCapture.get(record.id);
 					if (!capturedSeqs) continue;
 					for (const turn of record.turns) {
@@ -538,7 +542,7 @@ export async function createCodeReviewServer(review, options) {
 			}
 			const previousSignatures = new Map(active.review.files.map((file) => [file.path, diffSignature(file)]));
 			const viewed = new Set(nextReview.files.filter((file) => active.viewed.has(file.path) && previousSignatures.get(file.path) === diffSignature(file)).map((file) => file.path));
-			const round = { number: active.number + 1, review: nextReview, store: createThreadStore(nextReview, THREAD_LIMITS, carried), viewed };
+			const round = { number: active.number + 1, review: nextReview, store: createThreadStore(nextReview, THREAD_LIMITS, carried, held), viewed };
 			rounds.push(round);
 			phase = "reviewing";
 			broadcast("round-ready", { round: round.number, previousRound: active.number });

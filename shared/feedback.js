@@ -36,6 +36,7 @@ function threadAttributes(thread, deliveredOverride) {
 	if (thread.file !== undefined) values.push(`file="${attr(thread.file)}"`);
 	if (thread.commentaryId !== undefined) values.push(`commentary-id="${attr(thread.commentaryId)}"`);
 	if (thread.carried !== undefined) values.push(`carried-from-round="${Number(thread.carried.fromRound)}"`, `resolution="${attr(thread.carried.resolution)}"`);
+	if (thread.heldFrom !== undefined) values.push(`held-from-round="${Number(thread.heldFrom)}"`);
 	values.push(`delivered-user-turns="${deliveredOverride ?? deliveredUserTurns(thread)}"`);
 	return values.join(" ");
 }

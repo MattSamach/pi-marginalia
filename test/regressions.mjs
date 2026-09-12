@@ -391,7 +391,11 @@ try {
 	assert.equal(threadsAwaitingResponse(heldStore.list()).length, 0, "Held threads stay outside the response contract until delivered.");
 	const heldEscalation = heldStore.postUserTurn({ threadId: keepAnchor.id, body: "now live" });
 	assert.deepEqual(heldEscalation.deliveredTurns.map((turn) => turn.body), ["keep me", "now live"], "Delivering a held thread carries its full backlog in order.");
-	assert.match(formatThreadMessageXml(heldNext, heldEscalation.thread, heldEscalation.deliveredTurns, 2), / held-from-round="1"/, "Delivered held threads disclose their origin round.");
+	const heldEscalationXml = formatThreadMessageXml(heldNext, heldEscalation.thread, heldEscalation.deliveredTurns, 2);
+	assert.match(heldEscalationXml, / held-from-round="1"/, "Delivered held threads disclose their origin round.");
+	assert.match(heldEscalationXml, / new-start="1" new-end="1" anchor-from-round="1"/, "Held anchors never claim the current snapshot's authority.");
+	const heldLoseXml = formatThreadMessageXml(heldNext, heldStore.getThread(loseAnchor.id), heldStore.getThread(loseAnchor.id).turns.filter((turn) => turn.author === "user"), 2);
+	assert.doesNotMatch(heldLoseXml, /anchor-from-round=/, "An anchorless held thread emits no stale-coordinate marker.");
 	assert.equal(threadsAwaitingResponse(heldStore.list()).length, 1, "Once delivered, a held thread joins the response contract.");
 
 	const withdrawn = quietStore.postUserTurn({ source: "overview", body: "Withdrawn quiet.", quiet: true }).thread;

@@ -20,6 +20,11 @@ function anchorAttributes(thread) {
 	if (thread.startLine !== undefined) values.push(`start-line="${thread.startLine}"`, `end-line="${thread.endLine}"`);
 	if (thread.oldStart !== undefined) values.push(`old-start="${thread.oldStart}"`, `old-end="${thread.oldEnd}"`);
 	if (thread.newStart !== undefined) values.push(`new-start="${thread.newStart}"`, `new-end="${thread.newEnd}"`);
+	// A held thread's anchor is written in its origin round's coordinates: the
+	// lines still exist positionally in the current snapshot, but code may have
+	// shifted onto them. Mark the coordinate system so the numbers never claim
+	// the current snapshot's authority.
+	if (values.length && thread.heldFrom !== undefined) values.push(`anchor-from-round="${Number(thread.heldFrom)}"`);
 	return values.length ? ` ${values.join(" ")}` : "";
 }
 

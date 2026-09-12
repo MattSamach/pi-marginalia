@@ -8,6 +8,7 @@ import puppeteer from "puppeteer-core";
 import { applyReviewManifest, collectReviewSnapshot, computeContextGaps, computeWorktreeFingerprint, createPinnedBlobContextReader, currentSnapshotId, parseUnifiedPatch, readHeadBlobLines, REVIEW_LIMITS } from "../shared/git-review.js";
 import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "../shared/feedback.js";
 import { renderReviewHtml } from "../shared/render.js";
+import { renderMarkdown } from "../shared/markdown.js";
 import { createCodeReviewServer } from "../shared/server.js";
 import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS, threadsAwaitingResponse } from "../shared/threads.js";
 import { createReviewMessageQueue } from "../shared/delivery-queue.js";
@@ -1066,6 +1067,28 @@ try {
 	}
 	console.log("Staleness detection flow passed.");
 
+	assert.equal(renderMarkdown("Plain **bold** and *soft* text"), "<p>Plain <strong>bold</strong> and <em>soft</em> text</p>");
+	assert.equal(renderMarkdown("line one\nline two\n\nnext para"), "<p>line one<br>line two</p><p>next para</p>");
+	assert.equal(renderMarkdown("- a\n- **b**\n\n1. one\n2) two"), "<ul><li>a</li><li><strong>b</strong></li></ul><ol><li>one</li><li>two</li></ol>");
+	assert.equal(renderMarkdown("see `a < b && **x**` here"), "<p>see <code>a &lt; b &amp;&amp; **x**</code> here</p>", "Code spans are escaped and never emphasized.");
+	assert.equal(renderMarkdown("```js\nif (a < b) alert(\"x\");\n```"), '<pre><code>if (a &lt; b) alert(&quot;x&quot;);</code></pre>', "Fences escape their contents and drop the language tag.");
+	assert.equal(renderMarkdown("```\nunterminated"), "<pre><code>unterminated</code></pre>");
+	assert.equal(renderMarkdown("[docs](https://example.com/a?b=1&c=2)"), '<p><a href="https://example.com/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">docs</a></p>');
+	assert.equal(renderMarkdown("[evil](javascript:alert(1))"), "<p>[evil](javascript:alert(1))</p>", "Non-http(s) schemes never become links.");
+	assert.equal(renderMarkdown("<script>alert(1)</script>"), "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>", "Raw HTML is always escaped.");
+	assert.equal(renderMarkdown('<img src=x onerror="alert(1)">'), "<p>&lt;img src=x onerror=&quot;alert(1)&quot;&gt;</p>");
+	assert.equal(renderMarkdown("a \uE000 0 \uE001 b `c`"), "<p>a  0  b <code>c</code></p>", "Token sentinels in input are stripped so they cannot splice the stash.");
+	assert.equal(renderMarkdown("[see `x` docs](https://example.com)"), '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer">see <code>x</code> docs</a></p>', "Code spans inside link labels reinsert instead of leaking sentinels.");
+	const urlCodeSpan = renderMarkdown("[x](https://e.com/`a`)");
+	assert.ok(!urlCodeSpan.includes("<a "), "A code span inside a URL breaks the link instead of expanding markup into the href.");
+	assert.ok(urlCodeSpan.includes("<code>a</code>") && !/[\uE000\uE001]/.test(urlCodeSpan), "The span still renders and no sentinel survives.");
+	const breakout = renderMarkdown('[x](https://e.com/"onmouseover=alert(1))');
+	assert.ok(breakout.includes('href="https://e.com/&quot;onmouseover=alert(1"'), "Quotes in URLs stay entity-encoded inside the attribute value.");
+	assert.ok(!/"\s+onmouseover/.test(breakout), "No attribute can be injected through a crafted URL.");
+	const markdownHtml = renderReviewHtml(applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", summary: "Adds **two** lines", commentary: [{ id: "md-note", body: "Use `x < y` — see [ref](https://example.com)", side: "new", startLine: 1, endLine: 1 }] }] }), "md-nonce");
+	assert.match(markdownHtml, /<div class="file-summary md"><p>Adds <strong>two<\/strong> lines<\/p><\/div>/, "File summaries render markdown server-side.");
+	assert.match(markdownHtml, /<div class="agent-note-body md"><p>Use <code>x &lt; y<\/code> — see <a href="https:\/\/example\.com"[^>]*rel="noopener noreferrer">ref<\/a><\/p><\/div>/, "Commentary notes render markdown with safe links.");
+
 	assert.equal(applyReviewManifest(snapshot, { files: [], proposedCommitMessage: "Ship the safe review" }).proposedCommitMessage, "Ship the safe review");
 	assert.throws(() => applyReviewManifest(snapshot, { files: [], proposedCommitMessage: "   " }), /Proposed commit message/);
 	const approvedXml = formatReviewApprovedXml(ordered, 3, "Fix <thing> & close]]>", true);
@@ -1654,11 +1677,20 @@ try {
 					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
 				});
 				await plainPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false);
-				await plainPage.type(".review-file.active [data-selection-feedback]", "Approval blocker.");
+				await plainPage.type(".review-file.active [data-selection-feedback]", "Approval **blocker** with `x < y`");
 				await plainPage.$eval(".review-file.active [data-selection-feedback]", (textarea) => {
 					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
 				});
 				await plainPage.waitForFunction(() => document.querySelector(".thread-card.queued"));
+				assert.equal(await plainPage.$eval(".thread-card.queued .md strong", (strong) => strong.textContent), "blocker", "Thread turns render markdown emphasis.");
+				assert.equal(await plainPage.$eval(".thread-card.queued .md code", (code) => code.textContent), "x < y", "Code spans keep their literal escaped content.");
+				await plainPage.type(".thread-card.queued [data-thread-reply]", "probe <img src=x onerror=alert(1)>");
+				await plainPage.$eval(".thread-card.queued [data-thread-reply]", (textarea) => {
+					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelectorAll(".thread-card.queued .md").length === 2);
+				assert.equal(await plainPage.$(".thread-card.queued .md img"), null, "Raw HTML in a reply must never become elements.");
+				assert.match(await plainPage.$$eval(".thread-card.queued .md", (bodies) => bodies[bodies.length - 1].textContent), /probe <img src=x onerror=alert\(1\)>/, "The HTML payload renders as visible text.");
 				assert.equal(await plainPage.$eval("[data-approve]", (button) => button.textContent), "Approve (1 open)", "Open threads — queued included — qualify the approve button.");
 				await plainPage.click("[data-approve]");
 				await plainPage.waitForFunction(() => document.querySelector("[data-global-status]").textContent.includes("still open"));

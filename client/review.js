@@ -589,7 +589,10 @@
       author.textContent = turn.author === 'pi' ? 'Pi' : 'You';
       author.title = new Date(turn.ts).toLocaleString();
       const body = document.createElement('div');
-      body.textContent = turn.body;
+      body.className = 'md';
+      // renderMarkdown output is our own sanitized whitelist over fully escaped
+      // input (shared/markdown.js, inlined by the server), safe for innerHTML.
+      body.innerHTML = renderMarkdown(turn.body);
       entry.append(author, body);
       const amendable = thread.status === 'open' && turn.author === 'user' && turn.delivered === false && !isLocked();
       const editing = amendable ? editorStates.get(turn.seq) : undefined;

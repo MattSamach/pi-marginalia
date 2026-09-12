@@ -57,6 +57,7 @@ Use this classification conservatively. Never mark handwritten source, tests, co
 - Give each file a short purpose and review focus.
 - Add commentary only where it materially improves understanding or requests human judgment.
 - Prefer no anchored commentary over narrating obvious code.
+- Commentary bodies, file summaries, and thread replies render as markdown in the browser: inline `code`, fenced code blocks, **bold**, *italic*, flat lists, and http(s) links written as `[label](url)` — bare URLs stay plain text. Raw HTML never renders; other schemes stay plain text.
 - Use stable, descriptive commentary IDs.
 - Ensure every line anchor is visible on the requested old/new diff side.
 

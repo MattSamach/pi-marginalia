@@ -1094,6 +1094,7 @@ try {
 	const approvedXml = formatReviewApprovedXml(ordered, 3, "Fix <thing> & close]]>", true);
 	assert.match(approvedXml, /^<code-review-approved snapshot="[0-9a-f]{64}" round="3" stale="true">/);
 	assert.ok(approvedXml.includes("<commit-message><![CDATA[Fix <thing> & close]]]]><![CDATA[>]]></commit-message>"), "Commit messages are CDATA-safe.");
+	assert.ok(formatThreadMessageXml(ordered, { id: "cdata-probe", source: "overview", status: "open", turns: [] }, [{ author: "user", seq: 1, body: "prose ]]> and fenced\n```\n]]>\n```" }], 1).includes("prose ]]]]><![CDATA[> and fenced"), "Thread bodies containing ]]> stay CDATA-safe on the wire.");
 	assert.doesNotMatch(formatReviewApprovedXml(ordered, 1, "m", false), / stale=/, "A clean approval carries no stale attribute.");
 
 	const approvals = [];
@@ -1412,6 +1413,10 @@ try {
 			assert.match(await page.$eval("[data-finish-summary]", (summary) => summary.textContent), /3 open threads/, "The send modal counts open threads.");
 			await page.keyboard.press("Escape");
 			assert.equal(await page.$eval("[data-finish-overlay]", (overlay) => overlay.hidden), true, "Esc cancels the send modal.");
+			await page.click("[data-finish]");
+			await page.waitForFunction(() => document.querySelector("[data-finish-overlay]")?.hidden === false);
+			await page.$eval("[data-finish-overlay]", (overlay) => overlay.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+			assert.equal(await page.$eval("[data-finish-overlay]", (overlay) => overlay.hidden), true, "A backdrop click cancels the send modal.");
 			await page.keyboard.down("Meta");
 			await page.keyboard.down("Shift");
 			await page.keyboard.press("Enter");

@@ -814,6 +814,63 @@
     }
     flashTarget(target);
   };
+  // Hunk cursor: j/k walk the active file's hunks with a visible focus ring.
+  let hunkCursor;
+  const clearHunkCursor = () => {
+    hunkCursor?.classList.remove('nav-cursor');
+    hunkCursor = undefined;
+  };
+  const stepHunk = (direction) => {
+    const section = activeFile();
+    if (!section) {
+      setStatus('Open a file to walk its hunks — ] switches files.');
+      return;
+    }
+    const hunks = [...section.querySelectorAll('tr[data-kind="hunk"]')];
+    if (!hunks.length) {
+      setStatus('This file has no hunks to walk.');
+      return;
+    }
+    const at = hunkCursor ? hunks.indexOf(hunkCursor) : -1;
+    const next = at < 0
+      ? (direction > 0 ? hunks[0] : hunks[hunks.length - 1])
+      : hunks[(at + direction + hunks.length) % hunks.length];
+    clearHunkCursor();
+    hunkCursor = next;
+    hunkCursor.classList.add('nav-cursor');
+    hunkCursor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+  const stepFile = (direction) => {
+    if (!fileSections.length) return;
+    if (!confirmDiscardDraft()) return;
+    clearHunkCursor();
+    const next = showingOverview
+      ? (direction > 0 ? 0 : fileSections.length - 1)
+      : (activeIndex + direction + fileSections.length) % fileSections.length;
+    showFile(Number(fileSections[next]?.dataset.reviewFile ?? next));
+    const path = fileSections.find((section) => Number(section.dataset.reviewFile) === activeIndex)?.dataset.path;
+    if (path) setStatus(path);
+  };
+  const focusCurrentReply = () => {
+    const thread = threads.get(currentThreadId);
+    if (!thread) {
+      setStatus('No current thread — press n to select one.');
+      return;
+    }
+    revealThread(thread);
+    const card = document.querySelector('[data-thread-card="' + thread.id + '"]');
+    let reply = card?.querySelector('[data-thread-reply]');
+    if (!reply && thread.source === 'commentary' && thread.commentaryId) {
+      reply = sectionForPath(thread.file)?.querySelector('[data-commentary-reply="' + thread.commentaryId + '"]');
+    }
+    // Only open overview threads fall back to the general composer; a resolved
+    // one must hit the resolved hint, not start an unrelated new thread.
+    if (!reply && thread.source === 'overview' && thread.status === 'open') reply = document.querySelector('[data-overview-feedback]');
+    if (reply && !reply.closest('[hidden]')) {
+      reply.focus();
+      setStatus('Replying — Esc returns to navigation.');
+    } else setStatus(thread.status === 'resolved' ? 'The current thread is resolved — reopen it to reply.' : 'No reply box available for the current thread.');
+  };
   const navigateNext = () => navigateStep(1);
   const navigatePrev = () => navigateStep(-1);
   const resolveCurrent = () => {
@@ -1041,10 +1098,39 @@
       }
       return;
     }
+    // The approve dialog owns the keyboard: no navigation fires behind it, and
+    // returning without preventDefault keeps Enter activating its buttons.
+    if (approveOverlay && !approveOverlay.hidden) return;
     const target = event.target;
     if (target instanceof HTMLElement && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) return;
     if (event.metaKey || event.ctrlKey || event.altKey) return;
-    if (event.key === 'n') {
+    // Enter must keep activating focused controls; the reply shortcut is for
+    // when focus rests on the page itself.
+    if (event.key === 'Enter' && target instanceof HTMLElement && (target.tagName === 'BUTTON' || target.tagName === 'A' || target.tagName === 'SUMMARY' || target.tagName === 'SELECT')) return;
+    if (event.key === 'j') {
+      event.preventDefault();
+      stepHunk(1);
+    } else if (event.key === 'k') {
+      event.preventDefault();
+      stepHunk(-1);
+    } else if (event.key === ']') {
+      event.preventDefault();
+      stepFile(1);
+    } else if (event.key === '[') {
+      event.preventDefault();
+      stepFile(-1);
+    } else if (event.key === 'o') {
+      event.preventDefault();
+      if (!overviewSection) setStatus('This review has no overview.');
+      else if (!showingOverview && confirmDiscardDraft()) {
+        clearHunkCursor();
+        showOverview();
+        setStatus('Overview.');
+      }
+    } else if (event.key === 'r' || event.key === 'Enter') {
+      event.preventDefault();
+      focusCurrentReply();
+    } else if (event.key === 'n') {
       event.preventDefault();
       navigateNext();
     } else if (event.key === 'N') {

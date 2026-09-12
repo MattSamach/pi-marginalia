@@ -1251,6 +1251,13 @@ try {
 			assert.match(await page.$eval('[data-thread-tally]', (section) => section.textContent), /2 open.*2 awaiting you.*0 awaiting Pi.*0 resolved/, "Seeded notes count uniformly from the start.");
 			assert.equal(await page.$eval('[data-inbox]', (strip) => strip.hidden), false, "Unread notes surface in the inbox immediately.");
 			assert.match(await page.$eval('[data-inbox]', (strip) => strip.textContent), /^2 awaiting you/);
+			await page.keyboard.press("]");
+			await page.waitForFunction(() => document.querySelector('[data-review-file="0"]')?.hidden === false);
+			await page.keyboard.press("j");
+			assert.ok(await page.$('[data-review-file="0"] tr.nav-cursor[data-kind="hunk"]'), "j must ring the first hunk of the file ] opened.");
+			await page.keyboard.press("o");
+			await page.waitForFunction(() => document.querySelector("[data-review-overview]")?.hidden === false);
+			assert.equal(await page.$('.nav-cursor'), null, "Leaving the file clears the hunk focus ring.");
 			await page.keyboard.press("n");
 			await page.waitForFunction(() => document.querySelector('[data-review-file="0"]')?.hidden === false);
 			assert.ok(await page.$('.agent-note.thread-flash[data-commentary-id="new-file"]'), "n must reach unresolved Pi notes when no thread awaits.");
@@ -1587,9 +1594,43 @@ try {
 				assert.equal(await plainPage.$eval("[data-shortcuts-overlay]", (overlay) => overlay.hidden), false, "The header hint must open the shortcuts guide.");
 				await plainPage.keyboard.press("Escape");
 
+				const navHomePath = await plainPage.$eval(".review-file.active", (section) => section.dataset.path);
+				await plainPage.keyboard.press("]");
+				assert.notEqual(await plainPage.$eval(".review-file.active", (section) => section.dataset.path), navHomePath, "] must move to the next file.");
+				await plainPage.keyboard.press("[");
+				assert.equal(await plainPage.$eval(".review-file.active", (section) => section.dataset.path), navHomePath, "[ must move back.");
+				await plainPage.keyboard.press("j");
+				assert.ok(await plainPage.$(".review-file.active tr.nav-cursor"), "j must mark the current hunk with a focus ring.");
+				await plainPage.keyboard.press("k");
+				assert.ok(await plainPage.$(".review-file.active tr.nav-cursor"), "k keeps a hunk ringed.");
+				await plainPage.keyboard.press("o");
+				await plainPage.waitForFunction(() => document.querySelector("[data-global-status]").textContent.includes("no overview"));
+				await plainPage.evaluate(() => {
+					const section = document.querySelector(".thread-card [data-thread-reply]").closest("[data-review-file]");
+					document.querySelector(`[data-file-nav="${section.dataset.reviewFile}"]`).click();
+				});
+				await plainPage.waitForFunction(() => !document.querySelector(".thread-card [data-thread-reply]").closest("[data-review-file]").hidden);
+				await plainPage.$eval(".thread-card [data-thread-reply]", (textarea) => textarea.focus());
+				await plainPage.keyboard.press("Escape");
+				await plainPage.waitForFunction(() => document.activeElement?.tagName !== "TEXTAREA");
+				await plainPage.keyboard.press("]");
+				await plainPage.waitForFunction(() => document.querySelector(".thread-card [data-thread-reply]").closest("[data-review-file]").hidden);
+				await plainPage.keyboard.press("r");
+				await plainPage.waitForFunction(() => document.activeElement?.matches("[data-thread-reply]") && !document.querySelector(".thread-card [data-thread-reply]").closest("[data-review-file]").hidden, {}, undefined);
+				await plainPage.keyboard.press("Escape");
 				assert.equal(await plainPage.$eval("[data-approve]", (button) => button.textContent), "Approve (1 open)", "The escalated thread from earlier still blocks approval.");
-				await plainPage.$eval(".thread-card [data-thread-resolve]", (button) => button.click());
+				await plainPage.$eval(".thread-card [data-thread-resolve]", (button) => button.focus());
+				await plainPage.keyboard.press("Enter");
 				await plainPage.waitForFunction(() => document.querySelector("[data-approve]").textContent === "Approve", {});
+				await plainPage.keyboard.press("Escape");
+				await plainPage.keyboard.press("r");
+				await plainPage.waitForFunction(() => document.querySelector("[data-global-status]").textContent.includes("resolved — reopen"), {});
+				assert.notEqual(await plainPage.evaluate(() => document.activeElement?.tagName), "TEXTAREA", "r on a resolved thread hints instead of opening any composer.");
+				await plainPage.evaluate((path) => {
+					const section = [...document.querySelectorAll("[data-review-file]")].find((candidate) => candidate.dataset.path === path);
+					document.querySelector(`[data-file-nav="${section.dataset.reviewFile}"]`).click();
+				}, navHomePath);
+				await plainPage.waitForFunction((path) => document.querySelector(".review-file.active")?.dataset.path === path, {}, navHomePath);
 				await plainPage.evaluate(() => {
 					const code = document.querySelector(".review-file.active tr.diff-add .diff-code span, .review-file.active tr.diff-del .diff-code span, .review-file.active tr.diff-context .diff-code span");
 					const range = document.createRange();

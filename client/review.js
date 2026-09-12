@@ -76,6 +76,8 @@
       }
     }
     if (approveOverlay && phase !== 'reviewing' && !approveOverlay.hidden) approveOverlay.hidden = true;
+    const finishDialog = document.querySelector('[data-finish-overlay]');
+    if (finishDialog && phase !== 'reviewing' && !finishDialog.hidden) finishDialog.hidden = true;
     if (roundSwitcher) {
       roundSwitcher.hidden = currentRound <= 1;
       roundSwitcher.replaceChildren(...Array.from({ length: currentRound }, (_, index) => {
@@ -1074,6 +1076,12 @@
   });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      const finishDialog = document.querySelector('[data-finish-overlay]');
+      if (finishDialog && !finishDialog.hidden) {
+        finishDialog.hidden = true;
+        event.preventDefault();
+        return;
+      }
       if (approveOverlay && !approveOverlay.hidden) {
         approveOverlay.hidden = true;
         event.preventDefault();
@@ -1098,11 +1106,19 @@
       }
       return;
     }
-    // The approve dialog owns the keyboard: no navigation fires behind it, and
-    // returning without preventDefault keeps Enter activating its buttons.
+    // Open dialogs own the keyboard: no navigation fires behind them, and
+    // returning without preventDefault keeps Enter activating their buttons.
     if (approveOverlay && !approveOverlay.hidden) return;
+    if (document.querySelector('[data-finish-overlay]:not([hidden])')) return;
     const target = event.target;
     if (target instanceof HTMLElement && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) return;
+    // Outside a comment box, ⇧⌘⏎ opens the send-round confirmation; inside
+    // one it stays quiet-add (the textarea guard above never lets it reach here).
+    if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === 'Enter') {
+      event.preventDefault();
+      openFinishModal();
+      return;
+    }
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     // Enter must keep activating focused controls; the reply shortcut is for
     // when focus rests on the page itself.
@@ -1252,11 +1268,24 @@
   applySessionState();
 
   // Finish pass -------------------------------------------------------------------
-  finishButton.addEventListener('click', async () => {
-    if (isLocked()) return;
+  const finishOverlay = document.querySelector('[data-finish-overlay]');
+  const openFinishModal = () => {
+    // A send already in flight must not be re-confirmable through the chord.
+    if (isLocked() || !finishOverlay || finishButton.dataset.busy) return;
     if (!confirmDiscardDraft()) return;
-    const openCount = [...threads.values()].filter((thread) => thread.status === 'open').length;
-    if (!window.confirm('Send this review pass to Pi?' + (openCount ? ' Open threads: ' + openCount + '.' : ''))) return;
+    const open = [...threads.values()].filter((thread) => thread.status === 'open');
+    const undelivered = open.reduce((count, thread) => count + (thread.pending ?? 0), 0);
+    const summary = finishOverlay.querySelector('[data-finish-summary]');
+    if (summary) {
+      summary.textContent = open.length
+        ? open.length + ' open thread' + (open.length === 1 ? '' : 's') + (undelivered ? ' · ' + undelivered + ' unsent message' + (undelivered === 1 ? '' : 's') + ' will be delivered' : '') + ' — Pi responds to every open thread in the next round.'
+        : 'No open threads — Pi receives the pass summary.';
+    }
+    finishOverlay.hidden = false;
+    finishOverlay.querySelector('[data-finish-confirm]')?.focus();
+  };
+  const sendRound = async () => {
+    if (finishOverlay) finishOverlay.hidden = true;
     finishButton.disabled = true;
     const original = finishButton.textContent;
     finishButton.dataset.busy = '1';
@@ -1273,6 +1302,14 @@
       finishButton.textContent = original;
       updateAggregates();
     }
+  };
+  finishButton.addEventListener('click', openFinishModal);
+  document.querySelector('[data-finish-confirm]')?.addEventListener('click', () => void sendRound());
+  document.querySelector('[data-finish-cancel]')?.addEventListener('click', () => {
+    if (finishOverlay) finishOverlay.hidden = true;
+  });
+  finishOverlay?.addEventListener('click', (event) => {
+    if (event.target === finishOverlay) finishOverlay.hidden = true;
   });
   window.addEventListener('beforeunload', (event) => {
     // Drafts on a superseded round are already dead; never block advancing past

@@ -1382,8 +1382,21 @@ try {
 			await page.click(`[data-file-nav="${secondReviewIndex}"]`);
 			assert.equal(await page.$eval(`[data-review-file="${secondReviewIndex}"]`, (section) => section.hidden), false, "Confirming draft discard should allow explicit file navigation.");
 			assert.equal(await page.$eval(`[data-file-nav="${secondReviewIndex}"]`, (item) => item.classList.contains("active")), true, "Regrouped primary navigation should activate by file index rather than DOM position.");
-			page.once("dialog", async (dialog) => { await dialog.accept(); });
+			// The send-round confirmation is a keyboard-first modal, not a native
+			// dialog: Enter confirms (the confirm button holds focus), Esc cancels.
 			await page.click("[data-finish]");
+			await page.waitForFunction(() => document.querySelector("[data-finish-overlay]")?.hidden === false);
+			assert.match(await page.$eval("[data-finish-summary]", (summary) => summary.textContent), /3 open threads/, "The send modal counts open threads.");
+			await page.keyboard.press("Escape");
+			assert.equal(await page.$eval("[data-finish-overlay]", (overlay) => overlay.hidden), true, "Esc cancels the send modal.");
+			await page.keyboard.down("Meta");
+			await page.keyboard.down("Shift");
+			await page.keyboard.press("Enter");
+			await page.keyboard.up("Shift");
+			await page.keyboard.up("Meta");
+			await page.waitForFunction(() => document.querySelector("[data-finish-overlay]")?.hidden === false);
+			assert.equal(await page.evaluate(() => document.activeElement?.dataset.finishConfirm !== undefined), true, "The confirm button holds focus so Enter sends.");
+			await page.keyboard.press("Enter");
 			await page.waitForFunction(() => document.querySelector('[data-phase-banner]')?.hidden === false);
 			assert.ok(browserPass, "Finishing the pass must hand the summary to Pi.");
 			assert.equal(browserPass.round, 1);
@@ -1490,6 +1503,7 @@ try {
 				});
 				await plainPage.waitForFunction(() => document.querySelector(".thread-card.queued"));
 				assert.equal(plainDeliveries.length, 0, "Shift+Command+Enter must not message Pi.");
+				assert.equal(await plainPage.$eval("[data-finish-overlay]", (overlay) => overlay.hidden), true, "A composer ⇧⌘⏎ quiet-adds only — the textarea guard must keep it from opening the send modal.");
 				assert.match(await plainPage.$eval(".thread-card.queued .thread-status", (label) => label.textContent), /Queued for round/);
 				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 to send)", "The send button must count queued threads.");
 				await plainPage.type(".thread-card.queued [data-thread-reply]", "Answer now please.");

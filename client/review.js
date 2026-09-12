@@ -13,6 +13,7 @@
   const AMEND_PATH = '/__pi_code_review_amend__';
   const SEND_PATH = '/__pi_code_review_send__';
   const CONTEXT_PATH = '/__pi_code_review_context__';
+  const APPROVE_PATH = '/__pi_code_review_approve__';
 
   const myRound = Number(document.body.dataset.round || 1);
   let currentRound = Number(document.body.dataset.currentRound || myRound);
@@ -42,6 +43,10 @@
   const gotoCurrent = document.querySelector('[data-goto-current]');
   const roundSwitcher = document.querySelector('[data-round-switcher]');
   const staleBadge = document.querySelector('[data-stale-badge]');
+  const approveButton = document.querySelector('[data-approve]');
+  const approveOverlay = document.querySelector('[data-approve-overlay]');
+  const approveMessage = document.querySelector('[data-approve-message]');
+  const approveStale = document.querySelector('[data-approve-stale]');
   let stale = false;
 
   const applySessionState = () => {
@@ -56,6 +61,11 @@
         resumeButton.hidden = true;
         gotoCurrent.hidden = false;
         gotoCurrent.href = '/round/' + currentRound;
+      } else if (phase === 'approved') {
+        phaseBanner.hidden = false;
+        phaseBannerText.textContent = 'Approved — this review is closed. Pages stay readable.';
+        resumeButton.hidden = true;
+        gotoCurrent.hidden = true;
       } else if (phase === 'revising') {
         phaseBanner.hidden = false;
         phaseBannerText.textContent = 'Pi is revising — round ' + (myRound + 1) + ' pending. Reading stays open; to keep commenting on this round, resume it.';
@@ -65,6 +75,7 @@
         phaseBanner.hidden = true;
       }
     }
+    if (approveOverlay && phase !== 'reviewing' && !approveOverlay.hidden) approveOverlay.hidden = true;
     if (roundSwitcher) {
       roundSwitcher.hidden = currentRound <= 1;
       roundSwitcher.replaceChildren(...Array.from({ length: currentRound }, (_, index) => {
@@ -735,6 +746,12 @@
     if (finishButton && !finishButton.dataset.busy) {
       finishButton.textContent = undeliveredCount ? 'Send round to Pi (' + undeliveredCount + ' to send)' : 'Send round to Pi';
     }
+    if (approveButton) {
+      const openCount = all.filter((thread) => thread.status === 'open').length;
+      approveButton.hidden = isSuperseded();
+      approveButton.textContent = openCount ? 'Approve (' + openCount + ' open)' : 'Approve';
+      approveButton.title = openCount ? 'Every thread must be resolved before approving — click to jump to the first open thread' : 'Approve this review and close it';
+    }
     if (tally) {
       tally.hidden = all.length === 0;
       const counts = {
@@ -780,7 +797,9 @@
     if (!confirmDiscardDraft()) return;
     if (direction > 0) navIndex = (navIndex + 1) % awaiting.length;
     else navIndex = navIndex < 0 ? awaiting.length - 1 : (navIndex - 1 + awaiting.length) % awaiting.length;
-    const thread = awaiting[navIndex];
+    revealThread(awaiting[navIndex]);
+  };
+  const revealThread = (thread) => {
     currentThreadId = thread.id;
     rememberThreadLocation(thread.id);
     if (thread.source === 'overview' || !thread.file) showOverview();
@@ -923,6 +942,44 @@
     if (shortcutsOverlay) shortcutsOverlay.hidden = !shortcutsOverlay.hidden;
   });
 
+  // Approval --------------------------------------------------------------------
+  approveButton?.addEventListener('click', () => {
+    if (isLocked()) return;
+    const blockers = [...threads.values()].filter((thread) => thread.status === 'open').sort((left, right) => sectionIndexOf(left) - sectionIndexOf(right) || threadNumber(left) - threadNumber(right));
+    if (blockers.length) {
+      setStatus(blockers.length + ' thread' + (blockers.length === 1 ? '' : 's') + ' still open — resolve every thread to approve.', true);
+      if (confirmDiscardDraft()) revealThread(blockers[0]);
+      return;
+    }
+    if (!approveOverlay) return;
+    if (approveStale) approveStale.hidden = !stale;
+    approveOverlay.hidden = false;
+    approveMessage?.focus();
+  });
+  document.querySelector('[data-approve-cancel]')?.addEventListener('click', () => {
+    if (approveOverlay) approveOverlay.hidden = true;
+  });
+  approveOverlay?.addEventListener('click', (event) => {
+    if (event.target === approveOverlay) approveOverlay.hidden = true;
+  });
+  document.querySelector('[data-approve-confirm]')?.addEventListener('click', async (event) => {
+    const confirmButton = event.currentTarget;
+    const message = approveMessage?.value.trim();
+    if (!message) {
+      setStatus('Approval requires a commit message.', true);
+      return;
+    }
+    confirmButton.disabled = true;
+    try {
+      const result = await postJson(APPROVE_PATH, { message });
+      if (approveOverlay) approveOverlay.hidden = true;
+      setStatus(result.stale ? 'Approved — note the repository had drifted from this snapshot.' : 'Review approved.');
+    } catch (error) {
+      setStatus(errorMessage(error), true);
+    }
+    confirmButton.disabled = false;
+  });
+
   // Navigation wiring ----------------------------------------------------------
   document.querySelector('[data-overview-nav]')?.addEventListener('click', () => {
     if (showingOverview) return;
@@ -960,6 +1017,11 @@
   });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      if (approveOverlay && !approveOverlay.hidden) {
+        approveOverlay.hidden = true;
+        event.preventDefault();
+        return;
+      }
       if (shortcutsOverlay && !shortcutsOverlay.hidden) {
         shortcutsOverlay.hidden = true;
         event.preventDefault();
@@ -1081,7 +1143,7 @@
     phase = data.phase;
     currentRound = data.currentRound;
     applySessionState();
-    if (myRound === currentRound) setStatus(phase === 'revising' ? 'Pass sent — Pi is revising. Resume the round to keep commenting.' : 'Round ' + myRound + ' is live again — posting is unlocked.');
+    if (myRound === currentRound) setStatus(phase === 'approved' ? 'Review approved — this session is closed.' : phase === 'revising' ? 'Pass sent — Pi is revising. Resume the round to keep commenting.' : 'Round ' + myRound + ' is live again — posting is unlocked.');
   });
   events.addEventListener('round-ready', (event) => {
     const data = JSON.parse(event.data);
@@ -1127,9 +1189,12 @@
     }
   });
   window.addEventListener('beforeunload', (event) => {
-    // Drafts on a superseded round are already dead; never block advancing past them.
-    if (autoNavigating || isSuperseded()) return;
-    const hasDraftText = draft || [...document.querySelectorAll('textarea')].some((textarea) => textarea.value.trim());
+    // Drafts on a superseded round are already dead; never block advancing past
+    // them — and an approved session is terminal, so nothing left is a draft.
+    if (autoNavigating || isSuperseded() || phase === 'approved') return;
+    // defaultValue exempts prefilled content (the approve overlay's proposed
+    // commit message) while still guarding anything the reviewer typed.
+    const hasDraftText = draft || [...document.querySelectorAll('textarea')].some((textarea) => textarea.value.trim() && textarea.value !== textarea.defaultValue);
     if (!hasDraftText) return;
     event.preventDefault();
     event.returnValue = '';

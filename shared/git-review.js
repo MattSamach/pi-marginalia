@@ -565,5 +565,6 @@ export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIM
 		}
 	}
 	const title = manifest.title === undefined ? "Code review" : assertString(manifest.title, "Review title");
-	return { ...snapshot, title, overview, files: capped, renderedBytes: totalBytes, renderedLines: totalLines };
+	const proposedCommitMessage = manifest.proposedCommitMessage === undefined ? undefined : assertString(manifest.proposedCommitMessage, "Proposed commit message");
+	return { ...snapshot, title, overview, proposedCommitMessage, files: capped, renderedBytes: totalBytes, renderedLines: totalLines };
 }

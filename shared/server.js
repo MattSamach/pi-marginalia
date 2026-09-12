@@ -13,6 +13,7 @@ const AMEND_PATH = "/__pi_code_review_amend__";
 const SEND_PATH = "/__pi_code_review_send__";
 const EVENTS_PATH = "/__pi_code_review_events__";
 const CONTEXT_PATH = "/__pi_code_review_context__";
+const APPROVE_PATH = "/__pi_code_review_approve__";
 const SSE_HEARTBEAT_MS = 25_000;
 const STALENESS_INTERVAL_MS = 4_000;
 const SECURITY_HEADERS = {
@@ -137,7 +138,7 @@ export async function createCodeReviewServer(review, options) {
 	// badge informs only — rounds stay immutable and commenting stays open.
 	let stale = false;
 	let staleFingerprint;
-	let staleChecking = false;
+	let staleCheckInFlight;
 	const setStale = (nextStale) => {
 		if (nextStale === stale) return;
 		stale = nextStale;
@@ -147,25 +148,38 @@ export async function createCodeReviewServer(review, options) {
 		staleFingerprint = undefined;
 		setStale(false);
 	};
-	const checkStaleness = async () => {
+	const checkStaleness = async (force = false) => {
 		// Drift while Pi is revising is expected, not signal; the check resumes
-		// with the phase.
-		if (!options.staleness || closed || staleChecking || phase !== "reviewing") return stale;
-		staleChecking = true;
+		// with the phase. force serves the approval flow, which re-checks after
+		// locking the phase.
+		if (!options.staleness || closed || (!force && phase !== "reviewing")) return stale;
+		if (staleCheckInFlight) {
+			// Periodic ticks skip while a probe runs; the approval path needs the
+			// freshest verdict, so it waits the in-flight probe out instead of
+			// returning the previous one.
+			if (!force) return stale;
+			await staleCheckInFlight;
+			return stale;
+		}
 		const round = current();
+		staleCheckInFlight = (async () => {
+			try {
+				const fingerprint = await options.staleness.fingerprint();
+				if (fingerprint === staleFingerprint) return;
+				const snapshotId = await options.staleness.snapshotId();
+				// A round that advanced mid-check was collected from a newer tree than
+				// this probe observed; discard the result and let the next tick measure.
+				if (current() !== round) return;
+				staleFingerprint = fingerprint;
+				setStale(snapshotId !== round.review.id);
+			} catch {
+				// Transient collection failures keep the previous verdict.
+			}
+		})();
 		try {
-			const fingerprint = await options.staleness.fingerprint();
-			if (fingerprint === staleFingerprint) return stale;
-			const snapshotId = await options.staleness.snapshotId();
-			// A round that advanced mid-check was collected from a newer tree than
-			// this probe observed; discard the result and let the next tick measure.
-			if (current() !== round) return stale;
-			staleFingerprint = fingerprint;
-			setStale(snapshotId !== round.review.id);
-		} catch {
-			// Transient collection failures keep the previous verdict.
+			await staleCheckInFlight;
 		} finally {
-			staleChecking = false;
+			staleCheckInFlight = undefined;
 		}
 		return stale;
 	};
@@ -181,6 +195,9 @@ export async function createCodeReviewServer(review, options) {
 			await options.onThreadPost(round, result.thread, result.deliveredTurns);
 			return { thread: result.thread, failed: false };
 		} catch {
+			// An approval that landed while this delivery was in flight closed the
+			// session; nothing will re-deliver, so the terminal store stays frozen.
+			if (phase === "approved") return { thread: result.thread, failed: true };
 			const requeued = round.store.requeue(result.thread.id, result.deliveredTurns.map((turn) => turn.seq), result.prevLive);
 			if (requeued) broadcastThread(round, requeued);
 			return { thread: requeued ?? result.thread, failed: true };
@@ -200,7 +217,8 @@ export async function createCodeReviewServer(review, options) {
 	};
 	const guardReviewingPhase = (res) => {
 		if (phase === "reviewing") return true;
-		writeText(res, 409, "Pi is revising this review. Press \u201cResume reviewing this round\u201d to comment while you wait, or hold on for the next round.");
+		if (phase === "approved") writeText(res, 409, "This review is approved and closed to changes; pages stay readable.");
+		else writeText(res, 409, "Pi is revising this review. Press \u201cResume reviewing this round\u201d to comment while you wait, or hold on for the next round.");
 		return false;
 	};
 	const readGuardedBody = async (req, res) => {
@@ -370,12 +388,17 @@ export async function createCodeReviewServer(review, options) {
 				if (!guardMutation(req, res)) return;
 				const body = await readGuardedBody(req, res);
 				if (body === undefined) return;
+				// Viewed is reviewer bookkeeping: allowed while Pi revises (unlike thread
+				// mutations), but only on the current round — and never after approval.
+				// Closed means closed: the terminal 409 outranks payload shape errors.
+				if (phase === "approved") {
+					writeText(res, 409, "This review is approved and closed to changes; pages stay readable.");
+					return;
+				}
 				if (!body || typeof body !== "object" || typeof body.file !== "string" || typeof body.viewed !== "boolean") {
 					writeText(res, 400, "Invalid viewed payload.");
 					return;
 				}
-				// Viewed is reviewer bookkeeping: allowed while Pi revises (unlike thread
-				// mutations), but only on the current round.
 				const round = current();
 				if (body.round !== undefined && body.round !== round.number) {
 					writeText(res, 409, `This page shows superseded round ${body.round}; the viewed checklist lives on round ${round.number}.`);
@@ -534,12 +557,48 @@ export async function createCodeReviewServer(review, options) {
 				const body = await readGuardedBody(req, res);
 				if (body === undefined) return;
 				if (phase !== "revising") {
-					writeText(res, 409, "This round is not waiting on Pi.");
+					writeText(res, 409, phase === "approved" ? "This review is approved and closed." : "This round is not waiting on Pi.");
 					return;
 				}
 				phase = "reviewing";
 				broadcastPhase();
 				writeJson(res, 200, { phase, currentRound: current().number });
+				return;
+			}
+			if (req.method === "POST" && requestUrl.pathname === APPROVE_PATH) {
+				if (!guardMutation(req, res)) return;
+				const body = await readGuardedBody(req, res);
+				if (body === undefined) return;
+				if (!guardReviewingPhase(res)) return;
+				if (finishing) {
+					writeText(res, 409, "The round is being handed to Pi; try again in a moment.");
+					return;
+				}
+				const message = typeof body?.message === "string" && body.message.trim() && body.message.length <= THREAD_LIMITS.maxFieldLength ? body.message.trim() : undefined;
+				if (message === undefined) {
+					writeText(res, 400, "Approval requires a non-empty commit message.");
+					return;
+				}
+				const round = current();
+				const blockers = round.store.summary().open;
+				if (blockers > 0) {
+					writeText(res, 409, `${blockers} thread${blockers === 1 ? " is" : "s are"} still open; resolve every thread before approving.`);
+					return;
+				}
+				// Lock the session before the async work so nothing can reopen a thread
+				// mid-approval; revert only if the handoff to Pi fails.
+				phase = "approved";
+				broadcastPhase();
+				const staleNow = await checkStaleness(true);
+				try {
+					await options.onApprove?.(round, message, staleNow);
+				} catch {
+					phase = "reviewing";
+					broadcastPhase();
+					writeText(res, 500, "Could not deliver the approval to Pi; the round stays open.");
+					return;
+				}
+				writeJson(res, 200, { approved: true, stale: staleNow });
 				return;
 			}
 			writeText(res, 404, "Not found");
@@ -586,12 +645,16 @@ export async function createCodeReviewServer(review, options) {
 		threadSummary: () => current().store.summary(),
 		viewedFiles: () => [...current().viewed],
 		postPiReply(threadId, body, resolves) {
+			// A closed session names the true reason; a bare failure would read as a
+			// turn-limit guess and send Pi down the wrong recovery path.
+			if (phase === "approved") return { error: "approved" };
 			const round = current();
 			const thread = round.store.postPiReply(threadId, body, resolves);
 			if (thread) broadcastThread(round, thread);
 			return thread;
 		},
 		addRound(nextReview, previousRoundId, threadResponses) {
+			if (phase === "approved") return { error: "approved" };
 			const active = current();
 			if (previousRoundId !== active.review.id) {
 				if (rounds.some((round) => round.review.id === previousRoundId)) {
@@ -635,7 +698,11 @@ export async function createCodeReviewServer(review, options) {
 			}
 			const previousSignatures = new Map(active.review.files.map((file) => [file.path, diffSignature(file)]));
 			const viewed = new Set(nextReview.files.filter((file) => active.viewed.has(file.path) && previousSignatures.get(file.path) === diffSignature(file)).map((file) => file.path));
-			const round = { number: active.number + 1, review: nextReview, store: createThreadStore(nextReview, THREAD_LIMITS, carried, held), viewed };
+			// A round that does not re-propose a commit message keeps the last one.
+			const roundReview = nextReview.proposedCommitMessage === undefined && active.review.proposedCommitMessage !== undefined
+				? { ...nextReview, proposedCommitMessage: active.review.proposedCommitMessage }
+				: nextReview;
+			const round = { number: active.number + 1, review: roundReview, store: createThreadStore(roundReview, THREAD_LIMITS, carried, held), viewed };
 			rounds.push(round);
 			phase = "reviewing";
 			// The new round's snapshot was just collected from this worktree.

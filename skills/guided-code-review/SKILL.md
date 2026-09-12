@@ -96,9 +96,11 @@ A review session is an ordered sequence of immutable rounds served in one browse
 
 ## Approval and commit loop
 
-- Feedback submission is not approval by itself. Require an explicit statement that the current unit is approved.
-- Never commit a stale review or include changes made after the approved snapshot. If the worktree changed, validate and reopen the review.
-- Approval and permission to commit are separate unless the user clearly provides both. After approval, follow the repository's commit-proof policy and ask whether to commit; if the user says “approved and commit,” that is explicit permission.
-- Commit only the reviewed unit with a descriptive message. Do not include unrelated or unreviewed files.
+- The browser has an explicit **Approve** flow: it unlocks only when every thread is resolved, shows the reviewer an editable commit message (prefilled from `proposedCommitMessage`, falling back to the review title — supply a good proposal when opening the review), re-checks worktree drift, and on confirmation closes the session terminally. You receive a `<code-review-approved>` message carrying the reviewer's final commit message and a `stale` flag if the tree had drifted from the approved snapshot.
+- Browser approval is the reviewer's sign-off on the unit as reviewed. Whether that also authorizes a commit is governed by the commit policy of your session — follow it; where the reviewer's approval satisfies that policy, commit using their message. When committing, prefer the reviewer's edited commit message verbatim: it is their reviewed statement of the change.
+- Feedback submission is not approval by itself; only the approval message (or an equally explicit statement in chat) closes the unit.
+- Never commit a stale review or include changes made after the approved snapshot. If the approval arrived with `stale="true"`, reconcile before acting: identify the drift, and either confirm it is expected (e.g. your own already-authorized follow-up) or reopen a fresh review.
+- After approval the session is closed: no further rounds (`previousRoundId` is rejected), no thread replies, pages stay readable. A new unit gets a fresh review.
+- Commit only the reviewed unit. Do not include unrelated or unreviewed files.
 - After the commit succeeds, move to the next logical unit only when it belongs to an implementation plan the user already authorized and the next scope is clear. Otherwise, stop and ask.
 - Repeat implementation, validation, review, approval, and commit for each remaining unit. Never wait until the end to combine independently reviewable units into one large commit.

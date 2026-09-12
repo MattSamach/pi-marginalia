@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import puppeteer from "puppeteer-core";
 import { applyReviewManifest, collectReviewSnapshot, computeContextGaps, computeWorktreeFingerprint, createPinnedBlobContextReader, currentSnapshotId, parseUnifiedPatch, readHeadBlobLines, REVIEW_LIMITS } from "../shared/git-review.js";
-import { formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "../shared/feedback.js";
+import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "../shared/feedback.js";
 import { renderReviewHtml } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
 import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS, threadsAwaitingResponse } from "../shared/threads.js";
@@ -975,11 +975,15 @@ try {
 	let probeSnapshotId = ordered.id;
 	let fullChecks = 0;
 	let failNextFull = false;
+	let fingerprintGate;
 	const staleServer = await createCodeReviewServer(ordered, {
 		onThreadPost: async () => {},
 		onFinishPass: async () => ({ stale: false }),
 		staleness: {
-			fingerprint: async () => probeFingerprint,
+			fingerprint: async () => {
+				if (fingerprintGate) await fingerprintGate;
+				return probeFingerprint;
+			},
 			snapshotId: async () => {
 				if (failNextFull) {
 					failNextFull = false;
@@ -1046,11 +1050,121 @@ try {
 		assert.equal(fullChecks, fullChecksAfterFailure + 1, "The retry performs a real re-collection instead of being gated by the cheap check.");
 		assert.deepEqual(staleServer.addRound({ ...ordered, id: altId(ordered.id, 60) }, altId(ordered.id, 60)), { identical: true, round: 2 });
 		assert.equal(staleServer.isStale(), false, "An identical reopen proves the tree matches the round; staleness resets.");
+		let releaseFingerprint;
+		fingerprintGate = new Promise((resolvePromise) => { releaseFingerprint = resolvePromise; });
+		probeFingerprint = "fp-8";
+		probeSnapshotId = "late-drift";
+		const tickProbe = staleServer.checkStaleness();
+		const forcedProbe = staleServer.checkStaleness(true);
+		fingerprintGate = undefined;
+		releaseFingerprint();
+		assert.equal(await tickProbe, true);
+		assert.equal(await forcedProbe, true, "A forced check waits out an in-flight probe and returns the fresh verdict, never the previous one.");
 		await reader.cancel();
 	} finally {
 		await staleServer.close();
 	}
 	console.log("Staleness detection flow passed.");
+
+	assert.equal(applyReviewManifest(snapshot, { files: [], proposedCommitMessage: "Ship the safe review" }).proposedCommitMessage, "Ship the safe review");
+	assert.throws(() => applyReviewManifest(snapshot, { files: [], proposedCommitMessage: "   " }), /Proposed commit message/);
+	const approvedXml = formatReviewApprovedXml(ordered, 3, "Fix <thing> & close]]>", true);
+	assert.match(approvedXml, /^<code-review-approved snapshot="[0-9a-f]{64}" round="3" stale="true">/);
+	assert.ok(approvedXml.includes("<commit-message><![CDATA[Fix <thing> & close]]]]><![CDATA[>]]></commit-message>"), "Commit messages are CDATA-safe.");
+	assert.doesNotMatch(formatReviewApprovedXml(ordered, 1, "m", false), / stale=/, "A clean approval carries no stale attribute.");
+
+	const approvals = [];
+	let failNextApprove = false;
+	let approveFingerprint = "afp-1";
+	let approveSnapshotId = ordered.id;
+	const approveServer = await createCodeReviewServer({ ...ordered, proposedCommitMessage: "Proposed: safe review" }, {
+		onThreadPost: async () => {},
+		onFinishPass: async () => ({ stale: false }),
+		onApprove: async (round, message, staleNow) => {
+			if (failNextApprove) {
+				failNextApprove = false;
+				throw new Error("approve boom");
+			}
+			approvals.push({ round: round.number, message, staleNow });
+		},
+		staleness: { fingerprint: async () => approveFingerprint, snapshotId: async () => approveSnapshotId },
+	});
+	try {
+		const origin = new URL(approveServer.url).origin;
+		const bootstrap = await fetch(approveServer.url, { redirect: "manual" });
+		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
+		const headers = { cookie, "content-type": "application/json", origin };
+		const approveEndpoint = `${origin}/__pi_code_review_approve__`;
+		const approvePage = await (await fetch(origin, { headers: { cookie } })).text();
+		assert.match(approvePage, /data-approve hidden/, "The approve button renders in the topbar.");
+		assert.match(approvePage, /data-approve-message maxlength="20000">Proposed: safe review</, "The overlay prefills Pi's proposed commit message.");
+		assert.match(approvePage, /7 files \(/, "The approve screen shows file stats.");
+		// The proposal survives a round that does not re-propose.
+		assert.equal(approveServer.addRound({ ...ordered, id: altId(ordered.id, 40) }, ordered.id).round, 2);
+		assert.equal(approveServer.currentReview().proposedCommitMessage, "Proposed: safe review", "Rounds without a new proposal inherit the previous commit message.");
+		assert.equal((await fetch(approveEndpoint, { method: "POST", headers, body: JSON.stringify({ message: "   " }) })).status, 400, "Approval requires a non-empty commit message.");
+		const blockerThread = await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ source: "overview", body: "Blocker.", quiet: true }) })).json();
+		const blocked = await fetch(approveEndpoint, { method: "POST", headers, body: JSON.stringify({ message: "Ship it" }) });
+		assert.equal(blocked.status, 409);
+		assert.match(await blocked.text(), /3 threads are still open/, "Open threads block approval — queued threads and unengaged commentary notes included.");
+		for (const thread of approveServer.threads().filter((candidate) => candidate.status === "open")) {
+			assert.equal((await fetch(`${origin}/__pi_code_review_resolve__`, { method: "POST", headers, body: JSON.stringify({ threadId: thread.id, resolved: true }) })).status, 200);
+		}
+		assert.equal((await fetch(`${origin}/__pi_code_review_finish__`, { method: "POST", headers, body: "{}" })).status, 200);
+		assert.equal((await fetch(approveEndpoint, { method: "POST", headers, body: JSON.stringify({ message: "Ship it" }) })).status, 409, "Approval is rejected while Pi revises.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_resume__`, { method: "POST", headers, body: "{}" })).status, 200);
+		failNextApprove = true;
+		const failed = await fetch(approveEndpoint, { method: "POST", headers, body: JSON.stringify({ message: "Ship it" }) });
+		assert.equal(failed.status, 500, "A failed handoff to Pi reports an error.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ source: "overview", body: "Still alive.", quiet: true }) })).status, 200, "A failed approval reverts to the reviewing phase.");
+		const reopened = await (await fetch(origin, { headers: { cookie } })).text();
+		assert.match(reopened, /data-phase="reviewing"/);
+		const lateBlocker = await fetch(approveEndpoint, { method: "POST", headers, body: JSON.stringify({ message: "Ship it" }) });
+		assert.equal(lateBlocker.status, 409, "The revert restores the blocker contract too.");
+		const threadsNow = approveServer.threads().filter((thread) => thread.status === "open");
+		for (const thread of threadsNow) {
+			assert.equal((await fetch(`${origin}/__pi_code_review_resolve__`, { method: "POST", headers, body: JSON.stringify({ threadId: thread.id, resolved: true }) })).status, 200);
+		}
+		approveFingerprint = "afp-2";
+		approveSnapshotId = "drifted-at-approval";
+		const eventsResponse = await fetch(`${origin}/__pi_code_review_events__?round=2`, { headers: { cookie } });
+		const reader = eventsResponse.body.getReader();
+		const decoder = new TextDecoder();
+		let sseBuffer = "";
+		const readUntil = async (marker) => {
+			const deadline = Date.now() + 5_000;
+			while (!sseBuffer.includes(marker)) {
+				if (Date.now() > deadline) throw new Error(`Timed out waiting for SSE marker: ${marker}`);
+				const { value, done } = await reader.read();
+				if (done) throw new Error("SSE stream ended early.");
+				sseBuffer += decoder.decode(value, { stream: true });
+			}
+		};
+		await readUntil("event: init");
+		const approvedResponse = await fetch(approveEndpoint, { method: "POST", headers, body: JSON.stringify({ message: "Land the guarded rollout " }) });
+		assert.equal(approvedResponse.status, 200);
+		assert.deepEqual(await approvedResponse.json(), { approved: true, stale: true }, "Approval re-checks staleness even though the phase already flipped.");
+		assert.deepEqual(approvals, [{ round: 2, message: "Land the guarded rollout", staleNow: true }], "Pi receives the trimmed final message with the round and drift verdict.");
+		await readUntil('"phase":"approved"');
+		const closedText = /approved and closed/;
+		const postAfter = await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ source: "overview", body: "late" }) });
+		assert.equal(postAfter.status, 409);
+		assert.match(await postAfter.text(), closedText, "The terminal phase teaches its own lock message.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_resolve__`, { method: "POST", headers, body: JSON.stringify({ threadId: blockerThread.thread.id, resolved: false }) })).status, 409, "Nothing reopens after approval.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_finish__`, { method: "POST", headers, body: "{}" })).status, 409);
+		assert.equal((await fetch(`${origin}/__pi_code_review_resume__`, { method: "POST", headers, body: "{}" })).status, 409);
+		assert.equal((await fetch(`${origin}/__pi_code_review_viewed__`, { method: "POST", headers, body: JSON.stringify({ file: "untracked.txt", viewed: true }) })).status, 409, "The viewed checklist locks with the review.");
+		assert.equal((await fetch(approveEndpoint, { method: "POST", headers, body: JSON.stringify({ message: "again" }) })).status, 409, "Approval is idempotent-hostile: once closed, closed.");
+		assert.deepEqual(approveServer.addRound({ ...ordered, id: altId(ordered.id, 41) }, altId(ordered.id, 40)), { error: "approved" }, "No round can follow an approval.");
+		assert.deepEqual(approveServer.postPiReply(blockerThread.thread.id, "late", false), { error: "approved" }, "Pi replies after approval carry the true reason, not a generic failure.");
+		const malformedViewed = await fetch(`${origin}/__pi_code_review_viewed__`, { method: "POST", headers, body: JSON.stringify({ nonsense: true }) });
+		assert.equal(malformedViewed.status, 409, "Closed means closed: the terminal 409 outranks payload shape errors.");
+		assert.match(await (await fetch(origin, { headers: { cookie } })).text(), /data-phase="approved"/, "Approved pages stay readable.");
+		await reader.cancel();
+	} finally {
+		await approveServer.close();
+	}
+	console.log("Approval flow passed.");
 
 	let releaseRaceFinish;
 	let markRaceFinishEntered;
@@ -1075,6 +1189,7 @@ try {
 		await raceFinishEntered;
 		assert.equal((await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ threadId: raceLive.thread.id, body: "Uncaptured tail.", quiet: true }) })).json()).thread.pending, 2);
 		assert.equal((await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ threadId: raceQueued.thread.id, body: "Race tail.", quiet: true }) })).json()).thread.pending, 2);
+		assert.equal((await fetch(`${origin}/__pi_code_review_approve__`, { method: "POST", headers, body: JSON.stringify({ message: "Racing approval" }) })).status, 409, "Approval must wait out an in-flight finish handoff.");
 		assert.equal(raceServer.addRound({ ...ordered, id: altId(ordered.id, 63) }, ordered.id, [{ respondsTo: raceLive.thread.id, resolution: "needs-discussion", body: "Carrying through the race." }]).round, 2, "Pi may open the next round while the finish handoff is in flight; queued threads need no response.");
 		const heldRace = raceServer.getThread(raceQueued.thread.id);
 		assert.equal(heldRace.heldFrom, 1, "The queued thread is held over, not responded to.");
@@ -1147,7 +1262,9 @@ try {
 			await page.click('[data-overview-nav]');
 			await page.click('details.reference-files > summary');
 			const referenceIndex = await page.$eval('details.reference-files [data-file-nav]', (item) => Number(item.dataset.fileNav));
-			await page.click(`[data-file-nav="${referenceIndex}"]`);
+			// DOM click: a coordinate click can miss while the just-opened details
+			// element is still settling, and the assertion targets the handler.
+			await page.$eval(`[data-file-nav="${referenceIndex}"]`, (item) => item.click());
 			assert.equal(await page.$eval(`[data-file-nav="${referenceIndex}"]`, (item) => item.classList.contains("active")), true, "Clicking a regrouped reference file should activate its own navigation item.");
 			assert.equal(await page.$eval(`[data-review-file="${referenceIndex}"]`, (section) => section.dataset.reviewMode), "reference", "Reference files should remain directly inspectable.");
 			assert.equal(await page.$eval(`[data-review-file="${referenceIndex}"] .file-header-side > span`, (label) => label.textContent), "Reference file");
@@ -1334,7 +1451,8 @@ try {
 			await driftPage.close();
 
 			const plainDeliveries = [];
-			const plainServer = await createCodeReviewServer(plainReview, { onThreadPost: async (round, thread, turns) => { plainDeliveries.push(turns); }, onFinishPass: async () => ({ stale: false }) });
+			const plainApprovals = [];
+			const plainServer = await createCodeReviewServer(plainReview, { onThreadPost: async (round, thread, turns) => { plainDeliveries.push(turns); }, onFinishPass: async () => ({ stale: false }), onApprove: async (round, message, staleNow) => { plainApprovals.push({ round: round.number, message, staleNow }); } });
 			try {
 				const plainPage = await browser.newPage();
 				await plainPage.goto(plainServer.url, { waitUntil: "domcontentloaded" });
@@ -1468,6 +1586,41 @@ try {
 				await plainPage.click("[data-shortcuts-hint]");
 				assert.equal(await plainPage.$eval("[data-shortcuts-overlay]", (overlay) => overlay.hidden), false, "The header hint must open the shortcuts guide.");
 				await plainPage.keyboard.press("Escape");
+
+				assert.equal(await plainPage.$eval("[data-approve]", (button) => button.textContent), "Approve (1 open)", "The escalated thread from earlier still blocks approval.");
+				await plainPage.$eval(".thread-card [data-thread-resolve]", (button) => button.click());
+				await plainPage.waitForFunction(() => document.querySelector("[data-approve]").textContent === "Approve", {});
+				await plainPage.evaluate(() => {
+					const code = document.querySelector(".review-file.active tr.diff-add .diff-code span, .review-file.active tr.diff-del .diff-code span, .review-file.active tr.diff-context .diff-code span");
+					const range = document.createRange();
+					range.selectNodeContents(code);
+					const selection = window.getSelection();
+					selection.removeAllRanges(); selection.addRange(range);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false);
+				await plainPage.type(".review-file.active [data-selection-feedback]", "Approval blocker.");
+				await plainPage.$eval(".review-file.active [data-selection-feedback]", (textarea) => {
+					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelector(".thread-card.queued"));
+				assert.equal(await plainPage.$eval("[data-approve]", (button) => button.textContent), "Approve (1 open)", "Open threads — queued included — qualify the approve button.");
+				await plainPage.click("[data-approve]");
+				await plainPage.waitForFunction(() => document.querySelector("[data-global-status]").textContent.includes("still open"));
+				assert.ok(await plainPage.$(".thread-card.thread-flash"), "A blocked approval navigates to the first open thread.");
+				assert.equal(await plainPage.$eval("[data-approve-overlay]", (overlay) => overlay.hidden), true, "The confirmation never opens while threads block.");
+				await plainPage.click(".thread-card.queued [data-thread-resolve]");
+				await plainPage.waitForFunction(() => document.querySelector("[data-approve]").textContent === "Approve");
+				await plainPage.click("[data-approve]");
+				assert.equal(await plainPage.$eval("[data-approve-overlay]", (overlay) => overlay.hidden), false, "A clean review opens the confirmation.");
+				assert.equal(await plainPage.$eval("[data-approve-message]", (textarea) => textarea.value), plainReview.title, "Without a proposal the commit message falls back to the review title.");
+				await plainPage.$eval("[data-approve-message]", (textarea) => { textarea.value = "Plain approved unit"; });
+				await plainPage.click("[data-approve-confirm]");
+				await plainPage.waitForFunction(() => document.body.classList.contains("locked") && document.querySelector("[data-phase-banner-text]").textContent.includes("Approved"));
+				assert.deepEqual(plainApprovals, [{ round: 1, message: "Plain approved unit", staleNow: false }], "The approval handoff carries the edited message.");
+				assert.equal(await plainPage.$eval("[data-approve-overlay]", (overlay) => overlay.hidden), true);
+				assert.equal(await plainPage.$eval("[data-approve]", (button) => getComputedStyle(button).display), "none", "The terminal phase hides mutation controls.");
+				assert.equal(await plainPage.$eval("[data-finish]", (button) => getComputedStyle(button).display), "none");
 				await plainPage.close();
 			} finally {
 				await plainServer.close();

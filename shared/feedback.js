@@ -79,6 +79,16 @@ export function formatThreadContextXml(review, thread, round, lastTurns) {
 }
 
 /** Format the finish-pass summary delivered to Pi when the reviewer completes a pass. */
+/** Format the terminal approval message: the reviewer signed off with a final commit message. */
+export function formatReviewApprovedXml(review, round, message, stale) {
+	return [
+		`<code-review-approved snapshot="${attr(review.id)}"${roundAttribute(round)}${stale ? ' stale="true"' : ""}>`,
+		`  <commit-message>${cdata(message)}</commit-message>`,
+		"  <note>The reviewer approved this review unit with the commit message above. The review session is closed — no further rounds or thread replies. Follow the commit policy that governs this session; where the reviewer's approval satisfies it, use this commit message.</note>",
+		"</code-review-approved>",
+	].join("\n");
+}
+
 export function formatReviewPassXml(review, threads, summary, stale, note, round) {
 	const unreadNotes = threads.filter((thread) => thread.status === "open" && !thread.turns.some((turn) => turn.author === "user")).length;
 	const queued = threads.filter((thread) => thread.status === "open" && thread.queued === true).length;

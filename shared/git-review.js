@@ -324,6 +324,40 @@ export async function collectReviewSnapshot(cwd, options = {}) {
 	return { root, head, id: fingerprint.digest("hex"), files };
 }
 
+/**
+ * Cheap change signal for staleness polling: HEAD, porcelain status, and the
+ * lstat identity of every currently-changed path. Editing, adding, reverting,
+ * staging, or committing anything in the diff normally moves this fingerprint;
+ * matching fingerprints skip the full snapshot re-collection. Like git's own
+ * stat heuristic, a same-size, mode-preserving rewrite within one mtime tick
+ * can go unnoticed until a later change moves either signal.
+ */
+export async function computeWorktreeFingerprint(root, signal) {
+	const head = (await git(root, ["rev-parse", "HEAD"], signal)).trim();
+	const status = await git(root, ["status", "--porcelain", "-z", "--untracked-files=all", "--no-renames"], signal);
+	const hash = createHash("sha256").update(`head\0${head}\0status\0${status}\0`);
+	const paths = [...new Set(status.split("\0").filter(Boolean).map((entry) => entry.slice(3)))].sort();
+	for (const path of paths) {
+		try {
+			const fileStat = await lstat(resolve(root, path));
+			hash.update(`stat\0${path}\0${fileStat.mtimeMs}\0${fileStat.size}\0${fileStat.mode}\0`);
+		} catch {
+			hash.update(`gone\0${path}\0`);
+		}
+	}
+	return hash.digest("hex");
+}
+
+/** Snapshot id the worktree would produce right now; "" when no changes exist against HEAD. */
+export async function currentSnapshotId(cwd, options = {}) {
+	try {
+		return (await collectReviewSnapshot(cwd, options)).id;
+	} catch (error) {
+		if (error instanceof Error && error.message.startsWith("No staged")) return "";
+		throw error;
+	}
+}
+
 function assertString(value, label, allowEmpty = false) {
 	if (typeof value !== "string" || (!allowEmpty && !value.trim()) || value.length > REVIEW_LIMITS.maxManifestString) {
 		throw new Error(`${label} must be a non-empty string of at most ${REVIEW_LIMITS.maxManifestString} characters.`);

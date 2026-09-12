@@ -40,9 +40,13 @@
   const resumeButton = document.querySelector('[data-resume]');
   const gotoCurrent = document.querySelector('[data-goto-current]');
   const roundSwitcher = document.querySelector('[data-round-switcher]');
+  const staleBadge = document.querySelector('[data-stale-badge]');
+  let stale = false;
 
   const applySessionState = () => {
     document.body.classList.toggle('locked', isLocked());
+    // Drift is expected while Pi revises and irrelevant on superseded rounds.
+    if (staleBadge) staleBadge.hidden = !stale || phase !== 'reviewing' || isSuperseded();
     document.querySelectorAll('[data-viewed-toggle]').forEach((box) => { box.disabled = isSuperseded(); });
     if (phaseBanner && phaseBannerText && resumeButton && gotoCurrent) {
       if (isSuperseded()) {
@@ -925,6 +929,7 @@
     }
     currentRound = data.currentRound;
     phase = data.phase;
+    stale = Boolean(data.stale);
     applySessionState();
     threads.clear();
     for (const thread of data.threads) threads.set(thread.id, thread);
@@ -964,6 +969,10 @@
     viewedFiles.clear();
     for (const path of data.viewedFiles) viewedFiles.add(path);
     applyViewed();
+  });
+  events.addEventListener('staleness', (event) => {
+    stale = Boolean(JSON.parse(event.data).stale);
+    applySessionState();
   });
   events.addEventListener('phase', (event) => {
     const data = JSON.parse(event.data);

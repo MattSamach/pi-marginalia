@@ -12,6 +12,7 @@ const AMEND_PATH = "/__pi_code_review_amend__";
 const SEND_PATH = "/__pi_code_review_send__";
 const EVENTS_PATH = "/__pi_code_review_events__";
 const SSE_HEARTBEAT_MS = 25_000;
+const STALENESS_INTERVAL_MS = 4_000;
 const SECURITY_HEADERS = {
 	"Cache-Control": "no-store",
 	"Cross-Origin-Opener-Policy": "same-origin",
@@ -129,6 +130,48 @@ export async function createCodeReviewServer(review, options) {
 	}, SSE_HEARTBEAT_MS);
 	heartbeat.unref?.();
 
+	// Live worktree-drift detection: while reviewers are connected and the round
+	// is active, a cheap fingerprint gates a full snapshot re-collection; the
+	// badge informs only — rounds stay immutable and commenting stays open.
+	let stale = false;
+	let staleFingerprint;
+	let staleChecking = false;
+	const setStale = (nextStale) => {
+		if (nextStale === stale) return;
+		stale = nextStale;
+		broadcast("staleness", { stale });
+	};
+	const resetStaleness = () => {
+		staleFingerprint = undefined;
+		setStale(false);
+	};
+	const checkStaleness = async () => {
+		// Drift while Pi is revising is expected, not signal; the check resumes
+		// with the phase.
+		if (!options.staleness || closed || staleChecking || phase !== "reviewing") return stale;
+		staleChecking = true;
+		const round = current();
+		try {
+			const fingerprint = await options.staleness.fingerprint();
+			if (fingerprint === staleFingerprint) return stale;
+			const snapshotId = await options.staleness.snapshotId();
+			// A round that advanced mid-check was collected from a newer tree than
+			// this probe observed; discard the result and let the next tick measure.
+			if (current() !== round) return stale;
+			staleFingerprint = fingerprint;
+			setStale(snapshotId !== round.review.id);
+		} catch {
+			// Transient collection failures keep the previous verdict.
+		} finally {
+			staleChecking = false;
+		}
+		return stale;
+	};
+	const stalenessTimer = setInterval(() => {
+		if (sseClients.size > 0) void checkStaleness();
+	}, STALENESS_INTERVAL_MS);
+	stalenessTimer.unref?.();
+
 	// Hand delivered turns to Pi; on failure return them to the pending state so
 	// nothing is stranded — they flow through the next delivery or the pass.
 	const deliverToPi = async (round, result) => {
@@ -221,7 +264,7 @@ export async function createCodeReviewServer(review, options) {
 				const requested = Number(requestUrl.searchParams.get("round") ?? current().number);
 				const round = rounds.find((candidate) => candidate.number === requested) ?? current();
 				res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "text/event-stream", Connection: "keep-alive" });
-				res.write(`event: init\ndata: ${JSON.stringify({ round: round.number, currentRound: current().number, phase, threads: round.store.list(), summary: round.store.summary(), viewedFiles: [...round.viewed] })}\n\n`);
+				res.write(`event: init\ndata: ${JSON.stringify({ round: round.number, currentRound: current().number, phase, stale, threads: round.store.list(), summary: round.store.summary(), viewedFiles: [...round.viewed] })}\n\n`);
 				sseClients.add(res);
 				req.on("close", () => sseClients.delete(res));
 				return;
@@ -477,6 +520,8 @@ export async function createCodeReviewServer(review, options) {
 		root: review.root,
 		entryUrl: () => `http://127.0.0.1:${port}/?token=${encodeURIComponent(mintToken())}`,
 		clientCount: () => sseClients.size,
+		checkStaleness,
+		isStale: () => stale,
 		currentReview: () => current().review,
 		currentRoundNumber: () => current().number,
 		hasRound: (reviewId) => rounds.some((round) => round.review.id === reviewId),
@@ -515,6 +560,7 @@ export async function createCodeReviewServer(review, options) {
 					phase = "reviewing";
 					broadcastPhase();
 				}
+				resetStaleness();
 				return { identical: true, round: active.number };
 			}
 			if (nextReview.root !== active.review.root) return { error: "wrong-root" };
@@ -545,6 +591,8 @@ export async function createCodeReviewServer(review, options) {
 			const round = { number: active.number + 1, review: nextReview, store: createThreadStore(nextReview, THREAD_LIMITS, carried, held), viewed };
 			rounds.push(round);
 			phase = "reviewing";
+			// The new round's snapshot was just collected from this worktree.
+			resetStaleness();
 			broadcast("round-ready", { round: round.number, previousRound: active.number });
 			return { round: round.number };
 		},
@@ -552,6 +600,7 @@ export async function createCodeReviewServer(review, options) {
 			if (closed) return;
 			closed = true;
 			clearInterval(heartbeat);
+			clearInterval(stalenessTimer);
 			for (const client of sseClients) client.end();
 			sseClients.clear();
 			for (const socket of sockets) socket.destroy();

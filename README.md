@@ -38,6 +38,7 @@ Everything that needs your attention is one uniform queue: every Pi commentary n
 7. Resolve threads yourself — Pi can only propose resolution. Replying to a resolved thread reopens it.
 8. Triage without the mouse: `Esc` leaves the text box (keeping your draft), `e` resolves the current thread or note, `n` continues, `Shift+n` steps backwards, `⇧⌘⏎` quiet-adds, `x` marks the current file viewed, and `?` (or the header hint) shows the shortcuts guide.
 9. Track progress with the viewed checklist: every file has a **Viewed** checkbox (header or `x`), mirrored as a sidebar checkmark and progress bar. It is reviewer-side bookkeeping only — never sent to Pi — and stays available while Pi revises. A new round keeps a file's checkmark only when its diff is byte-identical to the previous round.
+10. Trust the topbar drift badge: while the page is open, the server periodically re-checks the working tree against the frozen snapshot (a cheap fingerprint gates the full re-collection). If they diverge, a **worktree changed since this snapshot** badge appears — informational only; reading and commenting stay open, and the badge clears if the tree returns. It is hidden while Pi revises, when drift is expected.
 10. Click **Send round to Pi** to hand Pi one summary of the pass. It lists open threads you engaged with; your untouched notes are never echoed back to Pi.
 
 While Pi is busy, posts queue and are delivered together the moment Pi settles, so a slow turn never blocks you; Pi then answers each queued thread in one pass.

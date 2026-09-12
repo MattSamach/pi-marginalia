@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { spawn } from "node:child_process";
-import { applyReviewManifest, collectReviewSnapshot } from "./shared/git-review.js";
+import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint, currentSnapshotId } from "./shared/git-review.js";
 import { createReviewMessageQueue } from "./shared/delivery-queue.js";
 import { formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "./shared/feedback.js";
 import { createCodeReviewServer } from "./shared/server.js";
@@ -172,11 +172,15 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			onFinishPass: async (round: ReviewRound, note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
 				let stale = true;
 				try {
-					stale = (await collectReviewSnapshot(round.review.root)).id !== round.review.id;
+					stale = (await currentSnapshotId(round.review.root)) !== round.review.id;
 				} catch {}
 				const queued = queue.post(formatReviewPassXml(round.review, threads, summary, stale, note, round.number), ctx.isIdle());
 				ctx.ui.notify(`Review round ${round.number} pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s)${queued ? " (queued until Pi settles)" : ""}.`, "info");
 				return { stale };
+			},
+			staleness: {
+				fingerprint: () => computeWorktreeFingerprint(review.root),
+				snapshotId: () => currentSnapshotId(review.root),
 			},
 		});
 		servers.add(server);

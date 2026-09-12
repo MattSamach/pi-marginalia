@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import puppeteer from "puppeteer-core";
-import { applyReviewManifest, collectReviewSnapshot, parseUnifiedPatch, REVIEW_LIMITS } from "../shared/git-review.js";
+import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint, currentSnapshotId, parseUnifiedPatch, REVIEW_LIMITS } from "../shared/git-review.js";
 import { formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "../shared/feedback.js";
 import { renderReviewHtml } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
@@ -53,6 +53,29 @@ try {
 	assert.notEqual((await collectReviewSnapshot(fixture)).id, snapshot.id, "Changing tracked binary bytes must change the snapshot fingerprint even though the textual binary diff marker is unchanged.");
 	await writeFile(join(fixture, "binary.dat"), Buffer.from([0, 1, 9, 3]));
 	assert.equal((await collectReviewSnapshot(fixture)).id, snapshot.id, "Restoring tracked binary bytes should restore the frozen fingerprint.");
+
+	const worktreeFingerprint = await computeWorktreeFingerprint(fixture);
+	assert.equal(await computeWorktreeFingerprint(fixture), worktreeFingerprint, "The cheap worktree fingerprint is stable while nothing changes.");
+	assert.equal(await currentSnapshotId(fixture), snapshot.id, "currentSnapshotId matches a fresh snapshot of the same tree.");
+	await writeFile(join(fixture, "unstaged.txt"), "baseline\nunstaged addition\ndrift\n");
+	assert.notEqual(await computeWorktreeFingerprint(fixture), worktreeFingerprint, "Editing an already-changed file moves the cheap fingerprint.");
+	assert.notEqual(await currentSnapshotId(fixture), snapshot.id, "Edited content produces a different snapshot id.");
+	await writeFile(join(fixture, "unstaged.txt"), "baseline\nunstaged addition\n");
+	assert.equal(await currentSnapshotId(fixture), snapshot.id, "Restoring the tree restores the snapshot id.");
+	{
+		const cleanRepo = await mkdtemp(join(tmpdir(), "pi-code-review-clean-"));
+		try {
+			await git(cleanRepo, "init", "-q");
+			await git(cleanRepo, "config", "user.email", "test@example.com");
+			await git(cleanRepo, "config", "user.name", "Test");
+			await writeFile(join(cleanRepo, "only.txt"), "committed\n");
+			await git(cleanRepo, "add", ".");
+			await git(cleanRepo, "commit", "-qm", "baseline");
+			assert.equal(await currentSnapshotId(cleanRepo), "", "A tree with no changes against HEAD reads as empty — never equal to any snapshot id.");
+		} finally {
+			await rm(cleanRepo, { recursive: true, force: true });
+		}
+	}
 
 	const ordered = applyReviewManifest(snapshot, {
 		title: "Safe <review>",
@@ -828,6 +851,87 @@ try {
 	} finally {
 		await roundsServer.close();
 	}
+
+	let probeFingerprint = "fp-1";
+	let probeSnapshotId = ordered.id;
+	let fullChecks = 0;
+	let failNextFull = false;
+	const staleServer = await createCodeReviewServer(ordered, {
+		onThreadPost: async () => {},
+		onFinishPass: async () => ({ stale: false }),
+		staleness: {
+			fingerprint: async () => probeFingerprint,
+			snapshotId: async () => {
+				if (failNextFull) {
+					failNextFull = false;
+					throw new Error("probe boom");
+				}
+				fullChecks += 1;
+				return probeSnapshotId;
+			},
+		},
+	});
+	try {
+		const origin = new URL(staleServer.url).origin;
+		const bootstrap = await fetch(staleServer.url, { redirect: "manual" });
+		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
+		const headers = { cookie, "content-type": "application/json", origin };
+		const eventsResponse = await fetch(`${origin}/__pi_code_review_events__`, { headers: { cookie } });
+		const reader = eventsResponse.body.getReader();
+		const decoder = new TextDecoder();
+		let sseBuffer = "";
+		const readUntil = async (marker) => {
+			const deadline = Date.now() + 5_000;
+			while (!sseBuffer.includes(marker)) {
+				if (Date.now() > deadline) throw new Error(`Timed out waiting for SSE marker: ${marker}`);
+				const { value, done } = await reader.read();
+				if (done) throw new Error("SSE stream ended early.");
+				sseBuffer += decoder.decode(value, { stream: true });
+			}
+		};
+		await readUntil("event: init");
+		assert.match(sseBuffer, /"stale":false/, "The init payload carries the staleness verdict.");
+		assert.equal(await staleServer.checkStaleness(), false, "A matching snapshot id reads clean.");
+		assert.equal(fullChecks, 1);
+		assert.equal(await staleServer.checkStaleness(), false);
+		assert.equal(fullChecks, 1, "An unchanged cheap fingerprint gates the full re-collection.");
+		probeFingerprint = "fp-2";
+		probeSnapshotId = "drifted";
+		assert.equal(await staleServer.checkStaleness(), true, "A drifted worktree marks the round stale.");
+		await readUntil('"stale":true');
+		probeFingerprint = "fp-3";
+		probeSnapshotId = ordered.id;
+		assert.equal(await staleServer.checkStaleness(), false, "The badge clears when the tree returns.");
+		await readUntil('"stale":false');
+		probeFingerprint = "fp-4";
+		probeSnapshotId = "drifted-again";
+		assert.equal((await fetch(`${origin}/__pi_code_review_finish__`, { method: "POST", headers, body: "{}" })).status, 200);
+		const fullChecksBeforeRevising = fullChecks;
+		assert.equal(await staleServer.checkStaleness(), false, "Drift while Pi revises is expected, not signal.");
+		assert.equal(fullChecks, fullChecksBeforeRevising, "The revising phase suppresses staleness evaluation entirely.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_resume__`, { method: "POST", headers, body: "{}" })).status, 200);
+		assert.equal(await staleServer.checkStaleness(), true, "Resume re-enables drift detection.");
+		assert.equal(staleServer.addRound({ ...ordered, id: altId(ordered.id, 60) }, ordered.id).round, 2);
+		assert.equal(staleServer.isStale(), false, "A new round resets staleness — its snapshot was just collected from this tree.");
+		probeFingerprint = "fp-5";
+		assert.equal(await staleServer.checkStaleness(), true, "Drift is measured against the current round's snapshot.");
+		probeFingerprint = "fp-6";
+		probeSnapshotId = altId(ordered.id, 60);
+		assert.equal(await staleServer.checkStaleness(), false, "The current round's own id reads clean.");
+		probeFingerprint = "fp-7";
+		probeSnapshotId = "drift-behind-failure";
+		failNextFull = true;
+		assert.equal(await staleServer.checkStaleness(), false, "A failed collection keeps the previous verdict.");
+		const fullChecksAfterFailure = fullChecks;
+		assert.equal(await staleServer.checkStaleness(), true, "A failed check must not stamp the cheap fingerprint — the next tick re-runs the full collection.");
+		assert.equal(fullChecks, fullChecksAfterFailure + 1, "The retry performs a real re-collection instead of being gated by the cheap check.");
+		assert.deepEqual(staleServer.addRound({ ...ordered, id: altId(ordered.id, 60) }, altId(ordered.id, 60)), { identical: true, round: 2 });
+		assert.equal(staleServer.isStale(), false, "An identical reopen proves the tree matches the round; staleness resets.");
+		await reader.cancel();
+	} finally {
+		await staleServer.close();
+	}
+	console.log("Staleness detection flow passed.");
 
 	let releaseRaceFinish;
 	let markRaceFinishEntered;

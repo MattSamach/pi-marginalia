@@ -12,6 +12,7 @@
   const VIEWED_PATH = '/__pi_code_review_viewed__';
   const AMEND_PATH = '/__pi_code_review_amend__';
   const SEND_PATH = '/__pi_code_review_send__';
+  const CONTEXT_PATH = '/__pi_code_review_context__';
 
   const myRound = Number(document.body.dataset.round || 1);
   let currentRound = Number(document.body.dataset.currentRound || myRound);
@@ -198,6 +199,7 @@
     const start = all.indexOf(startRow);
     const end = all.indexOf(endRow);
     const rows = all.slice(Math.min(start, end), Math.max(start, end) + 1);
+    if (rows.some((row) => row.dataset.kind === 'expanded')) return { expanded: true };
     if (rows.some((row) => !['add', 'del', 'context'].includes(row.dataset.kind))) return undefined;
     return { section, rows };
   };
@@ -209,6 +211,10 @@
     const selected = selectedRows(range);
     if (!selected) {
       setStatus('Select diff code within a single file.', true);
+      return;
+    }
+    if (selected.expanded) {
+      setStatus('Expanded context is read-only — anchor comments on the diff and its original context lines.', true);
       return;
     }
     const highlight = selection.toString().trim();
@@ -256,6 +262,102 @@
     textarea.focus();
     setStatus('Add feedback for the highlighted diff.');
   };
+  // Lazily reveal unchanged lines around hunks from the frozen snapshot's
+  // pinned HEAD blob. Revealed rows are visual context only: they are not part
+  // of the frozen diff, so they cannot anchor comment threads.
+  const buildExpandedRow = (fileIndex, line) => {
+    const row = document.createElement('tr');
+    row.className = 'diff-line diff-context diff-expanded';
+    row.dataset.fileIndex = String(fileIndex);
+    row.dataset.kind = 'expanded';
+    row.dataset.oldLine = String(line.old);
+    row.dataset.newLine = String(line.new);
+    const oldCell = document.createElement('td');
+    oldCell.className = 'line-number';
+    oldCell.textContent = String(line.old);
+    const newCell = document.createElement('td');
+    newCell.className = 'line-number';
+    newCell.textContent = String(line.new);
+    const marker = document.createElement('td');
+    marker.className = 'line-marker';
+    marker.setAttribute('aria-hidden', 'true');
+    const code = document.createElement('td');
+    code.className = 'diff-code';
+    const span = document.createElement('span');
+    span.textContent = line.content || '\u00a0';
+    code.append(span);
+    row.append(oldCell, newCell, marker, code);
+    return row;
+  };
+  // Re-derive a finite divider's controls after a partial expansion: shrink
+  // the note, keep the all-button count honest, and collapse to a single
+  // reveal-all control once the remaining gap fits one click.
+  const refreshExpander = (divider) => {
+    const size = Number(divider.dataset.gapEnd) - Number(divider.dataset.gapStart) + 1;
+    if (!Number.isFinite(size) || size <= 0) {
+      divider.remove();
+      return;
+    }
+    const note = divider.querySelector('.expander-note');
+    if (note) note.textContent = size + ' unchanged line' + (size === 1 ? '' : 's');
+    if (size <= 20) {
+      divider.querySelectorAll('[data-expand]').forEach((button) => button.remove());
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.expand = 'all';
+      button.textContent = '\u2195 ' + size;
+      button.title = 'Show the hidden line' + (size === 1 ? '' : 's');
+      divider.querySelector('.diff-code').prepend(button);
+      return;
+    }
+    divider.querySelectorAll('[data-expand]').forEach((button) => {
+      button.disabled = false;
+      if (button.dataset.expand === 'all') button.textContent = '\u2195 ' + size;
+    });
+  };
+  const expandContext = async (divider, mode) => {
+    const section = divider.closest('[data-review-file]');
+    const start = Number(divider.dataset.gapStart);
+    const end = divider.dataset.gapEnd === undefined ? undefined : Number(divider.dataset.gapEnd);
+    const from = mode === 'up' ? Math.max(end - 19, start) : start;
+    const to = mode === 'all' ? end : mode === 'up' ? end : end === undefined ? start + 19 : Math.min(start + 19, end);
+    const buttons = [...divider.querySelectorAll('[data-expand]')];
+    buttons.forEach((button) => { button.disabled = true; });
+    let payload;
+    try {
+      const response = await fetch(CONTEXT_PATH + '?round=' + myRound + '&path=' + encodeURIComponent(section.dataset.path) + '&oldStart=' + from + '&oldEnd=' + to);
+      if (!response.ok) throw new Error((await response.text()) || 'Request failed');
+      payload = await response.json();
+    } catch (error) {
+      buttons.forEach((button) => { button.disabled = false; });
+      setStatus(errorMessage(error), true);
+      return;
+    }
+    const rows = payload.lines.map((line) => buildExpandedRow(Number(divider.dataset.fileIndex), line));
+    // Ascending row order relative to the divider: a top slice sits above it
+    // (adjacent to the content before the gap), a bottom slice below it.
+    if (mode === 'up') divider.after(...rows);
+    else divider.before(...rows);
+    if (mode === 'all' || payload.eof) {
+      divider.remove();
+      return;
+    }
+    if (end === undefined) {
+      // Trailing gap of unknown length; the pinned blob may hold more.
+      divider.dataset.gapStart = String(to + 1);
+      buttons.forEach((button) => { button.disabled = false; });
+      return;
+    }
+    if (mode === 'up') divider.dataset.gapEnd = String(from - 1);
+    else divider.dataset.gapStart = String(to + 1);
+    refreshExpander(divider);
+  };
+  reviewRoot.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-expand]');
+    if (!button || button.disabled) return;
+    const divider = button.closest('[data-expander]');
+    if (divider) void expandContext(divider, button.dataset.expand);
+  });
   reviewRoot.addEventListener('mouseup', () => window.setTimeout(beginComment, 0));
   reviewRoot.addEventListener('keyup', (event) => {
     if (event.key === 'Shift' || event.key.startsWith('Arrow')) window.setTimeout(beginComment, 0);

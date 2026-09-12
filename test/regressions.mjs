@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import puppeteer from "puppeteer-core";
-import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint, currentSnapshotId, parseUnifiedPatch, REVIEW_LIMITS } from "../shared/git-review.js";
+import { applyReviewManifest, collectReviewSnapshot, computeContextGaps, computeWorktreeFingerprint, createPinnedBlobContextReader, currentSnapshotId, parseUnifiedPatch, readHeadBlobLines, REVIEW_LIMITS } from "../shared/git-review.js";
 import { formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "../shared/feedback.js";
 import { renderReviewHtml } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
@@ -15,6 +15,7 @@ import { createReviewMessageQueue } from "../shared/delivery-queue.js";
 const exec = promisify(execFile);
 const git = (cwd, ...args) => exec("git", ["-C", cwd, ...args], { encoding: "utf8" });
 const fixture = await mkdtemp(join(tmpdir(), "pi-code-review-"));
+let contextRepo;
 try {
 	await git(fixture, "init", "-q");
 	await git(fixture, "config", "user.email", "test@example.com");
@@ -852,6 +853,124 @@ try {
 		await roundsServer.close();
 	}
 
+	{
+		const gapFile = (status, lines, flags = {}) => ({ status, lines, binary: false, omitted: false, truncated: false, ...flags });
+		const hunk = (content) => ({ kind: "hunk", content });
+		const ctx = { kind: "context", content: "x" };
+		assert.deepEqual(computeContextGaps(gapFile("modified", [hunk("@@ -30,7 +30,8 @@ function x()"), ctx, ctx, ctx])), [
+			{ oldStart: 1, oldEnd: 29, delta: 0 },
+			{ oldStart: 37, oldEnd: Infinity, delta: 1 },
+		]);
+		assert.deepEqual(computeContextGaps(gapFile("modified", [hunk("@@ -30,7 +30,8 @@"), ctx, ctx])), [{ oldStart: 1, oldEnd: 29, delta: 0 }], "Fewer than three trailing context rows prove the old side ended inside the hunk.");
+		assert.deepEqual(computeContextGaps(gapFile("modified", [hunk("@@ -5,7 +5,9 @@"), hunk("@@ -40,7 +42,7 @@"), ctx, ctx, ctx])), [
+			{ oldStart: 1, oldEnd: 4, delta: 0 },
+			{ oldStart: 12, oldEnd: 39, delta: 2 },
+			{ oldStart: 47, oldEnd: Infinity, delta: 2 },
+		]);
+		assert.deepEqual(computeContextGaps(gapFile("modified", [hunk("@@ -5,0 +6,2 @@"), ctx, ctx, ctx])), [
+			{ oldStart: 1, oldEnd: 5, delta: 0 },
+			{ oldStart: 6, oldEnd: Infinity, delta: 2 },
+		], "A zero-count old side names the line before the insertion.");
+		assert.deepEqual(computeContextGaps(gapFile("untracked", [hunk("@@ -0,0 +1,3 @@"), ctx, ctx, ctx])), []);
+		assert.deepEqual(computeContextGaps(gapFile("added", [hunk("@@ -0,0 +1,3 @@"), ctx, ctx, ctx])), []);
+		assert.deepEqual(computeContextGaps(gapFile("deleted", [hunk("@@ -1,5 +0,0 @@"), ctx, ctx, ctx])), []);
+		assert.deepEqual(computeContextGaps(gapFile("modified", [hunk("@@ -30,7 +30,8 @@"), ctx, ctx, ctx], { truncated: true })), []);
+		assert.deepEqual(computeContextGaps(gapFile("modified", [hunk("@@ -10,7 +5,7 @@"), ctx, ctx, ctx])), [], "Inconsistent old/new offsets fail closed.");
+		assert.deepEqual(computeContextGaps(gapFile("modified", [hunk("@@ -30,7 +30,7 @@"), hunk("@@ -20,7 +20,7 @@"), ctx, ctx, ctx])), [], "Regressing hunk order fails closed.");
+
+		assert.deepEqual(await readHeadBlobLines(fixture, snapshot.head, "staged.txt"), ["baseline"], "The pinned HEAD blob serves the committed content, not the worktree.");
+		assert.equal(await readHeadBlobLines(fixture, snapshot.head, "untracked.txt"), undefined, "Paths absent at HEAD have no pinned blob.");
+		assert.equal(await readHeadBlobLines(fixture, snapshot.head, "staged.txt", { limits: { maxBlobBytes: 4 } }), undefined, "Oversized blobs opt out of context expansion.");
+	}
+
+	contextRepo = await mkdtemp(join(tmpdir(), "pi-code-review-context-"));
+	await git(contextRepo, "init", "-q");
+	await git(contextRepo, "config", "user.email", "test@example.com");
+	await git(contextRepo, "config", "user.name", "Test");
+	const contextBase = Array.from({ length: 80 }, (_, index) => `line ${index + 1}`);
+	await writeFile(join(contextRepo, "ctx.txt"), `${contextBase.join("\n")}\n`);
+	await writeFile(join(contextRepo, "moveme.txt"), `${Array.from({ length: 40 }, (_, index) => `row ${index + 1}`).join("\n")}\n`);
+	await git(contextRepo, "add", ".");
+	await git(contextRepo, "commit", "-qm", "baseline");
+	const contextEdited = [...contextBase.slice(0, 10), "inserted a", "inserted b", ...contextBase.slice(10)];
+	contextEdited[41] = "line 40 changed";
+	await writeFile(join(contextRepo, "ctx.txt"), `${contextEdited.join("\n")}\n`);
+	await git(contextRepo, "mv", "moveme.txt", "moved.txt");
+	await writeFile(join(contextRepo, "moved.txt"), `${Array.from({ length: 40 }, (_, index) => (index === 19 ? "row 20 changed" : `row ${index + 1}`)).join("\n")}\n`);
+	const contextSnapshot = await collectReviewSnapshot(contextRepo);
+	const contextReview = applyReviewManifest(contextSnapshot, { files: [] });
+	const contextFile = contextReview.files.find((file) => file.path === "ctx.txt");
+	assert.deepEqual(computeContextGaps(contextFile), [
+		{ oldStart: 1, oldEnd: 7, delta: 0 },
+		{ oldStart: 14, oldEnd: 36, delta: 2 },
+		{ oldStart: 44, oldEnd: Infinity, delta: 2 },
+	], "A real two-hunk diff yields leading, middle, and trailing gaps with accumulated deltas.");
+	const contextHtml = renderReviewHtml(contextReview, "ctx-nonce");
+	assert.match(contextHtml, /data-expander data-file-index="0" data-gap-start="1" data-gap-end="7" data-gap-delta="0"/, "The leading gap renders a divider.");
+	assert.match(contextHtml, /data-gap-start="14" data-gap-end="36" data-gap-delta="2"/, "Inter-hunk gaps render dividers with the new-side delta.");
+	// Pinned at the codepoint level: arrow-ish glyphs all read plausibly in a
+	// snapshot diff, so assert the exact characters (U+2913 down, U+2912 up).
+	assert.match(contextHtml, /data-expand="down"[^>]*>\u2913 20</, "The down control shows DOWNWARDS ARROW TO BAR.");
+	assert.match(contextHtml, /data-expand="up"[^>]*>\u2912 20</, "The up control shows UPWARDS ARROW TO BAR.");
+	assert.match(contextHtml, /data-expander data-file-index="0" data-gap-start="44" data-gap-delta="2"/, "The trailing gap renders a divider without a known end.");
+	assert.doesNotMatch(html, /<tr class="diff-expander"/, "Files whose diffs reach EOF or are untracked render no expanders.");
+
+	const movedFile = contextReview.files.find((file) => file.path === "moved.txt");
+	assert.equal(movedFile?.status, "renamed");
+	assert.equal(movedFile?.oldPath, "moveme.txt");
+	assert.deepEqual(computeContextGaps(movedFile), [
+		{ oldStart: 1, oldEnd: 16, delta: 0 },
+		{ oldStart: 24, oldEnd: Infinity, delta: 0 },
+	], "Renamed files with content changes expose gaps in old-path line numbers.");
+	const contextServer = await createCodeReviewServer(contextReview, {
+		onThreadPost: async () => {},
+		onFinishPass: async () => ({ stale: false }),
+		// The production reader: pinned-blob resolution incl. rename old paths.
+		contextLines: createPinnedBlobContextReader(),
+	});
+	try {
+		const origin = new URL(contextServer.url).origin;
+		const bootstrap = await fetch(contextServer.url, { redirect: "manual" });
+		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
+		const contextGet = (query) => fetch(`${origin}/__pi_code_review_context__?${query}`, { headers: { cookie } });
+		assert.equal((await fetch(`${origin}/__pi_code_review_context__?round=1&path=ctx.txt&oldStart=1&oldEnd=7`)).status, 403, "Context requests require authentication.");
+		assert.equal((await contextGet("round=9&path=ctx.txt&oldStart=1&oldEnd=7")).status, 404);
+		assert.equal((await contextGet("round=1&path=nope.txt&oldStart=1&oldEnd=7")).status, 404);
+		assert.equal((await contextGet("round=1&path=ctx.txt&oldStart=0&oldEnd=7")).status, 400);
+		assert.equal((await contextGet("round=1&path=ctx.txt&oldStart=7&oldEnd=1")).status, 400);
+		assert.equal((await contextGet("round=1&path=ctx.txt&oldStart=44&oldEnd=944")).status, 400, "Requests beyond the per-call cap are rejected.");
+		assert.equal((await contextGet("round=1&path=ctx.txt&oldStart=30&oldEnd=40")).status, 400, "Ranges overlapping a hunk are rejected.");
+		assert.equal((await contextGet("round=1&path=ctx.txt&oldStart=1&oldEnd=8")).status, 400, "Gap membership is exact at the boundary.");
+		const top = await (await contextGet("round=1&path=ctx.txt&oldStart=17&oldEnd=36")).json();
+		assert.equal(top.lines.length, 20);
+		assert.deepEqual(top.lines[0], { old: 17, new: 19, content: "line 17" }, "New-side numbering applies the gap's delta.");
+		assert.equal(top.eof, false);
+		const beyond = await (await contextGet("round=1&path=ctx.txt&oldStart=64&oldEnd=83")).json();
+		assert.equal(beyond.lines.length, 17, "Trailing requests clamp at the blob's end.");
+		assert.deepEqual(beyond.lines[16], { old: 80, new: 82, content: "line 80" });
+		assert.equal(beyond.eof, true);
+		const renamed = await (await contextGet("round=1&path=moved.txt&oldStart=1&oldEnd=16")).json();
+		assert.equal(renamed.lines.length, 16, "Renamed files serve context from their HEAD-side blob path.");
+		assert.deepEqual(renamed.lines[0], { old: 1, new: 1, content: "row 1" });
+		const renamedTail = await (await contextGet("round=1&path=moved.txt&oldStart=24&oldEnd=43")).json();
+		assert.equal(renamedTail.lines.length, 17, "Renamed trailing context clamps at the old blob's end.");
+		assert.deepEqual(renamedTail.lines[16], { old: 40, new: 40, content: "row 40" });
+		assert.equal(renamedTail.eof, true);
+		assert.equal(contextServer.addRound({ ...contextReview, id: altId(contextReview.id, 10) }, contextReview.id).round, 2);
+		assert.equal((await contextGet("round=1&path=ctx.txt&oldStart=1&oldEnd=7")).status, 200, "Superseded rounds keep serving frozen context read-only.");
+	} finally {
+		await contextServer.close();
+	}
+	const bareServer = await createCodeReviewServer(contextReview, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+	try {
+		const bareBootstrap = await fetch(bareServer.url, { redirect: "manual" });
+		const bareCookie = (bareBootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
+		assert.equal((await fetch(`${new URL(bareServer.url).origin}/__pi_code_review_context__?round=1&path=ctx.txt&oldStart=1&oldEnd=7`, { headers: { cookie: bareCookie } })).status, 404, "Sessions without a context reader refuse expansion honestly.");
+	} finally {
+		await bareServer.close();
+	}
+	console.log("Context expansion flow passed.");
+
 	let probeFingerprint = "fp-1";
 	let probeSnapshotId = ordered.id;
 	let fullChecks = 0;
@@ -1353,6 +1472,49 @@ try {
 			} finally {
 				await plainServer.close();
 			}
+
+			const ctxServer = await createCodeReviewServer(contextReview, {
+				onThreadPost: async () => {},
+				onFinishPass: async () => ({ stale: false }),
+				contextLines: createPinnedBlobContextReader(),
+			});
+			try {
+				const ctxPage = await browser.newPage();
+				await ctxPage.goto(ctxServer.url, { waitUntil: "domcontentloaded" });
+				const active = ".review-file.active ";
+				assert.equal(await ctxPage.$$eval(`${active}[data-expander]`, (rows) => rows.length), 3, "Leading, middle, and trailing gaps each render a divider.");
+				await ctxPage.click(`${active}[data-expander][data-gap-start="1"] [data-expand="all"]`);
+				await ctxPage.waitForFunction(() => document.querySelectorAll(".review-file.active .diff-expanded").length === 7);
+				assert.equal(await ctxPage.$$eval(`${active}[data-expander]`, (rows) => rows.length), 2, "A fully expanded gap removes its divider.");
+				assert.equal(await ctxPage.$eval(`${active}.diff-expanded[data-old-line="1"] .diff-code`, (cell) => cell.textContent), "line 1", "Expanded rows carry the pinned blob content.");
+				await ctxPage.click(`${active}[data-expander][data-gap-start="14"] [data-expand="up"]`);
+				await ctxPage.waitForFunction(() => document.querySelectorAll(".review-file.active .diff-expanded").length === 27);
+				assert.equal(await ctxPage.$eval(`${active}.diff-expanded[data-old-line="17"]`, (row) => row.previousElementSibling?.dataset.expander !== undefined), true, "An upward slice sits directly below its divider.");
+				assert.equal(await ctxPage.$eval(`${active}.diff-expanded[data-old-line="20"]`, (row) => row.dataset.newLine), "22", "Expanded rows apply the gap's new-side delta.");
+				await ctxPage.waitForFunction(() => document.querySelector('.review-file.active [data-expander][data-gap-start="14"][data-gap-end="16"]'), {});
+				assert.equal(await ctxPage.$$eval(`${active}[data-expander][data-gap-start="14"] [data-expand]`, (buttons) => buttons.map((button) => button.dataset.expand).join()), "all", "A shrunken gap collapses to a single reveal-all control.");
+				await ctxPage.click(`${active}[data-expander][data-gap-start="14"] [data-expand="all"]`);
+				await ctxPage.waitForFunction(() => document.querySelectorAll(".review-file.active .diff-expanded").length === 30);
+				await ctxPage.click(`${active}[data-expander]:not([data-gap-end]) [data-expand="down"]`);
+				await ctxPage.waitForFunction(() => document.querySelectorAll(".review-file.active .diff-expanded").length === 50);
+				assert.ok(await ctxPage.$(`${active}[data-expander]:not([data-gap-end])`), "A trailing gap with more blob left keeps its divider.");
+				await ctxPage.click(`${active}[data-expander]:not([data-gap-end]) [data-expand="down"]`);
+				await ctxPage.waitForFunction(() => document.querySelectorAll(".review-file.active .diff-expanded").length === 67 && !document.querySelector(".review-file.active [data-expander]"));
+				await ctxPage.evaluate(() => {
+					const code = document.querySelector('.review-file.active .diff-expanded[data-old-line="20"] .diff-code span');
+					const range = document.createRange();
+					range.selectNodeContents(code);
+					const selection = window.getSelection();
+					selection.removeAllRanges();
+					selection.addRange(range);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await ctxPage.waitForFunction(() => document.querySelector("[data-global-status]").textContent.includes("read-only"));
+				assert.equal(await ctxPage.$eval("[data-selection-composer]", (composer) => composer.hidden), true, "Expanded context never opens the comment composer.");
+				await ctxPage.close();
+			} finally {
+				await ctxServer.close();
+			}
 			console.log("Headless browser live-thread flow passed.");
 		} finally {
 			await browser.close();
@@ -1396,4 +1558,5 @@ try {
 	console.log("pi-code-review regression checks passed.");
 } finally {
 	await rm(fixture, { recursive: true, force: true });
+	if (contextRepo) await rm(contextRepo, { recursive: true, force: true });
 }

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
+import { computeContextGaps, CONTEXT_LIMITS } from "./git-review.js";
 import { renderReviewHtml } from "./render.js";
 import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS } from "./threads.js";
 
@@ -11,6 +12,7 @@ const VIEWED_PATH = "/__pi_code_review_viewed__";
 const AMEND_PATH = "/__pi_code_review_amend__";
 const SEND_PATH = "/__pi_code_review_send__";
 const EVENTS_PATH = "/__pi_code_review_events__";
+const CONTEXT_PATH = "/__pi_code_review_context__";
 const SSE_HEARTBEAT_MS = 25_000;
 const STALENESS_INTERVAL_MS = 4_000;
 const SECURITY_HEADERS = {
@@ -258,6 +260,51 @@ export async function createCodeReviewServer(review, options) {
 					return;
 				}
 				renderRound(round, res);
+				return;
+			}
+			if (req.method === "GET" && requestUrl.pathname === CONTEXT_PATH) {
+				if (typeof options.contextLines !== "function") {
+					writeText(res, 404, "Context expansion is not available in this session.");
+					return;
+				}
+				const round = rounds.find((candidate) => candidate.number === Number(requestUrl.searchParams.get("round")));
+				if (!round) {
+					writeText(res, 404, "Unknown review round.");
+					return;
+				}
+				const file = round.review.files.find((candidate) => candidate.path === requestUrl.searchParams.get("path"));
+				if (!file) {
+					writeText(res, 404, "Unknown file.");
+					return;
+				}
+				const oldStart = Number(requestUrl.searchParams.get("oldStart"));
+				const oldEnd = Number(requestUrl.searchParams.get("oldEnd"));
+				if (!Number.isInteger(oldStart) || !Number.isInteger(oldEnd) || oldStart < 1 || oldEnd < oldStart) {
+					writeText(res, 400, "Invalid context range.");
+					return;
+				}
+				if (oldEnd - oldStart + 1 > CONTEXT_LIMITS.maxRequestLines) {
+					writeText(res, 400, `Context requests are limited to ${CONTEXT_LIMITS.maxRequestLines} lines.`);
+					return;
+				}
+				// The range must lie inside a genuine gap of the frozen diff; client
+				// coordinates are never trusted for numbering — delta comes from the gap.
+				const gap = computeContextGaps(file).find((candidate) => oldStart >= candidate.oldStart && oldEnd <= candidate.oldEnd);
+				if (!gap) {
+					writeText(res, 400, "The requested range is not an expandable gap of this diff.");
+					return;
+				}
+				const contents = await options.contextLines(round.review, file, oldStart, oldEnd);
+				const trailing = gap.oldEnd === Infinity;
+				if (contents === undefined || (!trailing && contents.length !== oldEnd - oldStart + 1)) {
+					writeText(res, 404, "Context is unavailable for this file.");
+					return;
+				}
+				writeJson(res, 200, {
+					path: file.path,
+					lines: contents.map((content, index) => ({ old: oldStart + index, new: oldStart + index + gap.delta, content })),
+					eof: trailing && contents.length < oldEnd - oldStart + 1,
+				});
 				return;
 			}
 			if (req.method === "GET" && requestUrl.pathname === EVENTS_PATH) {

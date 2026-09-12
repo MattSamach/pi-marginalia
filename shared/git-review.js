@@ -324,6 +324,106 @@ export async function collectReviewSnapshot(cwd, options = {}) {
 	return { root, head, id: fingerprint.digest("hex"), files };
 }
 
+/** Bounds for lazily revealed unchanged context around diff hunks. */
+export const CONTEXT_LIMITS = Object.freeze({
+	maxRequestLines: 500,
+	maxBlobBytes: 10 * 1024 * 1024,
+});
+
+/**
+ * Gaps of unchanged lines around a file's rendered hunks, computed from the
+ * frozen @@ headers. Gap lines are by definition identical in HEAD and the
+ * worktree at snapshot time, so the snapshot's pinned HEAD blob serves them
+ * immutably no matter how the worktree drifts later. Returns
+ * [{ oldStart, oldEnd, delta }] in old-side line numbers with delta mapping
+ * old to new numbering; the trailing gap has oldEnd === Infinity because the
+ * blob's length is unknown until read. Files whose diff is not an exact
+ * HEAD-to-worktree line mapping (untracked, added, deleted, binary, omitted,
+ * truncated) and malformed hunk sequences yield no gaps.
+ */
+export function computeContextGaps(file) {
+	if (file.binary || file.omitted || file.truncated) return [];
+	if (["untracked", "added", "deleted"].includes(file.status)) return [];
+	const matches = (file.lines ?? [])
+		.filter((line) => line.kind === "hunk")
+		.map((line) => /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line.content));
+	if (!matches.length || matches.some((match) => !match)) return [];
+	const gaps = [];
+	let nextOld = 1;
+	let nextNew = 1;
+	for (const match of matches) {
+		const oldCount = match[2] === undefined ? 1 : Number(match[2]);
+		const newCount = match[4] === undefined ? 1 : Number(match[4]);
+		// A zero-count side names the line BEFORE the hunk position.
+		const oldTop = oldCount === 0 ? Number(match[1]) + 1 : Number(match[1]);
+		const newTop = newCount === 0 ? Number(match[3]) + 1 : Number(match[3]);
+		if (oldTop < nextOld || oldTop - nextOld !== newTop - nextNew) return [];
+		if (oldTop > nextOld) gaps.push({ oldStart: nextOld, oldEnd: oldTop - 1, delta: newTop - oldTop });
+		nextOld = oldTop + oldCount;
+		nextNew = newTop + newCount;
+	}
+	// Diffs are collected with three context lines, so a last hunk ending with
+	// fewer than three trailing context rows (or the no-newline marker) proves
+	// the old side ended inside the hunk — no trailing gap exists. Three rows
+	// leave EOF unknown until the pinned blob is read.
+	let trailingContext = 0;
+	for (let index = file.lines.length - 1; index >= 0 && file.lines[index].kind === "context"; index--) trailingContext++;
+	if (trailingContext >= 3) gaps.push({ oldStart: nextOld, oldEnd: Infinity, delta: nextNew - nextOld });
+	return gaps;
+}
+
+/**
+ * All lines of a blob pinned at the snapshot's HEAD commit; undefined when the
+ * blob is missing (path never existed at HEAD, or objects were pruned) or
+ * exceeds the context size cap.
+ */
+export async function readHeadBlobLines(root, head, path, options = {}) {
+	const limits = { ...CONTEXT_LIMITS, ...(options.limits ?? {}) };
+	let size;
+	try {
+		size = Number((await git(root, ["cat-file", "-s", `${head}:${path}`], options.signal)).trim());
+	} catch {
+		return undefined;
+	}
+	if (!Number.isFinite(size) || size > limits.maxBlobBytes) return undefined;
+	let blob;
+	try {
+		blob = await git(root, ["cat-file", "blob", `${head}:${path}`], options.signal);
+	} catch {
+		return undefined;
+	}
+	const lines = blob.split("\n");
+	if (lines[lines.length - 1] === "") lines.pop();
+	return lines;
+}
+
+/**
+ * Context reader serving gap lines from blobs pinned at each round's HEAD
+ * commit. Blobs are immutable, so the bounded cache can never go stale;
+ * renamed files resolve through their HEAD-side path. Concurrent requests for
+ * one blob share a single read; failed reads are not cached so a later click
+ * retries.
+ */
+export function createPinnedBlobContextReader(cacheSize = 8) {
+	const cache = new Map();
+	return async (review, file, oldStart, oldEnd) => {
+		const blobPath = file.oldPath ?? file.path;
+		const key = `${review.head}:${blobPath}`;
+		let pending = cache.get(key);
+		if (!pending) {
+			pending = readHeadBlobLines(review.root, review.head, blobPath);
+			if (cache.size >= cacheSize) cache.delete(cache.keys().next().value);
+			cache.set(key, pending);
+		}
+		const lines = await pending;
+		if (!lines) {
+			if (cache.get(key) === pending) cache.delete(key);
+			return undefined;
+		}
+		return lines.slice(oldStart - 1, oldEnd);
+	};
+}
+
 /**
  * Cheap change signal for staleness polling: HEAD, porcelain status, and the
  * lstat identity of every currently-changed path. Editing, adding, reverting,

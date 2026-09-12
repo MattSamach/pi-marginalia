@@ -995,6 +995,23 @@ try {
 			const page = await browser.newPage();
 			await page.goto(browserServer.url, { waitUntil: "domcontentloaded" });
 			assert.equal(await page.$eval('[data-review-overview]', (section) => section.hidden), false, "Agent-guided reviews should open on the overview.");
+			const staleBadgeColors = await page.evaluate(() => {
+				const warningProbe = document.createElement("span");
+				warningProbe.style.color = "var(--warning)";
+				const genericProbe = document.createElement("span");
+				genericProbe.className = "badge";
+				document.body.append(warningProbe, genericProbe);
+				const colors = {
+					badge: getComputedStyle(document.querySelector('[data-stale-badge]')).color,
+					warning: getComputedStyle(warningProbe).color,
+					generic: getComputedStyle(genericProbe).color,
+				};
+				warningProbe.remove();
+				genericProbe.remove();
+				return colors;
+			});
+			assert.equal(staleBadgeColors.badge, staleBadgeColors.warning, "The stale badge must keep its warning tint over the generic badge rule, in whichever color scheme the harness resolves.");
+			assert.notEqual(staleBadgeColors.badge, staleBadgeColors.generic, "The warning tint must stay distinguishable from generic badge grey.");
 			assert.equal(await page.$eval('details.reference-files', (details) => details.open), false, "Reference files should start collapsed.");
 			await page.waitForFunction(() => document.querySelector('[data-thread-tally]')?.hidden === false);
 			assert.match(await page.$eval('[data-thread-tally]', (section) => section.textContent), /2 open.*2 awaiting you.*0 awaiting Pi.*0 resolved/, "Seeded notes count uniformly from the start.");

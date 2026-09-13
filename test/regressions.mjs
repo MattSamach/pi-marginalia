@@ -9,6 +9,7 @@ import { applyReviewManifest, collectReviewSnapshot, computeContextGaps, compute
 import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "../shared/feedback.js";
 import { renderReviewHtml } from "../shared/render.js";
 import { renderMarkdown } from "../shared/markdown.js";
+import { computeIntraline } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
 import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS, threadsAwaitingResponse } from "../shared/threads.js";
 import { createReviewMessageQueue } from "../shared/delivery-queue.js";
@@ -894,7 +895,7 @@ try {
 	await git(contextRepo, "add", ".");
 	await git(contextRepo, "commit", "-qm", "baseline");
 	const contextEdited = [...contextBase.slice(0, 10), "inserted a", "inserted b", ...contextBase.slice(10)];
-	contextEdited[41] = "line 40 changed";
+	contextEdited[41] = "line 40 <china> & changed";
 	await writeFile(join(contextRepo, "ctx.txt"), `${contextEdited.join("\n")}\n`);
 	await git(contextRepo, "mv", "moveme.txt", "moved.txt");
 	await writeFile(join(contextRepo, "moved.txt"), `${Array.from({ length: 40 }, (_, index) => (index === 19 ? "row 20 changed" : `row ${index + 1}`)).join("\n")}\n`);
@@ -1066,6 +1067,18 @@ try {
 		await staleServer.close();
 	}
 	console.log("Staleness detection flow passed.");
+
+	assert.deepEqual(computeIntraline("const limit = 10;", "const limit = 250;"), { del: [14, 16], add: [14, 17] }, "A small replacement emphasizes only the changed token.");
+	assert.deepEqual(computeIntraline("return value", "return values"), { del: [7, 12], add: [7, 13] }, "Mid-word changes expand to whole words.");
+	assert.deepEqual(computeIntraline("if (a)", "if (a && b)"), { del: [5, 5], add: [5, 10] }, "Pure insertions emphasize only the added side.");
+	assert.equal(computeIntraline("completely different line", "nothing shared at all!!"), undefined, "Whole-line changes carry no emphasis.");
+	assert.equal(computeIntraline("same", "same"), undefined);
+	const intralineHtml = renderReviewHtml(applyReviewManifest(contextSnapshot, { files: [] }), "intraline-nonce");
+	assert.match(intralineHtml, /data-old-line="40"[\s\S]{0,300}?<span>line 40<\/span>/, "An empty del-side range renders without an emphasis span.");
+	assert.match(intralineHtml, /<span>line 40<span class="intraline"> &lt;china&gt; &amp; changed<\/span><\/span>/, "Emphasized segments escape HTML independently on both sides of the span boundary.");
+	assert.deepEqual(computeIntraline("mood \uD83D\uDE00 x", "mood \uD83D\uDE01 x"), { del: [5, 7], add: [5, 7] }, "A changed emoji emphasizes the whole surrogate pair, never half of it.");
+	assert.deepEqual(computeIntraline("pin \uD83D\uDE00", "pin \uD83E\uDE00"), { del: [4, 6], add: [4, 6] }, "A shared low surrogate retreats out of the suffix so no pair splits.");
+	assert.doesNotMatch(renderReviewHtml(applyReviewManifest(snapshot, { files: [] }), "plain-intraline"), /class="intraline"/, "Pure additions and deletions without pairs get no emphasis.");
 
 	assert.equal(renderMarkdown("Plain **bold** and *soft* text"), "<p>Plain <strong>bold</strong> and <em>soft</em> text</p>");
 	assert.equal(renderMarkdown("line one\nline two\n\nnext para"), "<p>line one<br>line two</p><p>next para</p>");

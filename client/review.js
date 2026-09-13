@@ -105,6 +105,7 @@
     // Drift is expected while Pi revises and irrelevant on superseded rounds.
     if (staleBadge) staleBadge.hidden = !stale || phase !== 'reviewing' || isSuperseded();
     applyDriftMarks();
+    syncDraftDot();
     document.querySelectorAll('[data-viewed-toggle]').forEach((box) => { box.disabled = isSuperseded(); });
     if (phaseBanner && phaseBannerText && resumeButton && gotoCurrent) {
       if (isSuperseded()) {
@@ -207,11 +208,12 @@
     navButtons.forEach((item) => item.classList.toggle('active', Number(item.dataset.fileNav) === index));
     window.scrollTo({ top: 0, behavior: 'instant' });
   };
-  const confirmDiscardDraft = (targetPath) => {
+  // Navigation never asks about drafts: an open draft survives every panel
+  // switch (its composer stays live in its section, marked in the sidebar) and
+  // persists across reloads. This confirm guards only the true destruction
+  // points — replacing the draft, sending the round, and approving.
+  const confirmDiscardDraft = () => {
     if (!draft) return true;
-    // Navigating to the file that hosts the draft abandons nothing — the
-    // composer is right there — so it must never ask.
-    if (targetPath !== undefined && targetPath === draft.file) return true;
     if (!window.confirm('Discard the unfinished diff comment?')) return false;
     cancelDraft();
     return true;
@@ -246,6 +248,17 @@
       return other && Math.max(part.start, other.start) < Math.min(part.end, other.end);
     });
   };
+  // With navigation prompt-free, an off-screen open draft announces itself
+  // through a sidebar pencil on its host file.
+  const syncDraftDot = () => {
+    // On terminal or superseded pages the composer is unreachable for good, so
+    // a pencil would point at nothing; while revising it stays — resume
+    // revives the draft.
+    const dead = phase === 'approved' || isSuperseded();
+    document.querySelectorAll('[data-draft-dot]').forEach((dot) => {
+      dot.hidden = dead || !draft || dot.dataset.draftDot !== draft.file;
+    });
+  };
   const cancelDraft = () => {
     if (!draft) return;
     highlights.delete(draft.highlightId);
@@ -254,6 +267,7 @@
     if (composer) composer.hidden = true;
     draft = undefined;
     removeDraft('selection');
+    syncDraftDot();
     window.getSelection()?.removeAllRanges();
   };
   const saveSelectionDraft = (text) => {
@@ -287,6 +301,7 @@
     // Land on the draft's file so the restored composer is visible; an
     // explicit deep link in the hash wins the navigation instead.
     if (!/(?:^#|[#&])(?:thread|loc)=/.test(window.location.hash || '')) showFile(Number(section.dataset.reviewFile));
+    syncDraftDot();
   };
   const closestCode = (node) => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('.diff-code');
   const selectedRows = (range) => {
@@ -364,6 +379,7 @@
     selection.removeAllRanges();
     textarea.focus();
     saveSelectionDraft('');
+    syncDraftDot();
     setStatus('Add feedback for the highlighted diff.');
   };
   // Lazily reveal unchanged lines around hunks from the frozen snapshot's
@@ -502,6 +518,7 @@
         threadHighlights.set(result.thread.id, draft.highlightId);
         draft = undefined;
         removeDraft('selection');
+        syncDraftDot();
         composer.hidden = true;
         textarea.value = '';
         upsertThread(result.thread);
@@ -900,11 +917,8 @@
       setStatus('Nothing awaiting you.');
       return;
     }
-    const nextIndex = direction > 0
-      ? (navIndex + 1) % awaiting.length
-      : navIndex < 0 ? awaiting.length - 1 : (navIndex - 1 + awaiting.length) % awaiting.length;
-    if (!confirmDiscardDraft(awaiting[nextIndex].file)) return;
-    navIndex = nextIndex;
+    if (direction > 0) navIndex = (navIndex + 1) % awaiting.length;
+    else navIndex = navIndex < 0 ? awaiting.length - 1 : (navIndex - 1 + awaiting.length) % awaiting.length;
     revealThread(awaiting[navIndex]);
   };
   const revealThread = (thread) => {
@@ -948,7 +962,6 @@
     const next = showingOverview
       ? (direction > 0 ? 0 : fileSections.length - 1)
       : (activeIndex + direction + fileSections.length) % fileSections.length;
-    if (!confirmDiscardDraft(fileSections[next]?.dataset.path)) return;
     showFile(Number(fileSections[next]?.dataset.reviewFile ?? next));
     const path = fileSections.find((section) => Number(section.dataset.reviewFile) === activeIndex)?.dataset.path;
     if (path) setStatus(path);
@@ -1116,10 +1129,12 @@
     const blockers = [...threads.values()].filter((thread) => thread.status === 'open').sort((left, right) => sectionIndexOf(left) - sectionIndexOf(right) || threadNumber(left) - threadNumber(right));
     if (blockers.length) {
       setStatus(blockers.length + ' thread' + (blockers.length === 1 ? '' : 's') + ' still open — resolve every thread to approve.', true);
-      if (confirmDiscardDraft(blockers[0].file)) revealThread(blockers[0]);
+      revealThread(blockers[0]);
       return;
     }
     if (!approveOverlay) return;
+    // Approval closes the session terminally; an unfinished draft dies with it.
+    if (!confirmDiscardDraft()) return;
     if (approveStale) approveStale.hidden = !stale;
     approveOverlay.hidden = false;
     approveMessage?.focus();
@@ -1151,13 +1166,11 @@
   // Navigation wiring ----------------------------------------------------------
   document.querySelector('[data-overview-nav]')?.addEventListener('click', () => {
     if (showingOverview) return;
-    if (!confirmDiscardDraft()) return;
     showOverview();
     setStatus('Discuss the change set or continue through the files.');
   });
   navButtons.forEach((button) => {
     button.addEventListener('click', () => {
-      if (!confirmDiscardDraft(reviewRoot.querySelector('[data-review-file="' + button.dataset.fileNav + '"]')?.dataset.path)) return;
       showFile(Number(button.dataset.fileNav));
       setStatus('Select changed code or reply to Pi.');
     });
@@ -1247,7 +1260,7 @@
     } else if (event.key === 'o') {
       event.preventDefault();
       if (!overviewSection) setStatus('This review has no overview.');
-      else if (!showingOverview && confirmDiscardDraft()) {
+      else if (!showingOverview) {
         showOverview();
         setStatus('Overview.');
       }
@@ -1300,7 +1313,6 @@
     if (!parts) return;
     const section = sectionForPath(parts[1]);
     if (!section) return;
-    if (!confirmDiscardDraft(section.dataset.path)) return;
     showFile(Number(section.dataset.reviewFile));
     const row = section.querySelector(parts[2] === 'L' ? 'tr[data-new-line="' + parts[3] + '"]' : 'tr[data-old-line="' + parts[3] + '"]');
     if (!row) {

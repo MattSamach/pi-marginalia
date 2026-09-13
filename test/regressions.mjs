@@ -1461,13 +1461,25 @@ try {
 			await page.waitForFunction(() => document.querySelector('[data-review-file="0"] [data-selection-composer]')?.hidden === false);
 			await page.type('[data-review-file="0"] [data-selection-feedback]', "Unfinished second comment.");
 			const secondReviewIndex = await page.$$eval('.file-sidebar > [data-file-nav]', (items) => Number(items[1].dataset.fileNav));
-			page.once("dialog", async (dialog) => { await dialog.dismiss(); });
+			const mainFlowDialogs = [];
+			const recordMainDialog = (dialog) => {
+				mainFlowDialogs.push(dialog.message());
+				dialog.dismiss().catch(() => {});
+			};
+			page.on("dialog", recordMainDialog);
 			await page.click(`[data-file-nav="${secondReviewIndex}"]`);
-			assert.equal(await page.$eval('[data-review-file="0"]', (section) => section.hidden), false, "Dismissing the draft warning must keep the current file and draft visible.");
-			page.once("dialog", async (dialog) => { await dialog.accept(); });
-			await page.click(`[data-file-nav="${secondReviewIndex}"]`);
-			assert.equal(await page.$eval(`[data-review-file="${secondReviewIndex}"]`, (section) => section.hidden), false, "Confirming draft discard should allow explicit file navigation.");
+			assert.equal(await page.$eval(`[data-review-file="${secondReviewIndex}"]`, (section) => section.hidden), false, "Navigation with an open draft proceeds without asking.");
+			assert.equal(mainFlowDialogs.length, 0, "No dialog fires for draft-crossing navigation.");
+			assert.equal(await page.$eval('[data-review-file="0"] [data-selection-composer]', (composer) => composer.hidden), false, "The draft survives the navigation in its own section.");
+			assert.equal(await page.evaluate(() => {
+				const dots = [...document.querySelectorAll("[data-draft-dot]:not([hidden])")];
+				return dots.length === 1 && dots[0].dataset.draftDot === document.querySelector('[data-review-file="0"]').dataset.path;
+			}), true, "The sidebar pencil marks the file holding the open draft.");
 			assert.equal(await page.$eval(`[data-file-nav="${secondReviewIndex}"]`, (item) => item.classList.contains("active")), true, "Regrouped primary navigation should activate by file index rather than DOM position.");
+			page.off("dialog", recordMainDialog);
+			// Clear the draft through its own Cancel so the send modal opens cleanly.
+			await page.evaluate(() => document.querySelector('[data-review-file="0"] [data-selection-composer] [data-selection-cancel]').click());
+			await page.waitForFunction(() => document.querySelectorAll("[data-draft-dot]:not([hidden])").length === 0, { polling: 100 });
 			// The send-round confirmation is a keyboard-first modal, not a native
 			// dialog: Enter confirms (the confirm button holds focus), Esc cancels.
 			await page.click("[data-finish]");
@@ -1712,9 +1724,9 @@ try {
 				});
 				assert.equal(await plainPage.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("picr:")).length), 0, "Clearing a draft removes its stored copy.");
 
-				// A restored selection draft must be reachable: reload lands on its
-				// file with the composer visible, and navigating to that file never
-				// asks to discard — only navigating away does.
+				// Navigation is prompt-free with a draft open: it survives every panel
+				// switch, announced by a sidebar pencil on its host file. Only true
+				// destruction points ask — replacement, send-round, approval.
 				const draftDialogs = [];
 				const recordDialog = (dialog) => {
 					draftDialogs.push(dialog.message());
@@ -1745,17 +1757,59 @@ try {
 					const composer = document.querySelector("[data-selection-composer]:not([hidden])");
 					return composer.offsetParent !== null && composer.querySelector("[data-selection-feedback]").value;
 				}), "trapped draft", "The restored composer is visible with its text.");
-				await plainPage.evaluate(() => document.querySelector(`[data-file-nav="${document.querySelector(".review-file.active").dataset.reviewFile}"]`).click());
-				assert.equal(draftDialogs.length, 0, "Navigating to the draft's own file must not ask to discard.");
-				assert.equal(await plainPage.evaluate(() => !!document.querySelector("[data-selection-composer]:not([hidden])")), true, "The draft survives same-file navigation.");
+				assert.equal(await plainPage.evaluate((path) => {
+					const visible = [...document.querySelectorAll("[data-draft-dot]:not([hidden])")];
+					return visible.length === 1 && visible[0].dataset.draftDot === path;
+				}, draftFilePath), true, "The sidebar pencil marks exactly the draft's host file.");
+				// Negative sweep: every navigation surface, zero dialogs, draft intact.
 				await plainPage.keyboard.press("]");
-				assert.equal(draftDialogs.length, 1, "Navigating away still asks first.");
-				assert.equal(await plainPage.evaluate(() => document.querySelector(".review-file.active")?.dataset.path), draftFilePath, "Dismissing the prompt keeps the draft's file active.");
+				await plainPage.keyboard.press("[");
+				await plainPage.keyboard.press("o");
+				await plainPage.evaluate(() => document.querySelector('[data-file-nav="0"]').click());
+				await plainPage.evaluate((path) => {
+					window.location.hash = "#loc=" + encodeURIComponent(path) + ":L1";
+				}, draftFilePath);
+				await plainPage.waitForFunction((path) => document.querySelector(".review-file.active")?.dataset.path === path, { polling: 100 }, draftFilePath);
+				assert.equal(draftDialogs.length, 0, "No navigation surface asks about an open draft.");
+				assert.equal(await plainPage.evaluate(() => {
+					const composer = document.querySelector("[data-selection-composer]:not([hidden])");
+					return composer && composer.querySelector("[data-selection-feedback]").value;
+				}), "trapped draft", "The draft survives the whole sweep untouched.");
+				assert.equal(await plainPage.evaluate(() => Object.keys(localStorage).some((key) => key.endsWith(":selection"))), true, "The stored draft survives navigation.");
+				// Destruction points still ask: replacing the draft with a new selection…
+				await plainPage.keyboard.press("]");
+				await plainPage.evaluate(() => {
+					const rowSelector = "tr.diff-add .diff-code span, tr.diff-del .diff-code span, tr.diff-context .diff-code span";
+					const code = document.querySelector(".review-file.active").querySelector(rowSelector);
+					const range = document.createRange();
+					range.selectNodeContents(code);
+					const selection = window.getSelection();
+					selection.removeAllRanges();
+					selection.addRange(range);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await new Promise((resolvePromise, rejectPromise) => {
+					const deadline = Date.now() + 5_000;
+					const tick = () => (draftDialogs.length >= 1 ? resolvePromise() : Date.now() > deadline ? rejectPromise(new Error("replacement dialog never fired")) : setTimeout(tick, 50));
+					tick();
+				});
+				assert.equal(draftDialogs.length, 1, "Replacing the draft with a new selection still asks first.");
+				assert.equal(await plainPage.evaluate(() => Object.keys(localStorage).some((key) => key.endsWith(":selection"))), true, "Dismissing the replacement keeps the draft.");
+				// …and so does sending the round.
+				await plainPage.click("[data-finish]");
+				assert.equal(draftDialogs.length, 2, "Sending the round with an open draft asks first.");
+				assert.equal(await plainPage.evaluate(() => document.querySelector("[data-finish-overlay]")?.hidden), true, "Dismissing the send prompt keeps the modal closed.");
 				plainPage.off("dialog", recordDialog);
-				plainPage.once("dialog", (dialog) => dialog.accept());
-				await plainPage.keyboard.press("]");
+				// The composer's own Cancel destroys without asking — it IS the answer.
+				await plainPage.evaluate((path) => {
+					const section = [...document.querySelectorAll("[data-review-file]")].find((candidate) => candidate.dataset.path === path);
+					document.querySelector(`[data-file-nav="${section.dataset.reviewFile}"]`).click();
+				}, draftFilePath);
+				await plainPage.waitForFunction((path) => document.querySelector(".review-file.active")?.dataset.path === path, { polling: 100 }, draftFilePath);
+				await plainPage.evaluate(() => document.querySelector("[data-selection-composer]:not([hidden]) [data-selection-cancel]").click());
 				await plainPage.waitForFunction(() => !document.querySelector("[data-selection-composer]:not([hidden])"), { polling: 100 });
-				assert.equal(await plainPage.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("picr:")).length), 0, "Accepting the discard clears the stored draft.");
+				assert.equal(await plainPage.evaluate(() => document.querySelectorAll("[data-draft-dot]:not([hidden])").length), 0, "Cancelling clears the sidebar pencil.");
+				assert.equal(await plainPage.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("picr:")).length), 0, "Cancelling clears the stored draft.");
 
 				const navHomePath = await plainPage.$eval(".review-file.active", (section) => section.dataset.path);
 				await plainPage.keyboard.press("]");
@@ -1824,7 +1878,38 @@ try {
 				assert.equal(await plainPage.$eval("[data-approve-overlay]", (overlay) => overlay.hidden), true, "The confirmation never opens while threads block.");
 				await plainPage.click(".thread-card.queued [data-thread-resolve]");
 				await plainPage.waitForFunction(() => document.querySelector("[data-approve]").textContent === "Approve");
+				// Approval is terminal, so it is a draft destruction point: with an
+				// open draft the gate asks first; dismissal keeps everything.
+				await plainPage.evaluate(() => {
+					const rowSelector = "tr.diff-add .diff-code span, tr.diff-del .diff-code span, tr.diff-context .diff-code span";
+					const sections = [...document.querySelectorAll("[data-review-file]")].filter((candidate) => candidate.querySelector(rowSelector));
+					const section = sections[sections.length - 1];
+					document.querySelector(`[data-file-nav="${section.dataset.reviewFile}"]`).click();
+					const code = [...section.querySelectorAll(rowSelector)].reverse().find((span) => span.textContent.trim());
+					const range = document.createRange();
+					range.selectNodeContents(code);
+					const selection = window.getSelection();
+					selection.removeAllRanges();
+					selection.addRange(range);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await plainPage.waitForFunction(() => document.querySelector("[data-selection-composer]:not([hidden])"), { polling: 100 });
+				await plainPage.type("[data-selection-composer]:not([hidden]) [data-selection-feedback]", "draft at the gate");
+				const approveGateDialogs = [];
+				const recordApproveDialog = (dialog) => {
+					approveGateDialogs.push(dialog.message());
+					dialog.dismiss().catch(() => {});
+				};
+				plainPage.on("dialog", recordApproveDialog);
 				await plainPage.click("[data-approve]");
+				assert.equal(approveGateDialogs.length, 1, "Approving with an open draft asks exactly once.");
+				assert.equal(await plainPage.$eval("[data-approve-overlay]", (overlay) => overlay.hidden), true, "Dismissing the draft gate keeps the approve overlay closed.");
+				assert.equal(await plainPage.evaluate(() => !!document.querySelector("[data-selection-composer]:not([hidden])") && Object.keys(localStorage).some((key) => key.endsWith(":selection")) && document.querySelectorAll("[data-draft-dot]:not([hidden])").length === 1), true, "Dismissal keeps the draft, its storage, and its pencil.");
+				plainPage.off("dialog", recordApproveDialog);
+				plainPage.once("dialog", (dialog) => dialog.accept());
+				await plainPage.click("[data-approve]");
+				await plainPage.waitForFunction(() => document.querySelector("[data-approve-overlay]")?.hidden === false, { polling: 100 });
+				assert.equal(await plainPage.evaluate(() => !document.querySelector("[data-selection-composer]:not([hidden])") && !Object.keys(localStorage).some((key) => key.endsWith(":selection")) && document.querySelectorAll("[data-draft-dot]:not([hidden])").length === 0), true, "Accepting the gate clears draft, storage, and pencil before the overlay opens.");
 				assert.equal(await plainPage.$eval("[data-approve-overlay]", (overlay) => overlay.hidden), false, "A clean review opens the confirmation.");
 				assert.equal(await plainPage.$eval("[data-approve-message]", (textarea) => textarea.value), plainReview.title, "Without a proposal the commit message falls back to the review title.");
 				await plainPage.$eval("[data-approve-message]", (textarea) => { textarea.value = "Plain approved unit"; });

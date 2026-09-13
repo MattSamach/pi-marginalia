@@ -45,6 +45,7 @@ Everything that needs your attention is one uniform queue: every Pi commentary n
 14. Click **Send round to Pi** to hand Pi one summary of the pass. It lists open threads you engaged with; your untouched notes are never echoed back to Pi.
 15. Link to a line: click any line number to put a `#loc=file:L42` permalink in the address bar (old-side lines use `O`); opening one navigates to the file and rings the row — with an honest hint when the target sits in an unexpanded gap. Focused threads already permalink via `#thread=`.
 16. Drafts survive reloads: unfinished comments — selection drafts (anchor and quote included), thread and note replies, overview feedback — persist in the browser's storage keyed by the snapshot, restore when the page reopens, and clear the moment they post.
+17. Drafts never block navigation: switch files, jump threads, or follow permalinks freely — an open selection draft stays live in its section, marked by a ✎ pencil on its sidebar entry. You are asked to discard only where the draft would actually die: replacing it with a new selection, sending the round, or approving.
 
 While Pi is busy, posts queue and are delivered together the moment Pi settles, so a slow turn never blocks you; Pi then answers each queued thread in one pass.
 

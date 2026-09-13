@@ -2155,6 +2155,18 @@ try {
 				assert.match(await planPage.$eval('[data-review-file="1"]', (section) => section.textContent), /Made it measurable\./, "Carried resolutions render in their anchored section.");
 				const planIdentical = planServer.addRound(buildPlanReview({ title: "Test Plan", markdown: planMarkdown.replace("- fast", "- blazingly fast") }), planRound2.id);
 				assert.equal(planIdentical.identical, true, "An unchanged plan reopens the same round instead of advancing.");
+				// Round 3: a renamed heading is a new slug — marked changed via the
+				// missing-key path, the old section leaves the outline, and carried
+				// threads re-anchor into the differently-slugged document.
+				const planRound3 = buildPlanReview({ title: "Test Plan", markdown: planMarkdown.replace("- fast", "- blazingly fast").replace("## Steps", "## Rollout") });
+				assert.equal(planServer.addRound(planRound3, planRound2.id, resolvePlanResponses(planRound3, [
+					{ respondsTo: planPosts[0].id, resolution: "needs-discussion", body: "Re-anchored across the rename.", file: "Goals <b>", startLine: 4, endLine: 4 },
+					{ respondsTo: planPosts[1].id, resolution: "needs-discussion", body: "Carried again.", file: "goals-b" },
+				])).round, 3, "A renamed heading still advances the round with re-anchored threads.");
+				await planPage.waitForFunction(() => document.body.dataset.round === "3", { polling: 100 });
+				assert.equal(await planPage.evaluate(() => JSON.stringify([...document.querySelectorAll(".change-mark")].map((mark) => mark.closest("[data-file-nav]").querySelector("span:nth-child(2)").textContent))), '["Rollout"]', "Only the renamed section carries the change mark.");
+				assert.equal(await planPage.evaluate(() => [...document.querySelectorAll("[data-review-file]")].some((section) => section.dataset.path === "steps")), false, "The old slug leaves the document.");
+				assert.equal(await planPage.evaluate(() => document.querySelectorAll("[data-carried-thread]").length), 2, "Carried threads survive the rename.");
 				// Approval: blocked while threads stay open, then terminal with the note.
 				await planPage.waitForFunction(() => document.querySelector("[data-approve]") && getComputedStyle(document.querySelector("[data-approve]")).display !== "none", { polling: 100 });
 				await planPage.click("[data-approve]");
@@ -2173,7 +2185,7 @@ try {
 				});
 				await planPage.click("[data-approve-confirm]");
 				await planPage.waitForFunction(() => document.body.classList.contains("locked"), { polling: 100 });
-				assert.deepEqual(planApprovals, [{ round: 2, message: "Plan approved — proceed as written.", staleNow: false }], "Plan approval hands the reviewer's note to Pi.");
+				assert.deepEqual(planApprovals, [{ round: 3, message: "Plan approved — proceed as written.", staleNow: false }], "Plan approval hands the reviewer's note to Pi.");
 				await planPage.close();
 			} finally {
 				await planServer.close();

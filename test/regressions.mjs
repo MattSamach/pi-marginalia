@@ -1783,6 +1783,20 @@ try {
 				});
 				await ctxPage.waitForFunction(() => document.querySelector("[data-global-status]").textContent.includes("read-only"));
 				assert.equal(await ctxPage.$eval("[data-selection-composer]", (composer) => composer.hidden), true, "Expanded context never opens the comment composer.");
+				await ctxPage.$eval('.review-file.active tr[data-new-line="42"] .line-number', (cell) => cell.click());
+				assert.match(await ctxPage.evaluate(() => window.location.hash), /loc=ctx\.txt%3AL42|loc=ctx\.txt:L42/, "Clicking a line number writes a shareable location hash.");
+				assert.equal(await ctxPage.$eval('.review-file.active tr[data-new-line="42"]', (row) => row.classList.contains("nav-cursor")), true, "The linked line gets the focus ring.");
+				await ctxPage.goto(`${new URL(ctxServer.url).origin}/#loc=${encodeURIComponent("moved.txt")}:L20`, { waitUntil: "domcontentloaded" });
+				await ctxPage.waitForFunction(() => document.querySelector('[data-review-file].active')?.dataset.path === "moved.txt");
+				await ctxPage.waitForFunction(() => document.querySelector('tr[data-new-line="20"].nav-cursor'), {});
+				const coldPage = await browser.newPage();
+				await coldPage.goto(`${new URL(ctxServer.url).origin}/#loc=${encodeURIComponent("moved.txt")}:L20`, { waitUntil: "domcontentloaded" });
+				await coldPage.waitForFunction(() => document.querySelector("[data-review-file].active")?.dataset.path === "moved.txt" && document.querySelector('tr[data-new-line="20"].nav-cursor'), {});
+				await coldPage.close();
+				await ctxPage.goto(`${new URL(ctxServer.url).origin}/#loc=${encodeURIComponent("moved.txt")}:O5`, { waitUntil: "domcontentloaded" });
+				await ctxPage.waitForFunction(() => document.querySelector("[data-global-status]").textContent.includes("unexpanded gap"), {});
+				await ctxPage.goto(`${new URL(ctxServer.url).origin}/`, { waitUntil: "domcontentloaded" });
+				await ctxPage.waitForFunction(() => document.querySelector(".review-file.active"));
 				await ctxPage.evaluate(() => {
 					const code = document.querySelector(".review-file.active tr.diff-add .diff-code span");
 					const range = document.createRange();

@@ -52,6 +52,13 @@
   }
 
   const threads = new Map();
+  // Hunk cursor: j/k and line permalinks ring a row; any file/overview switch
+  // clears it so a stale ring never lingers on a hidden section.
+  let hunkCursor;
+  const clearHunkCursor = () => {
+    hunkCursor?.classList.remove('nav-cursor');
+    hunkCursor = undefined;
+  };
   const highlights = new Map();
   let nextHighlightId = 1;
   let draft;
@@ -161,6 +168,7 @@
   // Navigation ---------------------------------------------------------------
   const showOverview = () => {
     if (!overviewSection) return;
+    clearHunkCursor();
     showingOverview = true;
     overviewSection.hidden = false;
     fileSections.forEach((section) => { section.hidden = true; section.classList.remove('active'); });
@@ -169,6 +177,7 @@
     window.scrollTo({ top: 0, behavior: 'instant' });
   };
   const showFile = (index) => {
+    clearHunkCursor();
     showingOverview = false;
     if (overviewSection) overviewSection.hidden = true;
     document.querySelector('[data-overview-nav]')?.classList.remove('active');
@@ -888,12 +897,7 @@
     }
     flashTarget(target);
   };
-  // Hunk cursor: j/k walk the active file's hunks with a visible focus ring.
-  let hunkCursor;
-  const clearHunkCursor = () => {
-    hunkCursor?.classList.remove('nav-cursor');
-    hunkCursor = undefined;
-  };
+
   const stepHunk = (direction) => {
     const section = activeFile();
     if (!section) {
@@ -1258,12 +1262,61 @@
     currentThreadId = match[1];
     flashTarget(target);
   };
-  window.addEventListener('hashchange', focusHashThread);
+  // Line permalinks: #loc=<path>:L<newLine> or :O<oldLine>. Clicking a line
+  // number writes one; loading one navigates to the file and rings the row.
+  const focusHashLocation = () => {
+    const match = /(?:^#|[#&])loc=([^&]+)/.exec(window.location.hash || '');
+    if (!match) return;
+    let spec;
+    try {
+      spec = decodeURIComponent(match[1]);
+    } catch {
+      return;
+    }
+    const parts = /^(.*):(L|O)(\d+)$/.exec(spec);
+    if (!parts) return;
+    const section = sectionForPath(parts[1]);
+    if (!section) return;
+    if (!confirmDiscardDraft()) return;
+    showFile(Number(section.dataset.reviewFile));
+    const row = section.querySelector(parts[2] === 'L' ? 'tr[data-new-line="' + parts[3] + '"]' : 'tr[data-old-line="' + parts[3] + '"]');
+    if (!row) {
+      setStatus('That line is not visible in this diff — it may sit in an unexpanded gap.', true);
+      return;
+    }
+    clearHunkCursor();
+    hunkCursor = row;
+    row.classList.add('nav-cursor');
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+  const routeHash = () => {
+    focusHashThread();
+    focusHashLocation();
+  };
+  reviewRoot.addEventListener('click', (event) => {
+    const cell = event.target.closest('td.line-number');
+    if (!cell) return;
+    const row = cell.closest('tr.diff-line');
+    const section = row?.closest('[data-review-file]');
+    if (!row || !section) return;
+    const preferOld = cell === row.cells[0];
+    const side = preferOld && row.dataset.oldLine ? 'O' : row.dataset.newLine ? 'L' : row.dataset.oldLine ? 'O' : undefined;
+    const line = side === 'O' ? row.dataset.oldLine : row.dataset.newLine;
+    if (!side || !line) return;
+    try {
+      window.history.replaceState(null, '', '#loc=' + encodeURIComponent(section.dataset.path) + ':' + side + line);
+    } catch {}
+    clearHunkCursor();
+    hunkCursor = row;
+    row.classList.add('nav-cursor');
+    setStatus('Line link is in the address bar — copy to share.');
+  });
+  window.addEventListener('hashchange', routeHash);
   let deepLinked = false;
   const applyDeepLink = () => {
     if (deepLinked) return;
     deepLinked = true;
-    focusHashThread();
+    routeHash();
   };
   let draftsRestored = false;
   const restoreDrafts = () => {

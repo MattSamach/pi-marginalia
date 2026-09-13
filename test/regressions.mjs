@@ -1069,6 +1069,9 @@ try {
 		assert.equal((await fetch(`${origin}/__pi_code_review_resume__`, { method: "POST", headers, body: "{}" })).status, 200);
 		assert.equal(await staleServer.checkStaleness(), true, "Resume re-enables drift detection.");
 		assert.equal(staleServer.addRound({ ...ordered, id: altId(ordered.id, 60) }, ordered.id).round, 2);
+		const survivedQuiet = staleServer.threads().find((thread) => thread.id === revisingThread.id);
+		assert.equal(survivedQuiet?.queued, true, "A revising-window quiet thread rides the round advance still queued.");
+		assert.equal(survivedQuiet?.turns[0]?.body, "Queued while Pi revises.", "Its content survives the carry.");
 		assert.equal(staleServer.isStale(), false, "A new round resets staleness — its snapshot was just collected from this tree.");
 		probeFingerprint = "fp-5";
 		assert.equal(await staleServer.checkStaleness(), true, "Drift is measured against the current round's snapshot.");

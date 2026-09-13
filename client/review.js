@@ -175,8 +175,8 @@
   };
   const postedStatus = (result, message) => {
     if (result.deliveryFailed) setStatus('Posted, but delivery to Pi failed; it stays in this thread and the pass summary.', true);
-    else if (result.queued) setStatus('Queued — delivered when you send the round.');
-    else if (result.pending) setStatus('Pending — delivered with the round, a live reply, or Send now.');
+    else if (result.queued) setStatus(quietOnly() ? 'Queued — arrives with the next round.' : 'Queued — delivered when you send the round.');
+    else if (result.pending) setStatus(quietOnly() ? 'Pending — arrives with the next round.' : 'Pending — delivered with the round, a live reply, or Send now.');
     else if (result.escalated) setStatus('Thread sent to Pi, including its pending messages.');
     else setStatus(message);
   };

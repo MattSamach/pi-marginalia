@@ -61,6 +61,10 @@ Carried threads keep their ids and full conversation history, count as awaiting 
 
 If files change during the review, the pass message is marked `stale="true"`. The page never remaps or refreshes annotations; iteration happens in whole rounds.
 
+## Plan reviews
+
+`open_plan_review` runs the same review machinery over a rendered **markdown plan** instead of a diff — the planning-mode counterpart to code review. The document is sliced into sections at its shallowest heading level; the sidebar becomes that outline. The reviewer selects rendered text to open threads (anchored to absolute source lines of the plan markdown), replies to Pi's per-section commentary, and sends rounds exactly as in code review. Revisions arrive as whole new rounds via `previousRoundId`; the sidebar marks the sections whose content changed, and superseded rounds stay in the archive. Approval carries a reviewer-edited **approval note** (`plan-review-approved`) and closes the session; it deliberately does not prescribe a next step — plans need not lead to code. Wire messages use `plan-review-*` root tags. Plans have no git, staleness, viewed checklist, or expandable context; drafts, permalinks (`#loc=section-slug:L42`), keyboard navigation (`j`/`k` walk rendered blocks), and quiet-add batching all work unchanged.
+
 ## Messages delivered to Pi
 
 Each posted comment or reply arrives as one focused XML message — never the diff or manifest:

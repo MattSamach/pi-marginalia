@@ -83,11 +83,28 @@
   const approveMessage = document.querySelector('[data-approve-message]');
   const approveStale = document.querySelector('[data-approve-stale]');
   let stale = false;
+  const staleBadgeBaseTitle = staleBadge?.title ?? '';
+  // Amber sidebar dots on the files whose reviewed content drifted; paths
+  // outside this review (files that joined the changeset) surface through the
+  // badge tooltip, which lists every drifted path.
+  let lastDriftPaths = [];
+  const applyDriftMarks = (paths) => {
+    if (paths !== undefined) lastDriftPaths = Array.isArray(paths) ? paths : [];
+    // Marks obey the same suppression as the badge: drift is only signal while
+    // this page shows the current round in the reviewing phase.
+    const suppressed = !stale || phase !== 'reviewing' || isSuperseded();
+    const drifted = new Set(suppressed ? [] : lastDriftPaths);
+    document.querySelectorAll('[data-drift-mark]').forEach((mark) => {
+      mark.hidden = !drifted.has(mark.dataset.driftMark);
+    });
+    if (staleBadge) staleBadge.title = drifted.size ? staleBadgeBaseTitle + ' Changed: ' + [...drifted].join(', ') : staleBadgeBaseTitle;
+  };
 
   const applySessionState = () => {
     document.body.classList.toggle('locked', isLocked());
     // Drift is expected while Pi revises and irrelevant on superseded rounds.
     if (staleBadge) staleBadge.hidden = !stale || phase !== 'reviewing' || isSuperseded();
+    applyDriftMarks();
     document.querySelectorAll('[data-viewed-toggle]').forEach((box) => { box.disabled = isSuperseded(); });
     if (phaseBanner && phaseBannerText && resumeButton && gotoCurrent) {
       if (isSuperseded()) {
@@ -1365,6 +1382,7 @@
     currentRound = data.currentRound;
     phase = data.phase;
     stale = Boolean(data.stale);
+    applyDriftMarks(data.driftPaths);
     applySessionState();
     threads.clear();
     for (const thread of data.threads) threads.set(thread.id, thread);
@@ -1406,8 +1424,11 @@
     for (const path of data.viewedFiles) viewedFiles.add(path);
     applyViewed();
   });
+
   events.addEventListener('staleness', (event) => {
-    stale = Boolean(JSON.parse(event.data).stale);
+    const data = JSON.parse(event.data);
+    stale = Boolean(data.stale);
+    applyDriftMarks(data.driftPaths);
     applySessionState();
   });
   events.addEventListener('phase', (event) => {

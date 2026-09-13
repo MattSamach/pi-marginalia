@@ -458,6 +458,26 @@ export async function currentSnapshotId(cwd, options = {}) {
 	}
 }
 
+/** Stable identity of one file's reviewed content, comparable across snapshots. */
+export function reviewFileDriftKey(file) {
+	// contentSha256 tracks the true diff content even where the rendering is
+	// capped (binary markers, truncation, omitted lines), so a content change
+	// always moves the key and render-layer capping never does.
+	const identity = [file.status ?? "", file.oldPath ?? "", file.binary === true, file.contentSha256 ?? ""];
+	return createHash("sha256").update(JSON.stringify(identity)).digest("hex").slice(0, 16);
+}
+
+/** Snapshot id plus per-file drift keys for the worktree right now; empty when no changes exist against HEAD. */
+export async function currentSnapshotProbe(cwd, options = {}) {
+	try {
+		const snapshot = await collectReviewSnapshot(cwd, options);
+		return { id: snapshot.id, files: snapshot.files.map((file) => ({ path: file.path, key: reviewFileDriftKey(file) })) };
+	} catch (error) {
+		if (error instanceof Error && error.message.startsWith("No staged")) return { id: "", files: [] };
+		throw error;
+	}
+}
+
 function assertString(value, label, allowEmpty = false) {
 	if (typeof value !== "string" || (!allowEmpty && !value.trim()) || value.length > REVIEW_LIMITS.maxManifestString) {
 		throw new Error(`${label} must be a non-empty string of at most ${REVIEW_LIMITS.maxManifestString} characters.`);

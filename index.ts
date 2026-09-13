@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { spawn } from "node:child_process";
-import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint, createPinnedBlobContextReader, currentSnapshotId } from "./shared/git-review.js";
+import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint, createPinnedBlobContextReader, currentSnapshotId, currentSnapshotProbe } from "./shared/git-review.js";
 import { createReviewMessageQueue } from "./shared/delivery-queue.js";
 import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "./shared/feedback.js";
 import { createCodeReviewServer } from "./shared/server.js";
@@ -182,7 +182,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			},
 			staleness: {
 				fingerprint: () => computeWorktreeFingerprint(review.root),
-				snapshotId: () => currentSnapshotId(review.root),
+				snapshot: () => currentSnapshotProbe(review.root),
 			},
 			onApprove: async (round: ReviewRound, message: string, staleNow: boolean) => {
 				const queued = queue.post(formatReviewApprovedXml(round.review, round.number, message, staleNow), ctx.isIdle());

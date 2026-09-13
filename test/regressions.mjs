@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import puppeteer from "puppeteer-core";
-import { applyReviewManifest, collectReviewSnapshot, computeContextGaps, computeWorktreeFingerprint, createPinnedBlobContextReader, currentSnapshotId, parseUnifiedPatch, readHeadBlobLines, REVIEW_LIMITS } from "../shared/git-review.js";
+import { applyReviewManifest, collectReviewSnapshot, computeContextGaps, computeWorktreeFingerprint, createPinnedBlobContextReader, currentSnapshotId, currentSnapshotProbe, parseUnifiedPatch, readHeadBlobLines, REVIEW_LIMITS, reviewFileDriftKey } from "../shared/git-review.js";
 import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "../shared/feedback.js";
 import { renderReviewHtml } from "../shared/render.js";
 import { renderMarkdown } from "../shared/markdown.js";
@@ -109,6 +109,20 @@ try {
 	assert.equal(ordered.overview.intent, "Make local code review faster before opening a pull request.");
 	assert.equal(ordered.files.find((file) => file.path === "unstaged.txt")?.reviewMode, "reference", "Pi should be able to classify textual artifacts as reference files.");
 	assert.equal(ordered.files.find((file) => file.path === "binary.dat")?.reviewMode, "reference", "Binary files should be reference files automatically.");
+
+	// Drift keys must agree across the two layers that compute them: the frozen
+	// round's manifest-normalized files and a fresh worktree probe of the same
+	// tree. Divergence here would fabricate or mask per-file drift.
+	const driftProbe = await currentSnapshotProbe(fixture);
+	assert.equal(driftProbe.id, ordered.id, "An untouched worktree probes to the frozen snapshot id.");
+	for (const file of ordered.files) {
+		const probed = driftProbe.files.find((candidate) => candidate.path === file.path);
+		assert.ok(probed, `The probe must cover ${file.path}.`);
+		assert.equal(reviewFileDriftKey(file), probed.key, `Drift keys must agree across manifest and probe for ${file.path}.`);
+	}
+	const binaryFile = ordered.files.find((file) => file.path === "binary.dat");
+	assert.notEqual(reviewFileDriftKey({ ...binaryFile, contentSha256: "changed" }), reviewFileDriftKey(binaryFile), "A content change moves the drift key even when the rendering is identical.");
+	assert.equal(reviewFileDriftKey({ ...binaryFile, omitted: true, lines: [] }), reviewFileDriftKey(binaryFile), "Render-layer capping must not move a file's drift key.");
 	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "Too sparse", changes: ["Only one"], validation: ["Checked"] }, files: [] }), /changes must contain 2 to 4 entries/);
 	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "a ".repeat(240), changes: ["a ".repeat(240), "a ".repeat(240)], validation: ["seven eight"] }, files: [] }), /at most 500 words/);
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "../secret", summary: "bad" }] }), /not changed against HEAD/);
@@ -975,6 +989,8 @@ try {
 
 	let probeFingerprint = "fp-1";
 	let probeSnapshotId = ordered.id;
+	const cleanProbeFiles = () => ordered.files.map((file) => ({ path: file.path, key: reviewFileDriftKey(file) }));
+	let probeFiles = cleanProbeFiles();
 	let fullChecks = 0;
 	let failNextFull = false;
 	let fingerprintGate;
@@ -986,13 +1002,13 @@ try {
 				if (fingerprintGate) await fingerprintGate;
 				return probeFingerprint;
 			},
-			snapshotId: async () => {
+			snapshot: async () => {
 				if (failNextFull) {
 					failNextFull = false;
 					throw new Error("probe boom");
 				}
 				fullChecks += 1;
-				return probeSnapshotId;
+				return { id: probeSnapshotId, files: probeFiles };
 			},
 		},
 	});
@@ -1015,19 +1031,25 @@ try {
 			}
 		};
 		await readUntil("event: init");
-		assert.match(sseBuffer, /"stale":false/, "The init payload carries the staleness verdict.");
+		assert.match(sseBuffer, /"stale":false,"driftPaths":\[\]/, "The init payload carries the staleness verdict and drift paths.");
 		assert.equal(await staleServer.checkStaleness(), false, "A matching snapshot id reads clean.");
 		assert.equal(fullChecks, 1);
 		assert.equal(await staleServer.checkStaleness(), false);
 		assert.equal(fullChecks, 1, "An unchanged cheap fingerprint gates the full re-collection.");
 		probeFingerprint = "fp-2";
 		probeSnapshotId = "drifted";
+		probeFiles = [...cleanProbeFiles().slice(1), { path: ordered.files[0].path, key: "edited" }, { path: "brand-new.txt", key: "joined" }];
 		assert.equal(await staleServer.checkStaleness(), true, "A drifted worktree marks the round stale.");
 		await readUntil('"stale":true');
+		const driftMatch = /event: staleness\ndata: \{"stale":true,"driftPaths":\[([^\]]*)\]\}/.exec(sseBuffer);
+		assert.ok(driftMatch, "The staleness event carries drift paths.");
+		assert.deepEqual(JSON.parse(`[${driftMatch[1]}]`), ["brand-new.txt", ordered.files[0].path].sort(), "The staleness event names exactly the drifted paths, including files that joined the changeset.");
 		probeFingerprint = "fp-3";
 		probeSnapshotId = ordered.id;
+		probeFiles = cleanProbeFiles();
 		assert.equal(await staleServer.checkStaleness(), false, "The badge clears when the tree returns.");
-		await readUntil('"stale":false');
+		await readUntil('event: staleness\ndata: {"stale":false');
+		assert.match(sseBuffer, /event: staleness\ndata: \{"stale":false,"driftPaths":\[\]\}/, "A clean verdict clears the drift paths.");
 		probeFingerprint = "fp-4";
 		probeSnapshotId = "drifted-again";
 		assert.equal((await fetch(`${origin}/__pi_code_review_finish__`, { method: "POST", headers, body: "{}" })).status, 200);
@@ -1124,7 +1146,7 @@ try {
 			}
 			approvals.push({ round: round.number, message, staleNow });
 		},
-		staleness: { fingerprint: async () => approveFingerprint, snapshotId: async () => approveSnapshotId },
+		staleness: { fingerprint: async () => approveFingerprint, snapshot: async () => ({ id: approveSnapshotId, files: [] }) },
 	});
 	try {
 		const origin = new URL(approveServer.url).origin;
@@ -1903,6 +1925,57 @@ try {
 				await ctxPage.close();
 			} finally {
 				await ctxServer.close();
+			}
+
+			// Per-file drift marks: the staleness event lights amber dots on exactly
+			// the drifted sidebar entries and lists every path in the badge tooltip.
+			let driftProbeId = altId(ordered.id, 70);
+			let driftProbeFiles = ordered.files.map((file) => ({ path: file.path, key: reviewFileDriftKey(file) }));
+			let driftProbeFingerprint = "drift-fp-1";
+			const driftServer = await createCodeReviewServer({ ...ordered, id: altId(ordered.id, 70) }, {
+				onThreadPost: async () => {},
+				onFinishPass: async () => ({ stale: false }),
+				staleness: {
+					fingerprint: async () => driftProbeFingerprint,
+					snapshot: async () => ({ id: driftProbeId, files: driftProbeFiles }),
+				},
+			});
+			try {
+				const driftPage = await browser.newPage();
+				await driftPage.goto(driftServer.url, { waitUntil: "domcontentloaded" });
+				await driftPage.waitForFunction(() => document.querySelector("[data-drift-mark]"), {});
+				assert.equal(await driftPage.evaluate(() => document.querySelectorAll("[data-drift-mark]:not([hidden])").length), 0, "A clean worktree shows no drift marks.");
+				const driftedPath = ordered.files[0].path;
+				driftProbeFingerprint = "drift-fp-2";
+				driftProbeId = "drifted";
+				driftProbeFiles = [...driftProbeFiles.slice(1), { path: driftedPath, key: "edited" }, { path: "joined-later.txt", key: "new" }];
+				await driftServer.checkStaleness();
+				await driftPage.waitForFunction((path) => {
+					const marks = [...document.querySelectorAll("[data-drift-mark]:not([hidden])")];
+					return marks.length === 1 && marks[0].dataset.driftMark === path;
+				}, { polling: 100 }, driftedPath);
+				assert.equal(await driftPage.$eval("[data-stale-badge]", (badge) => badge.hidden), false, "Drift still raises the global badge.");
+				assert.match(await driftPage.$eval("[data-stale-badge]", (badge) => badge.title), /Changed: joined-later\.txt|Changed: .*joined-later\.txt/, "The badge tooltip lists drifted paths outside this review too.");
+				// Marks obey the badge's suppression: finishing the round flips the
+				// phase to revising, where drift is expected and must go quiet.
+				await driftPage.click("[data-finish]");
+				await driftPage.waitForFunction(() => document.querySelector("[data-finish-overlay]")?.hidden === false, { polling: 100 });
+				await driftPage.click("[data-finish-confirm]");
+				await driftPage.waitForFunction(() => document.body.dataset.phase === "revising" || document.querySelector("[data-resume]")?.offsetParent, { polling: 100 });
+				await driftPage.waitForFunction(() => document.querySelectorAll("[data-drift-mark]:not([hidden])").length === 0, { polling: 100 });
+				assert.equal(await driftPage.$eval("[data-stale-badge]", (badge) => badge.hidden), true, "The badge is suppressed while Pi revises — and the marks with it.");
+				await driftPage.waitForFunction(() => document.querySelector("[data-resume]")?.offsetParent, { polling: 100 });
+				await driftPage.click("[data-resume]");
+				await driftPage.waitForFunction((path) => document.querySelectorAll("[data-drift-mark]:not([hidden])").length === 1 && document.querySelector(`[data-drift-mark="${path}"]:not([hidden])`), { polling: 100 }, driftedPath);
+				driftProbeFingerprint = "drift-fp-3";
+				driftProbeId = altId(ordered.id, 70);
+				driftProbeFiles = ordered.files.map((file) => ({ path: file.path, key: reviewFileDriftKey(file) }));
+				await driftServer.checkStaleness();
+				await driftPage.waitForFunction(() => document.querySelectorAll("[data-drift-mark]:not([hidden])").length === 0, { polling: 100 });
+				assert.equal(await driftPage.$eval("[data-stale-badge]", (badge) => badge.hidden), true, "A clean verdict clears the badge with the marks.");
+				await driftPage.close();
+			} finally {
+				await driftServer.close();
 			}
 			console.log("Headless browser live-thread flow passed.");
 		} finally {

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { computeContextGaps, CONTEXT_LIMITS } from "./git-review.js";
+import { computeContextGaps, CONTEXT_LIMITS, reviewFileDriftKey } from "./git-review.js";
 import { renderReviewHtml } from "./render.js";
 import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS } from "./threads.js";
 
@@ -137,16 +137,29 @@ export async function createCodeReviewServer(review, options) {
 	// is active, a cheap fingerprint gates a full snapshot re-collection; the
 	// badge informs only — rounds stay immutable and commenting stays open.
 	let stale = false;
+	let driftPaths = [];
 	let staleFingerprint;
 	let staleCheckInFlight;
-	const setStale = (nextStale) => {
-		if (nextStale === stale) return;
+	const setStale = (nextStale, nextDriftPaths = []) => {
+		const drift = nextStale ? nextDriftPaths : [];
+		if (nextStale === stale && drift.join("\n") === driftPaths.join("\n")) return;
 		stale = nextStale;
-		broadcast("staleness", { stale });
+		driftPaths = drift;
+		broadcast("staleness", { stale, driftPaths });
 	};
 	const resetStaleness = () => {
 		staleFingerprint = undefined;
 		setStale(false);
+	};
+	// Paths whose reviewed content differs between the frozen round and the
+	// worktree probe — including files that joined or left the changeset.
+	const computeDriftPaths = (review, probeFiles) => {
+		const frozen = new Map(review.files.map((file) => [file.path, reviewFileDriftKey(file)]));
+		const probed = new Map(probeFiles.map((file) => [file.path, file.key]));
+		const paths = new Set();
+		for (const [path, key] of frozen) if (probed.get(path) !== key) paths.add(path);
+		for (const path of probed.keys()) if (!frozen.has(path)) paths.add(path);
+		return [...paths].sort().slice(0, 100);
 	};
 	const checkStaleness = async (force = false) => {
 		// Drift while Pi is revising is expected, not signal; the check resumes
@@ -166,12 +179,12 @@ export async function createCodeReviewServer(review, options) {
 			try {
 				const fingerprint = await options.staleness.fingerprint();
 				if (fingerprint === staleFingerprint) return;
-				const snapshotId = await options.staleness.snapshotId();
+				const probe = await options.staleness.snapshot();
 				// A round that advanced mid-check was collected from a newer tree than
 				// this probe observed; discard the result and let the next tick measure.
 				if (current() !== round) return;
 				staleFingerprint = fingerprint;
-				setStale(snapshotId !== round.review.id);
+				setStale(probe.id !== round.review.id, computeDriftPaths(round.review, probe.files));
 			} catch {
 				// Transient collection failures keep the previous verdict.
 			}
@@ -329,7 +342,7 @@ export async function createCodeReviewServer(review, options) {
 				const requested = Number(requestUrl.searchParams.get("round") ?? current().number);
 				const round = rounds.find((candidate) => candidate.number === requested) ?? current();
 				res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "text/event-stream", Connection: "keep-alive" });
-				res.write(`event: init\ndata: ${JSON.stringify({ round: round.number, currentRound: current().number, phase, stale, threads: round.store.list(), summary: round.store.summary(), viewedFiles: [...round.viewed] })}\n\n`);
+				res.write(`event: init\ndata: ${JSON.stringify({ round: round.number, currentRound: current().number, phase, stale, driftPaths, threads: round.store.list(), summary: round.store.summary(), viewedFiles: [...round.viewed] })}\n\n`);
 				sseClients.add(res);
 				req.on("close", () => sseClients.delete(res));
 				return;

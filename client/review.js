@@ -21,7 +21,11 @@
   const loadedAsCurrent = myRound === currentRound;
   let autoNavigating = false;
   const isSuperseded = () => myRound < currentRound;
-  const isLocked = () => isSuperseded() || phase !== 'reviewing';
+  const isLocked = () => isSuperseded() || phase === 'approved';
+  // While Pi revises, composing stays open but everything posts quietly —
+  // queued for the next round. Live delivery, resolves, and passes wait.
+  const quietOnly = () => phase === 'revising' && !isSuperseded();
+  const effectiveQuiet = (quiet) => quiet === true || quietOnly();
 
   // Composer drafts survive reloads in localStorage, namespaced by snapshot id
   // (the origin is per-session — port included — so scope is naturally bounded).
@@ -103,6 +107,18 @@
 
   const applySessionState = () => {
     document.body.classList.toggle('locked', isLocked());
+    document.body.classList.toggle('quiet-only', quietOnly());
+    const quietLabels = quietOnly();
+    document.querySelectorAll('[data-selection-add]').forEach((button) => {
+      button.textContent = quietLabels ? 'Queue for next round' : 'Post comment';
+    });
+    document.querySelectorAll('[data-thread-send]').forEach((button) => {
+      button.textContent = quietLabels ? 'Queue reply' : 'Reply';
+    });
+    document.querySelectorAll('[data-commentary-post]').forEach((button) => {
+      button.textContent = quietLabels ? 'Queue reply' : 'Reply';
+    });
+    if (overviewPost) overviewPost.textContent = quietLabels ? 'Queue feedback' : overviewPostLabel;
     // Drift is expected while Pi revises and irrelevant on superseded rounds.
     if (staleBadge) staleBadge.hidden = !stale || phase !== 'reviewing' || isSuperseded();
     applyDriftMarks();
@@ -122,7 +138,7 @@
         gotoCurrent.hidden = true;
       } else if (phase === 'revising') {
         phaseBanner.hidden = false;
-        phaseBannerText.textContent = 'Pi is revising — round ' + (myRound + 1) + ' pending. Reading stays open; to keep commenting on this round, resume it.';
+        phaseBannerText.textContent = 'Pi is revising — round ' + (myRound + 1) + ' pending. New comments queue for the next round; to post live on this round, resume it.';
         resumeButton.hidden = false;
         gotoCurrent.hidden = true;
       } else {
@@ -527,7 +543,7 @@
       try {
         const result = await postJson(POST_PATH, {
           round: myRound,
-          ...(quiet ? { quiet: true } : {}),
+          ...(effectiveQuiet(quiet) ? { quiet: true } : {}),
           source: 'selection',
           file: draft.file,
           side: draft.side,
@@ -798,7 +814,7 @@
       const send = document.createElement('button');
       send.type = 'button';
       send.dataset.threadSend = thread.id;
-      send.textContent = 'Reply';
+      send.textContent = quietOnly() ? 'Queue reply' : 'Reply';
       send.disabled = !previousDraft.trim();
       textarea.addEventListener('input', () => {
         send.disabled = !textarea.value.trim();
@@ -819,7 +835,7 @@
         send.disabled = true;
         textarea.value = '';
         try {
-          const result = await postJson(POST_PATH, { threadId: thread.id, body, ...(quiet ? { quiet: true } : {}) });
+          const result = await postJson(POST_PATH, { threadId: thread.id, body, ...(effectiveQuiet(quiet) ? { quiet: true } : {}) });
           // Sync storage to whatever the textarea holds NOW — clearing outright
           // would wipe a new draft typed while this send was in flight.
           saveDraft('thread:' + thread.id, card.querySelector('[data-thread-reply]')?.value ?? '');
@@ -1046,7 +1062,7 @@
       if (!body) return;
       button.disabled = true;
       try {
-        const result = await postJson(POST_PATH, { round: myRound, ...(quiet ? { quiet: true } : {}), source: 'commentary', file: section.dataset.path, commentaryId: button.dataset.commentaryPost, body });
+        const result = await postJson(POST_PATH, { round: myRound, ...(effectiveQuiet(quiet) ? { quiet: true } : {}), source: 'commentary', file: section.dataset.path, commentaryId: button.dataset.commentaryPost, body });
         textarea.value = '';
         removeDraft(commentaryDraftName);
         upsertThread(result.thread);
@@ -1066,6 +1082,7 @@
     });
   });
   const overviewPost = document.querySelector('[data-overview-post]');
+  const overviewPostLabel = overviewPost?.textContent ?? 'Send';
   const overviewTextarea = document.querySelector('[data-overview-feedback]');
   if (overviewPost && overviewTextarea) {
     overviewTextarea.addEventListener('input', () => {
@@ -1086,7 +1103,7 @@
       if (!body) return;
       overviewPost.disabled = true;
       try {
-        const result = await postJson(POST_PATH, { round: myRound, ...(quiet ? { quiet: true } : {}), source: 'overview', body });
+        const result = await postJson(POST_PATH, { round: myRound, ...(effectiveQuiet(quiet) ? { quiet: true } : {}), source: 'overview', body });
         overviewTextarea.value = '';
         removeDraft('overview');
         upsertThread(result.thread);
@@ -1476,7 +1493,7 @@
     phase = data.phase;
     currentRound = data.currentRound;
     applySessionState();
-    if (myRound === currentRound) setStatus(phase === 'approved' ? 'Review approved — this session is closed.' : phase === 'revising' ? 'Pass sent — Pi is revising. Resume the round to keep commenting.' : 'Round ' + myRound + ' is live again — posting is unlocked.');
+    if (myRound === currentRound) setStatus(phase === 'approved' ? 'Review approved — this session is closed.' : phase === 'revising' ? 'Pass sent — Pi is revising. New comments queue for the next round.' : 'Round ' + myRound + ' is live again — posting is unlocked.');
   });
   events.addEventListener('round-ready', (event) => {
     const data = JSON.parse(event.data);
@@ -1501,8 +1518,9 @@
   // Finish pass -------------------------------------------------------------------
   const finishOverlay = document.querySelector('[data-finish-overlay]');
   const openFinishModal = () => {
-    // A send already in flight must not be re-confirmable through the chord.
-    if (isLocked() || !finishOverlay || finishButton.dataset.busy) return;
+    // A send already in flight must not be re-confirmable through the chord;
+    // the revising window has no pass to send either.
+    if (isLocked() || quietOnly() || !finishOverlay || finishButton.dataset.busy) return;
     if (!confirmDiscardDraft()) return;
     const open = [...threads.values()].filter((thread) => thread.status === 'open');
     const undelivered = open.reduce((count, thread) => count + (thread.pending ?? 0), 0);
@@ -1524,7 +1542,7 @@
     setStatus('Handing the pass to Pi…');
     try {
       const result = await postJson(FINISH_PATH, {});
-      setStatus(result.stale ? 'Pass sent. Warning: the working tree changed after this snapshot.' : 'Pass sent — Pi is revising. Resume the round to keep commenting.');
+      setStatus(result.stale ? 'Pass sent. Warning: the working tree changed after this snapshot.' : 'Pass sent — Pi is revising. New comments queue for the next round.');
     } catch (error) {
       setStatus(errorMessage(error), true);
     } finally {

@@ -359,7 +359,10 @@ export async function createCodeReviewServer(review, options) {
 				if (!guardMutation(req, res)) return;
 				const body = await readGuardedBody(req, res);
 				if (body === undefined) return;
-				if (!guardReviewingPhase(res)) return;
+				// Quiet posts stay accepted while Pi revises: they deliver nothing now
+				// and ride the round advance as queued/held content. Live posts,
+				// resolves, and passes wait for the next round.
+				if (!(phase === "revising" && body?.quiet === true) && !guardReviewingPhase(res)) return;
 				const round = current();
 				if (typeof body?.threadId === "string") {
 					const owner = roundOfThread(body.threadId);

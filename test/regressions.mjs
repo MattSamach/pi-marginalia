@@ -1057,6 +1057,15 @@ try {
 		const fullChecksBeforeRevising = fullChecks;
 		assert.equal(await staleServer.checkStaleness(), false, "Drift while Pi revises is expected, not signal.");
 		assert.equal(fullChecks, fullChecksBeforeRevising, "The revising phase suppresses staleness evaluation entirely.");
+		// The revising window is quiet-only: live posts and resolves wait for the
+		// next round, while quiet posts queue and ride the advance.
+		const revisingSelection = { round: 1, source: "selection", file: "untracked.txt", side: "new", newStart: 1, newEnd: 2, highlight: "quiet window", body: "Queued while Pi revises." };
+		assert.equal((await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify(revisingSelection) })).status, 409, "Live posts stay blocked while Pi revises.");
+		const revisingQuiet = await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers, body: JSON.stringify({ ...revisingSelection, quiet: true }) });
+		assert.equal(revisingQuiet.status, 200, "Quiet posts are accepted while Pi revises.");
+		const revisingThread = (await revisingQuiet.json()).thread;
+		assert.equal(revisingThread.queued, true, "A revising-window post is queued, never delivered live.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_resolve__`, { method: "POST", headers, body: JSON.stringify({ threadId: revisingThread.id, resolved: true }) })).status, 409, "Resolves wait for the next round.");
 		assert.equal((await fetch(`${origin}/__pi_code_review_resume__`, { method: "POST", headers, body: "{}" })).status, 200);
 		assert.equal(await staleServer.checkStaleness(), true, "Resume re-enables drift detection.");
 		assert.equal(staleServer.addRound({ ...ordered, id: altId(ordered.id, 60) }, ordered.id).round, 2);
@@ -1583,12 +1592,13 @@ try {
 			assert.ok(browserPass, "Finishing the pass must hand the summary to Pi.");
 			assert.equal(browserPass.round, 1);
 			assert.deepEqual(browserPass.summary, { open: 3, awaitingUser: 0, awaitingPi: 3, resolved: 2 });
-			assert.equal(await page.evaluate(() => document.body.classList.contains("locked")), true, "Sending the pass locks posting.");
-			assert.match(await page.$eval('[data-phase-banner-text]', (el) => el.textContent), /Pi is revising — round 2 pending\. Reading stays open; to keep commenting on this round, resume it\./);
-			assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('[data-finish]')).display), "none", "Posting controls must hide while Pi revises.");
+			assert.equal(await page.evaluate(() => document.body.classList.contains("locked")), false, "Sending the pass opens the quiet window, not a lock.");
+			assert.equal(await page.evaluate(() => document.body.classList.contains("quiet-only")), true, "The revising window is quiet-only.");
+			assert.match(await page.$eval('[data-phase-banner-text]', (el) => el.textContent), /Pi is revising — round 2 pending\. New comments queue for the next round; to post live on this round, resume it\./);
+			assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('[data-finish]')).display), "none", "The pass control hides while Pi revises.");
 			await page.click('[data-resume]');
 			await page.waitForFunction(() => document.querySelector('[data-phase-banner]')?.hidden === true);
-			assert.equal(await page.evaluate(() => document.body.classList.contains("locked")), false, "Resume must unlock the round.");
+			assert.equal(await page.evaluate(() => document.body.classList.contains("quiet-only")), false, "Resume must reopen live posting.");
 
 			const browserOrigin = new URL(browserServer.url).origin;
 			const nextRoundReview = { ...ordered, id: altId(ordered.id, 63) };
@@ -2240,6 +2250,45 @@ try {
 				await driftPage.close();
 			} finally {
 				await driftServer.close();
+			}
+			// Option C: while Pi revises, composing stays open but everything queues
+			// for the next round — live delivery, resolves, and passes wait.
+			const quietServer = await createCodeReviewServer({ ...ordered, id: altId(ordered.id, 80) }, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+			try {
+				const quietPage = await browser.newPage();
+				await quietPage.goto(quietServer.url, { waitUntil: "domcontentloaded" });
+				await quietPage.waitForFunction(() => document.querySelector("[data-file-nav]"), { polling: 100 });
+				await quietPage.evaluate(() => document.querySelector("[data-file-nav]").click());
+				await quietPage.waitForFunction(() => document.querySelector(".review-file.active"), { polling: 100 });
+				await quietPage.click("[data-finish]");
+				await quietPage.waitForFunction(() => document.querySelector("[data-finish-overlay]")?.hidden === false, { polling: 100 });
+				await quietPage.click("[data-finish-confirm]");
+				await quietPage.waitForFunction(() => document.body.classList.contains("quiet-only"), { polling: 100 });
+				assert.match(await quietPage.$eval("[data-phase-banner-text]", (bannerText) => bannerText.textContent), /queue for the next round/, "The revising banner explains the quiet window.");
+				assert.equal(await quietPage.$eval("[data-finish]", (button) => getComputedStyle(button).display), "none", "There is no pass to send while Pi revises.");
+				await quietPage.evaluate(() => {
+					const rowSelector = "tr.diff-add .diff-code span, tr.diff-del .diff-code span, tr.diff-context .diff-code span";
+					const code = document.querySelector(".review-file.active").querySelector(rowSelector);
+					const range = document.createRange();
+					range.selectNodeContents(code);
+					const selection = window.getSelection();
+					selection.removeAllRanges();
+					selection.addRange(range);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await quietPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false, { polling: 100 });
+				assert.equal(await quietPage.$eval(".review-file.active [data-selection-add]", (button) => button.textContent), "Queue for next round", "The composer is honest about where the comment goes.");
+				await quietPage.type(".review-file.active [data-selection-feedback]", "Noted while you revise.");
+				await quietPage.click(".review-file.active [data-selection-add]");
+				await quietPage.waitForFunction(() => document.querySelector(".thread-card.queued"), { polling: 100 });
+				assert.equal(await quietPage.$eval(".thread-card.queued [data-thread-resolve]", (button) => getComputedStyle(button).display), "none", "Resolution waits for the next round.");
+				await quietPage.click("[data-resume]");
+				await quietPage.waitForFunction(() => !document.body.classList.contains("quiet-only"), { polling: 100 });
+				assert.equal(await quietPage.$eval(".review-file.active [data-selection-add]", (button) => button.textContent), "Post comment", "Resume restores live posting labels.");
+				assert.notEqual(await quietPage.$eval(".thread-card.queued [data-thread-resolve]", (button) => getComputedStyle(button).display), "none", "Resume restores resolution controls.");
+				await quietPage.close();
+			} finally {
+				await quietServer.close();
 			}
 			console.log("Headless browser live-thread flow passed.");
 		} finally {

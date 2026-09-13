@@ -64,6 +64,7 @@ const planSectionSchema = Type.Object({
 const openPlanReviewSchema = Type.Object({
 	title: Type.String({ minLength: 1, maxLength: 200 }),
 	markdown: Type.String({ minLength: 1, maxLength: 1_048_576, description: "The full plan document as markdown. It is sliced into sections at its shallowest heading level; the reviewer annotates the rendered document." }),
+	proposedApprovalNote: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000, description: "Prefilled on the reviewer's Approve screen as the approval note; the reviewer may edit it. Omitted next rounds keep the previous proposal." })),
 	sections: Type.Optional(Type.Array(planSectionSchema, { maxItems: 200, description: "Optional per-section summaries and anchored commentary, referenced by heading text." })),
 	previousRoundId: Type.Optional(Type.String({ minLength: 8, maxLength: 200, description: "Snapshot id of the current round of an open plan session (the snapshot attribute of the plan-review-pass message). Opens the revised plan as the next round in the same browser session." })),
 	threadResponses: Type.Optional(Type.Array(Type.Object({

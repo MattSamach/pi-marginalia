@@ -1184,6 +1184,8 @@ try {
 	assert.match(formatReviewPassXml(plan, planStore.list(), planStore.summary(), false, undefined, 1), /^<plan-review-pass [^>]*>[\s\S]*<\/plan-review-pass>$/, "Plan passes speak their own root tag.");
 	assert.match(formatReviewApprovedXml(plan, 1, "Ship it", false), /^<plan-review-approved [\s\S]*<approval-note><!\[CDATA\[Ship it\]\]><\/approval-note>[\s\S]*<\/plan-review-approved>$/, "Plan approval carries an approval note.");
 	assert.match(formatThreadMessageXml(plan, planSelection.thread, planSelection.thread.turns[0], 1), /^<plan-review-thread /, "Plan threads speak their own root tag.");
+	assert.match(renderReviewHtml(buildPlanReview({ title: "T", markdown: "## A\nx", proposedApprovalNote: "Adopt & schedule <it>" }), "n"), /<textarea data-approve-message maxlength="20000">Adopt &amp; schedule &lt;it&gt;<\/textarea>/, "The proposed approval note prefills the approve screen, escaped.");
+	assert.throws(() => buildPlanReview({ title: "T", markdown: "## A\nx", proposedApprovalNote: "  " }), /proposedApprovalNote/);
 	const markdownHtml = renderReviewHtml(applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", summary: "Adds **two** lines", commentary: [{ id: "md-note", body: "Use `x < y` — see [ref](https://example.com)", side: "new", startLine: 1, endLine: 1 }] }] }), "md-nonce");
 	assert.match(markdownHtml, /<div class="file-summary md"><p>Adds <strong>two<\/strong> lines<\/p><\/div>/, "File summaries render markdown server-side.");
 	assert.match(markdownHtml, /<div class="agent-note-body md"><p>Use <code>x &lt; y<\/code> — see <a href="https:\/\/example\.com"[^>]*rel="noopener noreferrer">ref<\/a><\/p><\/div>/, "Commentary notes render markdown with safe links.");
@@ -2079,11 +2081,15 @@ try {
 			// Plan review: rendered markdown sections host selection threads anchored
 			// on absolute source lines, section commentary replies, and block nav.
 			const planPosts = [];
+			const planApprovals = [];
 			const planServer = await createCodeReviewServer(plan, {
 				onThreadPost: async (_round, thread) => {
 					planPosts.push(thread);
 				},
 				onFinishPass: async () => ({ stale: false }),
+				onApprove: async (round, message, staleNow) => {
+					planApprovals.push({ round: round.number, message, staleNow });
+				},
 			});
 			try {
 				const planPage = await browser.newPage();
@@ -2135,6 +2141,25 @@ try {
 				assert.match(await planPage.$eval('[data-review-file="1"]', (section) => section.textContent), /Made it measurable\./, "Carried resolutions render in their anchored section.");
 				const planIdentical = planServer.addRound(buildPlanReview({ title: "Test Plan", markdown: planMarkdown.replace("- fast", "- blazingly fast") }), planRound2.id);
 				assert.equal(planIdentical.identical, true, "An unchanged plan reopens the same round instead of advancing.");
+				// Approval: blocked while threads stay open, then terminal with the note.
+				await planPage.waitForFunction(() => document.querySelector("[data-approve]") && getComputedStyle(document.querySelector("[data-approve]")).display !== "none", { polling: 100 });
+				await planPage.click("[data-approve]");
+				await planPage.waitForFunction(() => document.querySelector("[data-global-status]").textContent.includes("still open"), { polling: 100 });
+				assert.equal(await planPage.$eval("[data-approve-overlay]", (overlay) => overlay.hidden), true, "Open carried threads block plan approval.");
+				await planPage.evaluate(() => {
+					document.querySelectorAll("[data-thread-card] [data-thread-resolve]").forEach((button) => button.click());
+				});
+				await planPage.waitForFunction(() => [...document.querySelectorAll("[data-thread-card]")].every((card) => card.classList.contains("resolved")), { polling: 100 });
+				await planPage.click("[data-approve]");
+				await planPage.waitForFunction(() => document.querySelector("[data-approve-overlay]")?.hidden === false, { polling: 100 });
+				assert.match(await planPage.$eval("[data-approve-overlay] h2", (heading) => heading.textContent), /Approve this plan/, "The approve overlay speaks plan language.");
+				assert.match(await planPage.$eval("[data-approve-overlay] .approve-message-label", (label) => label.textContent), /Approval note/, "Plans ask for an approval note, not a commit message.");
+				await planPage.$eval("[data-approve-message]", (textarea) => {
+					textarea.value = "Plan approved — proceed as written.";
+				});
+				await planPage.click("[data-approve-confirm]");
+				await planPage.waitForFunction(() => document.body.classList.contains("locked"), { polling: 100 });
+				assert.deepEqual(planApprovals, [{ round: 2, message: "Plan approved — proceed as written.", staleNow: false }], "Plan approval hands the reviewer's note to Pi.");
 				await planPage.close();
 			} finally {
 				await planServer.close();

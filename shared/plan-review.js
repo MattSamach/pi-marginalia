@@ -97,6 +97,9 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 	if (title.length > limits.maxTitle) fail(`Plan title must stay under ${limits.maxTitle} characters.`);
 	const markdown = typeof manifest.markdown === "string" && manifest.markdown.trim() ? manifest.markdown : fail("Plan review needs non-empty markdown.");
 	if (Buffer.byteLength(markdown, "utf8") > limits.maxPlanBytes) fail(`Plan markdown must stay under ${limits.maxPlanBytes} bytes.`);
+	if (manifest.proposedApprovalNote !== undefined && (typeof manifest.proposedApprovalNote !== "string" || !manifest.proposedApprovalNote.trim() || manifest.proposedApprovalNote.length > 20_000)) {
+		fail("proposedApprovalNote must be a non-empty string of at most 20000 characters.");
+	}
 	const { lines, sections } = sectionizePlan(markdown, title);
 	if (lines.length > limits.maxPlanLines) fail(`Plan markdown must stay under ${limits.maxPlanLines} lines.`);
 	if (sections.length > limits.maxSections) fail(`Plans support at most ${limits.maxSections} sections.`);
@@ -152,5 +155,14 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 	const id = createHash("sha256").update(`plan\0${title}\0${markdown}`).digest("hex");
 	// root scopes session replacement: opening a new plan closes the previous
 	// plan session, exactly as a new code review closes its repository's session.
-	return { kind: "plan", id, title, root: "plan", files, markdownLines: lines.length };
+	return {
+		kind: "plan",
+		id,
+		title,
+		root: "plan",
+		files,
+		markdownLines: lines.length,
+		// Rendered on the approve screen through the same field code reviews use.
+		...(manifest.proposedApprovalNote === undefined ? {} : { proposedCommitMessage: manifest.proposedApprovalNote.trim() }),
+	};
 }

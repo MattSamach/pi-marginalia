@@ -1190,6 +1190,7 @@ try {
 	assert.match(planHtml, /<li data-md-line="4" data-md-end="4">fast<\/li>/, "Line offsets keep block anchors absolute across sections.");
 	assert.match(planHtml, /<h2 data-md-line="3" data-md-end="3">Goals &lt;b&gt;<\/h2>/, "The section's own markdown heading marks it — no header bar exists.");
 	assert.doesNotMatch(planHtml, /<header class="file-header">[^]*?status-section/, "Plan sections render without file-review chrome.");
+	assert.match(planHtml, /<header class="plan-head"><h1>Test Plan<\/h1><\/header>/, "The document opens with its own rendered title.");
 	assert.match(planHtml, /Plan sections/, "The sidebar labels plan sections.");
 	assert.match(planHtml, /Approval note/, "The approve overlay asks for an approval note, not a commit message.");
 	assert.doesNotMatch(planHtml, /<input[^>]*data-viewed-toggle|<div class="viewed-progress"|<span class="viewed-check"|<span class="badge stale-badge"|<p class="approve-stale-warning"/, "Plans ship none of the diff-only machinery, dormant or otherwise.");

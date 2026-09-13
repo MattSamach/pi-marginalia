@@ -16,9 +16,10 @@ function attribute(value) {
 	return text(value).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
-function rangeLabel(entry) {
-	if (entry.startLine === undefined) return "File note";
-	const side = entry.side === "both" ? "lines" : `${entry.side} lines`;
+function rangeLabel(entry, planMode) {
+	if (entry.startLine === undefined) return planMode ? "Section note" : "File note";
+	// Plans have no diff sides; the side word is diff vocabulary.
+	const side = planMode || entry.side === "both" ? "lines" : `${entry.side} lines`;
 	return `${side} ${entry.startLine}${entry.endLine !== entry.startLine ? `–${entry.endLine}` : ""}`;
 }
 
@@ -65,10 +66,10 @@ function renderOverview(review, extras) {
 </section>`;
 }
 
-function renderCommentary(file, carriedForFile) {
+function renderCommentary(file, carriedForFile, planMode) {
 	const carriedCards = carriedForFile.length ? `<section class="carried-threads"><h3>Carried threads</h3>${carriedForFile.map(renderCarriedShell).join("\n")}</section>` : "";
 	const cards = file.commentary.map((entry) => `<article class="agent-note" data-commentary-id="${attribute(entry.id)}" data-anchor-side="${attribute(entry.side)}"${entry.startLine === undefined ? "" : ` data-anchor-start="${entry.startLine}"`}>
-  <button type="button" class="agent-note-anchor"${entry.startLine === undefined ? " disabled" : ""}>${text(rangeLabel(entry))}</button>
+  <button type="button" class="agent-note-anchor"${entry.startLine === undefined ? " disabled" : ""}>${text(rangeLabel(entry, planMode))}</button>
   <div class="agent-note-body md">${renderMarkdown(entry.body)}</div>
   <div data-commentary-thread="${attribute(entry.id)}"></div>
   <div data-commentary-composer="${attribute(entry.id)}"><label>Reply to Pi<textarea data-commentary-reply="${attribute(entry.id)}" maxlength="20000" placeholder="Respond to this explanation"></textarea></label><div class="composer-actions"><button type="button" data-commentary-resolve="${attribute(entry.id)}" title="Mark this note read; never messages Pi">Resolve</button><button type="button" data-commentary-post="${attribute(entry.id)}" title="Reply (⌘⏎ live · ⇧⌘⏎ quiet)" disabled>Reply</button></div></div>
@@ -210,7 +211,7 @@ function renderFile(file, index, carriedByFile, viewedSet, planMode) {
 	if (planMode) {
 		return `<section class="review-file${file.initiallyActive ? " active" : ""}" data-review-file="${index}" data-path="${attribute(file.path)}" data-review-mode="review"${file.initiallyActive ? "" : " hidden"}>
   <header class="file-header"><div><span class="status status-section">section</span><h1>${text(file.sectionTitle)}</h1></div><div class="file-header-side"><span>${file.reviewOrdinal} / ${file.reviewCount}</span></div></header>
-  <div class="file-layout"><main class="plan-column"><div class="plan-doc md">${renderMarkdown(file.markdown, { sourceLines: true, lineOffset: file.startLine - 1 })}</div></main>${renderCommentary(file, carriedByFile.get(file.path) ?? [])}</div>
+  <div class="file-layout"><main class="plan-column"><div class="plan-doc md">${renderMarkdown(file.markdown, { sourceLines: true, lineOffset: file.startLine - 1 })}</div></main>${renderCommentary(file, carriedByFile.get(file.path) ?? [], true)}</div>
 </section>`;
 	}
 	let body;
@@ -226,10 +227,10 @@ function renderFile(file, index, carriedByFile, viewedSet, planMode) {
 </section>`;
 }
 
-function renderFileNav(file, index, viewedSet, changedSet) {
+function renderFileNav(file, index, viewedSet, changedSet, planMode) {
 	const badges = [file.binary ? "binary" : undefined, file.omitted ? "omitted" : undefined, file.truncated ? "truncated" : undefined].filter(Boolean);
 	const changeMark = changedSet?.has(file.path) ? `<span class="change-mark" title="Changed in this round">●</span>` : "";
-	return `<button type="button" class="file-nav-item${file.initiallyActive ? " active" : ""}" data-file-nav="${index}" title="${attribute(file.path)}"><span class="status-dot status-${attribute(file.status)}"></span><span>${text(file.sectionTitle ?? file.path)}</span><span class="viewed-check" data-viewed-check="${attribute(file.path)}"${viewedSet.has(file.path) ? "" : " hidden"}>✓</span>${badges.map((badge) => `<span class="badge">${badge}</span>`).join("")}${changeMark}<span class="badge unread-badge" data-unread-badge hidden></span><span class="drift-mark" data-drift-mark="${attribute(file.path)}" hidden title="Changed after this snapshot was taken">●</span><span class="draft-dot" data-draft-dot="${attribute(file.path)}" hidden title="Unfinished comment draft">✎</span></button>`;
+	return `<button type="button" class="file-nav-item${file.initiallyActive ? " active" : ""}" data-file-nav="${index}" title="${attribute(file.path)}"><span class="status-dot status-${attribute(file.status)}"></span><span>${text(file.sectionTitle ?? file.path)}</span>${planMode ? "" : `<span class="viewed-check" data-viewed-check="${attribute(file.path)}"${viewedSet.has(file.path) ? "" : " hidden"}>✓</span>`}${badges.map((badge) => `<span class="badge">${badge}</span>`).join("")}${changeMark}<span class="badge unread-badge" data-unread-badge hidden></span><span class="drift-mark" data-drift-mark="${attribute(file.path)}" hidden title="Changed after this snapshot was taken">●</span><span class="draft-dot" data-draft-dot="${attribute(file.path)}" hidden title="Unfinished comment draft">✎</span></button>`;
 }
 
 export function renderReviewHtml(review, nonce, session = { round: 1, currentRound: 1, phase: "reviewing" }, extras = { carried: [], archive: [] }) {
@@ -256,7 +257,7 @@ export function renderReviewHtml(review, nonce, session = { round: 1, currentRou
 	const reviewEntries = files.map((file, index) => ({ file, index })).filter(({ file }) => file.reviewMode !== "reference");
 	const referenceEntries = files.map((file, index) => ({ file, index })).filter(({ file }) => file.reviewMode === "reference");
 	const changedSet = extras.changedSections ? new Set(extras.changedSections) : undefined;
-	const reviewNav = reviewEntries.length ? `<div class="sidebar-label">${planMode ? "Plan sections" : "Review files"}</div>${reviewEntries.map(({ file, index }) => renderFileNav(file, index, viewedSet, changedSet)).join("\n")}` : "";
+	const reviewNav = reviewEntries.length ? `<div class="sidebar-label">${planMode ? "Plan sections" : "Review files"}</div>${reviewEntries.map(({ file, index }) => renderFileNav(file, index, viewedSet, changedSet, planMode)).join("\n")}` : "";
 	const referenceNav = referenceEntries.length ? `<details class="reference-files"${!hasOverview && reviewEntries.length === 0 ? " open" : ""}><summary>Reference files (${referenceEntries.length})<span class="badge unread-badge" data-reference-unread hidden></span></summary>${referenceEntries.map(({ file, index }) => renderFileNav(file, index, viewedSet)).join("\n")}</details>` : "";
 	const viewedCount = files.filter((file) => viewedSet.has(file.path)).length;
 	const viewedProgress = files.length && !planMode ? `<div class="viewed-progress" data-viewed-progress title="Files marked viewed"><div class="viewed-progressbar"><div data-viewed-bar style="width:${Math.round((viewedCount / files.length) * 100)}%"></div></div><span data-viewed-count>${viewedCount} / ${files.length} viewed</span></div>` : "";
@@ -264,11 +265,11 @@ export function renderReviewHtml(review, nonce, session = { round: 1, currentRou
 	const switcher = `<nav class="round-switcher" data-round-switcher${session.currentRound > 1 ? "" : " hidden"}></nav>`;
 	return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${text(review.title)}</title><link rel="icon" href="data:,"><style>${STYLE}</style></head>
-<body data-round="${session.round}" data-current-round="${session.currentRound}" data-phase="${attribute(session.phase)}" data-review-id="${attribute(review.id)}"${planMode ? ' data-review-kind="plan"' : ""}><header class="topbar"><div><strong>${text(review.title)}</strong><span class="round-chip" data-round-chip>round ${session.round}</span><span class="snapshot" title="${attribute(review.id)}">snapshot ${text(review.id.slice(0, 12))}</span><span class="badge stale-badge" data-stale-badge hidden title="The snapshot is frozen; the repository has changed since it was taken (edits, staging, or a commit). Reading and commenting stay open; threads carry into the next round.">no longer matches this snapshot</span>${switcher}</div><div class="toolbar-actions"><button type="button" class="inbox-strip" data-inbox hidden title="Next thread awaiting you (n)"></button><span data-global-status>${status}</span><button type="button" class="shortcuts-hint" data-shortcuts-hint title="Keyboard shortcuts"><kbd>?</kbd> shortcuts</button><button type="button" data-finish>Send round to Pi</button><button type="button" class="approve-button" data-approve hidden></button></div></header>
+<body data-round="${session.round}" data-current-round="${session.currentRound}" data-phase="${attribute(session.phase)}" data-review-id="${attribute(review.id)}"${planMode ? ' data-review-kind="plan"' : ""}><header class="topbar"><div><strong>${text(review.title)}</strong><span class="round-chip" data-round-chip>round ${session.round}</span><span class="snapshot" title="${attribute(review.id)}">snapshot ${text(review.id.slice(0, 12))}</span>${planMode ? "" : '<span class="badge stale-badge" data-stale-badge hidden title="The snapshot is frozen; the repository has changed since it was taken (edits, staging, or a commit). Reading and commenting stay open; threads carry into the next round.">no longer matches this snapshot</span>'}${switcher}</div><div class="toolbar-actions"><button type="button" class="inbox-strip" data-inbox hidden title="Next thread awaiting you (n)"></button><span data-global-status>${status}</span><button type="button" class="shortcuts-hint" data-shortcuts-hint title="Keyboard shortcuts"><kbd>?</kbd> shortcuts</button><button type="button" data-finish>Send round to Pi</button><button type="button" class="approve-button" data-approve hidden></button></div></header>
 <div class="phase-banner" data-phase-banner hidden><span data-phase-banner-text></span><button type="button" data-resume hidden>Resume reviewing this round</button><a data-goto-current href="/" hidden>Go to current round</a></div>
 <div class="review-shell"><nav class="file-sidebar" aria-label="Review navigation">${viewedProgress}${overviewNav}${reviewNav}${referenceNav}</nav><div class="review-content" id="review-root">${renderOverview(review, extras)}${files.map((file, index) => renderFile(file, index, carriedByFile, viewedSet, planMode)).join("\n")}</div></div>
 <div class="shortcuts-overlay" data-finish-overlay hidden><div class="shortcuts-card approve-card" role="dialog" aria-label="Send this round to Pi"><h2>Send this round to Pi?</h2><p class="approve-stats" data-finish-summary></p><div class="composer-actions"><button type="button" data-finish-cancel>Cancel</button><button type="button" data-finish-confirm>Send round</button></div></div></div>
-<div class="shortcuts-overlay" data-approve-overlay hidden><div class="shortcuts-card approve-card" role="dialog" aria-label="Approve this review"><h2>${planMode ? "Approve this plan" : "Approve this review"}</h2><p class="approve-stats">${text(approveStats(review))}</p><p class="approve-stale-warning" data-approve-stale hidden>The repository no longer matches this snapshot — what you reviewed is not what is on disk. Approve only if the drift is expected.</p><label class="approve-message-label">${planMode ? "Approval note" : "Commit message"}<textarea data-approve-message maxlength="20000">${text(review.proposedCommitMessage ?? review.title)}</textarea></label><div class="composer-actions"><button type="button" data-approve-cancel>Cancel</button><button type="button" data-approve-confirm>Approve review</button></div></div></div>
+<div class="shortcuts-overlay" data-approve-overlay hidden><div class="shortcuts-card approve-card" role="dialog" aria-label="Approve this review"><h2>${planMode ? "Approve this plan" : "Approve this review"}</h2><p class="approve-stats">${text(approveStats(review))}</p>${planMode ? "" : '<p class="approve-stale-warning" data-approve-stale hidden>The repository no longer matches this snapshot — what you reviewed is not what is on disk. Approve only if the drift is expected.</p>'}<label class="approve-message-label">${planMode ? "Approval note" : "Commit message"}<textarea data-approve-message maxlength="20000">${text(review.proposedCommitMessage ?? review.title)}</textarea></label><div class="composer-actions"><button type="button" data-approve-cancel>Cancel</button><button type="button" data-approve-confirm>${planMode ? "Approve plan" : "Approve review"}</button></div></div></div>
 <div class="shortcuts-overlay" data-shortcuts-overlay hidden><div class="shortcuts-card" role="dialog" aria-label="Keyboard shortcuts"><h2>Keyboard shortcuts</h2><table><tbody>
 <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>${planMode ? "Next / previous block in this section" : "Next / previous hunk in this file"}</td></tr>
 <tr><td><kbd>]</kbd> / <kbd>[</kbd></td><td>Next / previous file</td></tr>

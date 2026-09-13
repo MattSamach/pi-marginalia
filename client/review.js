@@ -1355,7 +1355,10 @@
     const parts = /^(.*):(L|O)(\d+)$/.exec(spec);
     if (!parts) return;
     const section = sectionForPath(parts[1]);
-    if (!section) return;
+    if (!section) {
+      setStatus((planMode ? 'No section "' : 'No file "') + parts[1] + (planMode ? '" in this plan.' : '" in this review.'), true);
+      return;
+    }
     showFile(Number(section.dataset.reviewFile));
     const row = planMode
       ? (parts[2] === 'L' ? planBlockAt(section, Number(parts[3])) : undefined)

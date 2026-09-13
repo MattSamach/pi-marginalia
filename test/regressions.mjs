@@ -1191,7 +1191,9 @@ try {
 	assert.match(planHtml, /<h1>Goals &lt;b&gt;<\/h1>/, "Section headers escape their titles.");
 	assert.match(planHtml, /Plan sections/, "The sidebar labels plan sections.");
 	assert.match(planHtml, /Approval note/, "The approve overlay asks for an approval note, not a commit message.");
-	assert.doesNotMatch(planHtml, /<input[^>]*data-viewed-toggle|<div class="viewed-progress"/, "Plans have no viewed checklist.");
+	assert.doesNotMatch(planHtml, /<input[^>]*data-viewed-toggle|<div class="viewed-progress"|<span class="viewed-check"|<span class="badge stale-badge"|<p class="approve-stale-warning"/, "Plans ship none of the diff-only machinery, dormant or otherwise.");
+	assert.match(planHtml, /<button type="button" data-approve-confirm>Approve plan<\/button>/, "The confirm button speaks plan language.");
+	assert.match(planHtml, /class="agent-note-anchor"[^>]*>lines 4–5</, "Plan commentary anchors drop the diff-side vocabulary.");
 	assert.match(planHtml, /3 sections · 13 lines/, "Approve stats describe the document.");
 	assert.match(formatReviewPassXml(plan, planStore.list(), planStore.summary(), false, undefined, 1), /^<plan-review-pass [^>]*>[\s\S]*<\/plan-review-pass>$/, "Plan passes speak their own root tag.");
 	assert.match(formatReviewApprovedXml(plan, 1, "Ship it", false), /^<plan-review-approved [\s\S]*<approval-note><!\[CDATA\[Ship it\]\]><\/approval-note>[\s\S]*<\/plan-review-approved>$/, "Plan approval carries an approval note.");

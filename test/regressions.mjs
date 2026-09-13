@@ -13,6 +13,7 @@ import { computeIntraline } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
 import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS, threadsAwaitingResponse } from "../shared/threads.js";
 import { createReviewMessageQueue } from "../shared/delivery-queue.js";
+import { buildPlanReview, PLAN_LIMITS, sectionizePlan } from "../shared/plan-review.js";
 
 const exec = promisify(execFile);
 const git = (cwd, ...args) => exec("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -1147,6 +1148,40 @@ try {
 		"Blockquote and table end ranges stay exact, and CRLF input keeps line numbers aligned.",
 	);
 	assert.equal(renderMarkdown("option a | option b\n---"), "<p>option a | option b</p><hr>", "A separator whose column count mismatches the pipe line above is not a table.");
+
+	// Plan reviews: a markdown document sliced into file-shaped heading sections.
+	const planMarkdown = ["Intro line one.", "", "## Goals <b>", "- fast", "- safe", "", "## Steps", "1. do `x`", "2. do y", "", "```", "# not a heading", "```"].join("\n");
+	const plan = buildPlanReview({
+		title: "Test Plan",
+		markdown: planMarkdown,
+		sections: [{ heading: "goals <b>", summary: "Why **this**", commentary: [{ id: "g1", body: "Note on goals", startLine: 4, endLine: 5 }] }],
+	});
+	assert.equal(plan.kind, "plan");
+	assert.deepEqual(plan.files.map((section) => [section.path, section.startLine, section.endLine]), [["introduction", 1, 2], ["goals-b", 3, 6], ["steps", 7, 13]], "Sections split at the shallowest heading level; fenced hashes are not headings; the preamble becomes an introduction.");
+	assert.equal(plan.files[1].sectionTitle, "Goals <b>");
+	assert.equal(plan.files[1].summary, "Why **this**");
+	assert.deepEqual(plan.files[1].commentary.map((entry) => [entry.id, entry.startLine, entry.endLine, entry.side]), [["g1", 4, 5, "new"]]);
+	assert.deepEqual(plan.files[1].lines[1], { kind: "context", newLine: 4, content: "- fast" }, "Section lines carry absolute source line numbers for anchor validation.");
+	assert.throws(() => buildPlanReview({ title: "x", markdown: planMarkdown, sections: [{ heading: "missing" }] }), /matches no plan heading/);
+	assert.throws(() => buildPlanReview({ title: "x", markdown: planMarkdown, sections: [{ heading: "Steps", commentary: [{ id: "s1", body: "b", startLine: 3 }] }] }), /outside its section/);
+	assert.throws(() => buildPlanReview({ title: "x", markdown: planMarkdown, sections: [{ heading: "Steps" }, { heading: "steps" }] }), /more than once/);
+	const planStore = createThreadStore(plan);
+	const planSelection = planStore.postUserTurn({ source: "selection", file: "goals-b", side: "new", newStart: 4, newEnd: 5, highlight: "- fast\n- safe", body: "Tighten these goals." });
+	assert.equal(planSelection.thread.status, "open", "Plan selections anchor on absolute source lines.");
+	assert.equal(planStore.postUserTurn({ source: "selection", file: "goals-b", side: "new", newStart: 7, newEnd: 7, highlight: "x", body: "y" }).error, "invalid", "Anchors outside the section's line range are rejected.");
+	assert.equal(planStore.postUserTurn({ source: "commentary", file: "goals-b", commentaryId: "g1", body: "Reply to the note." }).thread.status, "open", "Plan section commentary hosts threads.");
+	const planHtml = renderReviewHtml(plan, "plan-nonce");
+	assert.match(planHtml, /<body[^>]*data-review-kind="plan"/, "Plan pages declare their kind.");
+	assert.match(planHtml, /<div class="plan-doc md"><p data-md-line="1" data-md-end="1">Intro line one\.<\/p><\/div>/, "Sections render their markdown segment.");
+	assert.match(planHtml, /<li data-md-line="4" data-md-end="4">fast<\/li>/, "Line offsets keep block anchors absolute across sections.");
+	assert.match(planHtml, /<h1>Goals &lt;b&gt;<\/h1>/, "Section headers escape their titles.");
+	assert.match(planHtml, /Plan sections/, "The sidebar labels plan sections.");
+	assert.match(planHtml, /Approval note/, "The approve overlay asks for an approval note, not a commit message.");
+	assert.doesNotMatch(planHtml, /<input[^>]*data-viewed-toggle|<div class="viewed-progress"/, "Plans have no viewed checklist.");
+	assert.match(planHtml, /3 sections · 13 lines/, "Approve stats describe the document.");
+	assert.match(formatReviewPassXml(plan, planStore.list(), planStore.summary(), false, undefined, 1), /^<plan-review-pass [^>]*>[\s\S]*<\/plan-review-pass>$/, "Plan passes speak their own root tag.");
+	assert.match(formatReviewApprovedXml(plan, 1, "Ship it", false), /^<plan-review-approved [\s\S]*<approval-note><!\[CDATA\[Ship it\]\]><\/approval-note>[\s\S]*<\/plan-review-approved>$/, "Plan approval carries an approval note.");
+	assert.match(formatThreadMessageXml(plan, planSelection.thread, planSelection.thread.turns[0], 1), /^<plan-review-thread /, "Plan threads speak their own root tag.");
 	const markdownHtml = renderReviewHtml(applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", summary: "Adds **two** lines", commentary: [{ id: "md-note", body: "Use `x < y` — see [ref](https://example.com)", side: "new", startLine: 1, endLine: 1 }] }] }), "md-nonce");
 	assert.match(markdownHtml, /<div class="file-summary md"><p>Adds <strong>two<\/strong> lines<\/p><\/div>/, "File summaries render markdown server-side.");
 	assert.match(markdownHtml, /<div class="agent-note-body md"><p>Use <code>x &lt; y<\/code> — see <a href="https:\/\/example\.com"[^>]*rel="noopener noreferrer">ref<\/a><\/p><\/div>/, "Commentary notes render markdown with safe links.");

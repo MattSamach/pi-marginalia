@@ -50,14 +50,20 @@ function roundAttribute(round) {
 	return round === undefined ? "" : ` round="${Number(round)}"`;
 }
 
+// Plan reviews speak the same wire dialect under their own root tags so Pi
+// can tell which workflow a message belongs to at a glance.
+function rootTag(review, name) {
+	return (review.kind === "plan" ? "plan-review-" : "code-review-") + name;
+}
+
 /** Format one reviewer thread post (or an escalated backlog of turns) as the user message delivered to Pi. */
 export function formatThreadMessageXml(review, thread, turns, round) {
-	const lines = [`<code-review-thread snapshot="${attr(review.id)}"${roundAttribute(round)} ${threadAttributes(thread)}${anchorAttributes(thread)}>`];
+	const lines = [`<${rootTag(review, "thread")} snapshot="${attr(review.id)}"${roundAttribute(round)} ${threadAttributes(thread)}${anchorAttributes(thread)}>`];
 	if (thread.highlight !== undefined) lines.push(`  <highlight>${cdata(thread.highlight)}</highlight>`);
 	for (const turn of Array.isArray(turns) ? turns : [turns]) {
 		lines.push(`  <message author="${attr(turn.author)}"${turn.seq === undefined ? "" : ` turn="${turn.seq}"`}>${cdata(turn.body)}</message>`);
 	}
-	lines.push("</code-review-thread>");
+	lines.push(`</${rootTag(review, "thread")}>`);
 	return lines.join("\n");
 }
 
@@ -81,6 +87,14 @@ export function formatThreadContextXml(review, thread, round, lastTurns) {
 /** Format the finish-pass summary delivered to Pi when the reviewer completes a pass. */
 /** Format the terminal approval message: the reviewer signed off with a final commit message. */
 export function formatReviewApprovedXml(review, round, message, stale) {
+	if (review.kind === "plan") {
+		return [
+			`<plan-review-approved snapshot="${attr(review.id)}"${roundAttribute(round)}>`,
+			`  <approval-note>${cdata(message)}</approval-note>`,
+			"  <note>The reviewer approved this plan. The review session is closed — no further rounds or thread replies. The approved plan is the round's document; the approval note above is the reviewer's final word on it.</note>",
+			"</plan-review-approved>",
+		].join("\n");
+	}
 	return [
 		`<code-review-approved snapshot="${attr(review.id)}"${roundAttribute(round)}${stale ? ' stale="true"' : ""}>`,
 		`  <commit-message>${cdata(message)}</commit-message>`,
@@ -99,7 +113,7 @@ export function formatReviewPassXml(review, threads, summary, stale, note, round
 	const pending = pendingThreads.reduce((count, thread) => count + thread.pending, 0);
 	const pendingAwaiting = pendingThreads.filter((thread) => thread.turns[thread.turns.length - 1]?.author === "user").length;
 	const lines = [
-		`<code-review-pass snapshot="${attr(review.id)}"${roundAttribute(round)} stale="${stale ? "true" : "false"}" open="${summary.open}" awaiting-user="${summary.awaitingUser}" awaiting-pi="${summary.awaitingPi - queued - pendingAwaiting}" resolved="${summary.resolved}" unread-notes="${unreadNotes}" queued="${queued}" pending="${pending}">`,
+		`<${rootTag(review, "pass")} snapshot="${attr(review.id)}"${roundAttribute(round)} stale="${stale ? "true" : "false"}" open="${summary.open}" awaiting-user="${summary.awaitingUser}" awaiting-pi="${summary.awaitingPi - queued - pendingAwaiting}" resolved="${summary.resolved}" unread-notes="${unreadNotes}" queued="${queued}" pending="${pending}">`,
 	];
 	if (note) lines.push(`  <note>${cdata(note)}</note>`);
 	for (const thread of threads) {
@@ -130,6 +144,6 @@ export function formatReviewPassXml(review, threads, summary, stale, note, round
 		}
 		lines.push("  </open-thread>");
 	}
-	lines.push("</code-review-pass>");
+	lines.push(`</${rootTag(review, "pass")}>`);
 	return lines.join("\n");
 }

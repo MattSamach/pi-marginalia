@@ -57,15 +57,18 @@ function isTableSeparator(line) {
 /**
  * Render untrusted markdown-ish text to whitelisted HTML.
  * options.sourceLines adds data-md-line / data-md-end (1-based source line
- * ranges) to block elements so rendered blocks can anchor back to the source.
+ * ranges) to block elements so rendered blocks can anchor back to the source;
+ * options.lineOffset shifts the emitted numbers when the source is a slice of
+ * a larger document.
  */
 export function renderMarkdown(source, options) {
 	const sourceLines = Boolean(options && options.sourceLines);
+	const lineOffset = (options && Number(options.lineOffset)) || 0;
 	// Strip the private-use token sentinels so input can never splice into the
 	// stash, then escape everything before any structure is recognized.
 	const lines = escapeHtml(String(source ?? "").replace(/[\uE000\uE001]/g, "")).split(/\r?\n/);
 	const html = [];
-	const blockAttrs = (start, end) => (sourceLines ? ' data-md-line="' + start + '" data-md-end="' + (end ?? start) + '"' : "");
+	const blockAttrs = (start, end) => (sourceLines ? ' data-md-line="' + (lineOffset + start) + '" data-md-end="' + (lineOffset + (end ?? start)) + '"' : "");
 	let paragraph = [];
 	let paragraphStart = 0;
 	// Lists nest: a stack of open lists, each item able to hold child lists.

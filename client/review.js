@@ -211,6 +211,7 @@
     navButtons.forEach((item) => item.classList.remove('active'));
     window.scrollTo({ top: 0, behavior: 'instant' });
   };
+  const planFocus = () => document.body.classList.contains('plan-focus');
   const showFile = (index) => {
     clearHunkCursor();
     showingOverview = false;
@@ -219,12 +220,45 @@
     activeIndex = index;
     fileSections.forEach((section) => {
       const sectionIndex = Number(section.dataset.reviewFile);
-      section.hidden = sectionIndex !== index;
+      // The plan is one continuous document; sections never hide outside the
+      // focus view (which hides by CSS on the active class instead).
+      if (!planMode) section.hidden = sectionIndex !== index;
       section.classList.toggle('active', sectionIndex === index);
     });
     navButtons.forEach((item) => item.classList.toggle('active', Number(item.dataset.fileNav) === index));
-    window.scrollTo({ top: 0, behavior: 'instant' });
+    if (planMode && !planFocus()) document.querySelector('[data-review-file="' + index + '"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    else window.scrollTo({ top: 0, behavior: 'instant' });
   };
+  // Reading-position tracking for the whole-document plan view: the sidebar
+  // follows the section under the top of the viewport.
+  if (planMode) {
+    let spyPending = false;
+    const followScroll = () => {
+      spyPending = false;
+      if (planFocus()) return;
+      let best;
+      for (const section of fileSections) {
+        if (section.getBoundingClientRect().top <= 140) best = section;
+        else break;
+      }
+      if (!best || Number(best.dataset.reviewFile) === activeIndex) return;
+      activeIndex = Number(best.dataset.reviewFile);
+      fileSections.forEach((section) => section.classList.toggle('active', section === best));
+      navButtons.forEach((item) => item.classList.toggle('active', Number(item.dataset.fileNav) === activeIndex));
+    };
+    window.addEventListener('scroll', () => {
+      if (spyPending) return;
+      spyPending = true;
+      setTimeout(followScroll, 80);
+    }, { passive: true });
+    const viewToggle = document.querySelector('[data-view-toggle]');
+    viewToggle?.addEventListener('click', () => {
+      const focused = document.body.classList.toggle('plan-focus');
+      viewToggle.textContent = focused ? 'Whole document' : 'Focus section';
+      viewToggle.title = focused ? 'Show the whole document' : 'Show one section at a time';
+      showFile(activeIndex);
+    });
+  }
   // Navigation never asks about drafts: an open draft survives every panel
   // switch (its composer stays live in its section, marked in the sidebar) and
   // persists across reloads. This confirm guards only the true destruction

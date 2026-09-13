@@ -2122,9 +2122,23 @@ try {
 			});
 			try {
 				const planPage = await browser.newPage();
+				// A short viewport makes the three-section fixture genuinely scrollable
+				// so the reading-position spy has something to follow.
+				await planPage.setViewport({ width: 1200, height: 360 });
 				await planPage.goto(planServer.url, { waitUntil: "domcontentloaded" });
 				await planPage.waitForFunction(() => document.body.dataset.reviewKind === "plan" && document.querySelector(".plan-doc"), { polling: 100 });
 				assert.equal(await planPage.$eval('[data-file-nav="1"]', (nav) => nav.textContent.includes("Goals <b>")), true, "The sidebar lists section titles.");
+				assert.equal(await planPage.evaluate(() => document.querySelectorAll("[data-review-file][hidden]").length), 0, "The whole plan renders as one continuous document.");
+				await planPage.evaluate(() => document.querySelector('[data-review-file="2"]').scrollIntoView());
+				await planPage.waitForFunction(() => document.querySelector('[data-review-file="2"]').classList.contains("active"), { polling: 100 });
+				assert.equal(await planPage.$eval('[data-file-nav="2"]', (nav) => nav.classList.contains("active")), true, "The sidebar follows the reading position.");
+				await planPage.click("[data-view-toggle]");
+				await planPage.waitForFunction(() => document.body.classList.contains("plan-focus"), { polling: 100 });
+				assert.equal(await planPage.evaluate(() => getComputedStyle(document.querySelector('[data-review-file="0"]')).display), "none", "Focus view shows one section at a time.");
+				assert.equal(await planPage.$eval("[data-view-toggle]", (button) => button.textContent), "Whole document", "The toggle offers the way back.");
+				await planPage.click("[data-view-toggle]");
+				await planPage.waitForFunction(() => !document.body.classList.contains("plan-focus"), { polling: 100 });
+				assert.equal(await planPage.evaluate(() => [...document.querySelectorAll("[data-review-file]")].every((section) => getComputedStyle(section).display !== "none")), true, "The whole document returns on untoggle.");
 				await planPage.evaluate(() => {
 					document.querySelector('[data-file-nav="1"]').click();
 					const block = document.querySelector('.review-file.active [data-md-line="4"]');

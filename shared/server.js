@@ -251,8 +251,16 @@ export async function createCodeReviewServer(review, options) {
 				resolved: candidate.store.list().filter((thread) => thread.status === "resolved").map((thread) => ({ id: thread.id, source: thread.source, file: thread.file, highlight: thread.highlight, lastBody: thread.turns[thread.turns.length - 1]?.body ?? "" })),
 			}))
 			.filter((entry) => entry.resolved.length > 0);
+		// Plan rounds mark which sections actually changed since the round they
+		// superseded — the reviewer's convergence scan without a diff view.
+		let changedSections;
+		if (round.review.kind === "plan" && round.number > 1) {
+			const previous = rounds.find((candidate) => candidate.number === round.number - 1);
+			const before = new Map(previous.review.files.map((file) => [file.path, file.contentSha256]));
+			changedSections = round.review.files.filter((file) => before.get(file.path) !== file.contentSha256).map((file) => file.path);
+		}
 		res.writeHead(200, htmlHeaders(nonce));
-		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive, viewed: [...round.viewed] }));
+		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive, viewed: [...round.viewed], changedSections }));
 	};
 
 	const server = createServer(async (req, res) => {

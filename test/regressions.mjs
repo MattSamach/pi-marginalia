@@ -2119,6 +2119,22 @@ try {
 				assert.equal(await planPage.evaluate(() => document.querySelector(".nav-cursor")?.dataset.mdLine !== undefined), true, "j walks rendered blocks in plan mode.");
 				await planPage.goto(`${new URL(planServer.url).origin}/#loc=steps:L8`, { waitUntil: "domcontentloaded" });
 				await planPage.waitForFunction(() => document.querySelector("[data-review-file].active")?.dataset.path === "steps" && document.querySelector('[data-md-line="8"].nav-cursor'), { polling: 100 });
+				// Round 2: the revised plan carries threads and marks changed sections.
+				const planRound2 = buildPlanReview({ title: "Test Plan", markdown: planMarkdown.replace("- fast", "- blazingly fast") });
+				const planAdvance = planServer.addRound(planRound2, plan.id, [
+					{ respondsTo: planPosts[0].id, resolution: "addressed", body: "Made it measurable.", file: "goals-b", side: "new", startLine: 4, endLine: 4 },
+					{ respondsTo: planPosts[1].id, resolution: "needs-discussion", body: "Still deciding.", file: "goals-b" },
+				]);
+				assert.equal(planAdvance.round, 2, "Plan rounds advance through the generic round machinery.");
+				await planPage.waitForFunction(() => document.body.dataset.round === "2", { polling: 100 });
+				assert.equal(await planPage.evaluate(() => {
+					const changed = [...document.querySelectorAll(".change-mark")].map((mark) => mark.closest("[data-file-nav]").dataset.fileNav);
+					return JSON.stringify(changed);
+				}), '["1"]', "Only the section whose content changed carries the round's change mark.");
+				assert.equal(await planPage.evaluate(() => document.querySelectorAll("[data-carried-thread]").length), 2, "Open threads carry into the new plan round.");
+				assert.match(await planPage.$eval('[data-review-file="1"]', (section) => section.textContent), /Made it measurable\./, "Carried resolutions render in their anchored section.");
+				const planIdentical = planServer.addRound(buildPlanReview({ title: "Test Plan", markdown: planMarkdown.replace("- fast", "- blazingly fast") }), planRound2.id);
+				assert.equal(planIdentical.identical, true, "An unchanged plan reopens the same round instead of advancing.");
 				await planPage.close();
 			} finally {
 				await planServer.close();

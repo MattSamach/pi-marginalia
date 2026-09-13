@@ -237,10 +237,14 @@
       spyPending = false;
       if (planFocus()) return;
       let best;
-      // At the document's end the trailing section wins outright: a short
-      // final section might never reach the viewport-top band, and a nav
-      // click to it must not be overridden by the settling spy.
-      if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 1) {
+      // The document's ends belong to their end sections outright: a short
+      // final section might never reach the viewport-top band (and a nav
+      // click to it must not be overridden by the settling spy), and at the
+      // very top the first section owns the view even when the next one's
+      // heading grazes the band.
+      if (window.scrollY <= 1) {
+        best = fileSections[0];
+      } else if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 1) {
         best = fileSections[fileSections.length - 1];
       } else {
         for (const section of fileSections) {

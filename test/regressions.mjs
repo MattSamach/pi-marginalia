@@ -1188,7 +1188,8 @@ try {
 	assert.match(planHtml, /<body[^>]*data-review-kind="plan"/, "Plan pages declare their kind.");
 	assert.match(planHtml, /<div class="plan-doc md"><p data-md-line="1" data-md-end="1">Intro line one\.<\/p><\/div>/, "Sections render their markdown segment.");
 	assert.match(planHtml, /<li data-md-line="4" data-md-end="4">fast<\/li>/, "Line offsets keep block anchors absolute across sections.");
-	assert.match(planHtml, /<h1>Goals &lt;b&gt;<\/h1>/, "Section headers escape their titles.");
+	assert.match(planHtml, /<h2 data-md-line="3" data-md-end="3">Goals &lt;b&gt;<\/h2>/, "The section's own markdown heading marks it — no header bar exists.");
+	assert.doesNotMatch(planHtml, /<header class="file-header">[^]*?status-section/, "Plan sections render without file-review chrome.");
 	assert.match(planHtml, /Plan sections/, "The sidebar labels plan sections.");
 	assert.match(planHtml, /Approval note/, "The approve overlay asks for an approval note, not a commit message.");
 	assert.doesNotMatch(planHtml, /<input[^>]*data-viewed-toggle|<div class="viewed-progress"|<span class="viewed-check"|<span class="badge stale-badge"|<p class="approve-stale-warning"/, "Plans ship none of the diff-only machinery, dormant or otherwise.");
@@ -2124,7 +2125,7 @@ try {
 				const planPage = await browser.newPage();
 				// A short viewport makes the three-section fixture genuinely scrollable
 				// so the reading-position spy has something to follow.
-				await planPage.setViewport({ width: 1200, height: 360 });
+				await planPage.setViewport({ width: 1200, height: 220 });
 				await planPage.goto(planServer.url, { waitUntil: "domcontentloaded" });
 				await planPage.waitForFunction(() => document.body.dataset.reviewKind === "plan" && document.querySelector(".plan-doc"), { polling: 100 });
 				assert.equal(await planPage.$eval('[data-file-nav="1"]', (nav) => nav.textContent.includes("Goals <b>")), true, "The sidebar lists section titles.");
@@ -2140,7 +2141,9 @@ try {
 				await planPage.waitForFunction(() => !document.body.classList.contains("plan-focus"), { polling: 100 });
 				assert.equal(await planPage.evaluate(() => [...document.querySelectorAll("[data-review-file]")].every((section) => getComputedStyle(section).display !== "none")), true, "The whole document returns on untoggle.");
 				// The spy must never override deliberate navigation, and the document
-				// bottom always belongs to the last section.
+				// bottom always belongs to the last section. (Let the untoggle's own
+				// smooth scroll settle first so the jump to the top is a real scroll.)
+				await new Promise((resolvePromise) => setTimeout(resolvePromise, 600));
 				await planPage.evaluate(() => window.scrollTo(0, 0));
 				await planPage.waitForFunction(() => document.querySelector('[data-review-file="0"]').classList.contains("active"), { polling: 100 });
 				await planPage.evaluate(() => document.querySelector('[data-file-nav="2"]').click());
@@ -2160,18 +2163,18 @@ try {
 					selection.addRange(range);
 					block.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
 				});
-				await planPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false, { polling: 100 });
-				assert.equal(await planPage.$eval(".review-file.active [data-selection-quote]", (quote) => quote.textContent), "fast", "The quote carries the rendered selection text.");
-				await planPage.type(".review-file.active [data-selection-feedback]", "Make this measurable.");
-				await planPage.click(".review-file.active [data-selection-add]");
+				await planPage.waitForFunction(() => document.querySelector('[data-path="goals-b"] [data-selection-composer]')?.hidden === false, { polling: 100 });
+				assert.equal(await planPage.$eval('[data-path="goals-b"] [data-selection-quote]', (quote) => quote.textContent), "fast", "The quote carries the rendered selection text.");
+				await planPage.type('[data-path="goals-b"] [data-selection-feedback]', "Make this measurable.");
+				await planPage.$eval('[data-path="goals-b"] [data-selection-add]', (button) => button.click());
 				await planPage.waitForFunction(() => document.querySelector(".thread-card"), { polling: 100 });
 				assert.deepEqual(
 					[planPosts[0].file, planPosts[0].side, planPosts[0].newStart, planPosts[0].newEnd, planPosts[0].highlight],
 					["goals-b", "new", 4, 4, "fast"],
 					"Plan selection threads anchor on the block's absolute source lines.",
 				);
-				await planPage.type('.review-file.active [data-commentary-reply="g1"]', "Agreed, keep the note.");
-				await planPage.click('.review-file.active [data-commentary-post="g1"]');
+				await planPage.type('[data-path="goals-b"] [data-commentary-reply="g1"]', "Agreed, keep the note.");
+				await planPage.$eval('[data-path="goals-b"] [data-commentary-post="g1"]', (button) => button.click());
 				await planPage.waitForFunction(() => document.querySelector('[data-commentary-thread="g1"] .thread-card'), { polling: 100 });
 				assert.equal(planPosts[1].commentaryId, "g1", "Section commentary hosts reply threads.");
 				await planPage.keyboard.press("Escape");

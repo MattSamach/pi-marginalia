@@ -229,6 +229,42 @@
     if (planMode && !planFocus()) document.querySelector('[data-review-file="' + index + '"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     else window.scrollTo({ top: 0, behavior: 'instant' });
   };
+  // The tie between a note and its text reads in both directions: hovering a
+  // note tints the blocks it anchors, hovering a block outlines its notes.
+  if (planMode) {
+    let hoverMarked = [];
+    const clearHoverMarks = () => {
+      hoverMarked.forEach((element) => element.classList.remove('note-target', 'note-hover'));
+      hoverMarked = [];
+    };
+    const rangesOverlap = (aStart, aEnd, bStart, bEnd) => aEnd >= bStart && aStart <= bEnd;
+    document.addEventListener('mouseover', (event) => {
+      if (!(event.target instanceof Element)) return;
+      const note = event.target.closest('.agent-note[data-anchor-start]');
+      const block = note ? undefined : event.target.closest('.plan-doc [data-md-line]');
+      clearHoverMarks();
+      if (note) {
+        const section = note.closest('[data-review-file]');
+        const start = Number(note.dataset.anchorStart);
+        const end = Number(note.dataset.anchorEnd || note.dataset.anchorStart);
+        [...section.querySelectorAll('[data-md-line]')].filter((candidate) => rangesOverlap(Number(candidate.dataset.mdLine), Number(candidate.dataset.mdEnd), start, end)).forEach((candidate) => {
+          candidate.classList.add('note-target');
+          hoverMarked.push(candidate);
+        });
+      } else if (block) {
+        const section = block.closest('[data-review-file]');
+        const start = Number(block.dataset.mdLine);
+        const end = Number(block.dataset.mdEnd);
+        section.querySelectorAll('.agent-note[data-anchor-start]').forEach((candidate) => {
+          const noteStart = Number(candidate.dataset.anchorStart);
+          const noteEnd = Number(candidate.dataset.anchorEnd || candidate.dataset.anchorStart);
+          if (!rangesOverlap(noteStart, noteEnd, start, end)) return;
+          candidate.classList.add('note-hover');
+          hoverMarked.push(candidate);
+        });
+      }
+    });
+  }
   // Reading-position tracking for the whole-document plan view: the sidebar
   // follows the section under the top of the viewport.
   if (planMode) {
@@ -1168,7 +1204,12 @@
       const side = note.dataset.anchorSide;
       const line = note.dataset.anchorStart;
       if (planMode) {
-        planBlockAt(section, Number(line))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const target = planBlockAt(section, Number(line));
+        if (!target) return;
+        clearHunkCursor();
+        hunkCursor = target;
+        target.classList.add('nav-cursor');
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
         return;
       }
       const selector = side === 'old' ? `[data-old-line="${line}"]` : side === 'new' ? `[data-new-line="${line}"]` : `[data-old-line="${line}"], [data-new-line="${line}"]`;

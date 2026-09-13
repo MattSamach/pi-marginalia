@@ -2179,6 +2179,19 @@ try {
 				await planPage.$eval('[data-path="goals-b"] [data-commentary-post="g1"]', (button) => button.click());
 				await planPage.waitForFunction(() => document.querySelector('[data-commentary-thread="g1"] .thread-card'), { polling: 100 });
 				assert.equal(planPosts[1].commentaryId, "g1", "Section commentary hosts reply threads.");
+				// The prose column stays capped and the rail sits beside it — no dead gap.
+				assert.equal(await planPage.evaluate(() => {
+					const columns = getComputedStyle(document.querySelector('[data-path="goals-b"] .file-layout')).gridTemplateColumns.split(" ");
+					return parseFloat(columns[0]) <= 760.5 && parseFloat(columns[1]) <= 420.5;
+				}), true, "Plan layout caps the prose column and keeps the rail adjacent.");
+				assert.equal(await planPage.evaluate(() => getComputedStyle(document.querySelector('[data-path="steps"] .plan-rail')).borderTopWidth), "0px", "Empty rails paint no chrome.");
+				// Note↔text linkage: hover ties both directions; the anchor click rings.
+				await planPage.evaluate(() => document.querySelector('.agent-note[data-anchor-start] .agent-note-anchor').dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+				assert.equal(await planPage.evaluate(() => [...document.querySelectorAll(".note-target")].map((block) => block.dataset.mdLine).join(",")), "4,5", "Hovering a note tints exactly its anchored blocks.");
+				await planPage.evaluate(() => document.querySelector('[data-path="goals-b"] [data-md-line="4"]').dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+				assert.equal(await planPage.evaluate(() => document.querySelectorAll(".note-target").length === 0 && document.querySelector('.agent-note[data-commentary-id="g1"]').classList.contains("note-hover")), true, "Hovering a block outlines the notes that reference it.");
+				await planPage.evaluate(() => document.querySelector('.agent-note[data-anchor-start] .agent-note-anchor').click());
+				await planPage.waitForFunction(() => document.querySelector('[data-md-line="4"].nav-cursor'), { polling: 100 });
 				await planPage.keyboard.press("Escape");
 				await planPage.keyboard.press("j");
 				assert.equal(await planPage.evaluate(() => document.querySelector(".nav-cursor")?.dataset.mdLine !== undefined), true, "j walks rendered blocks in plan mode.");

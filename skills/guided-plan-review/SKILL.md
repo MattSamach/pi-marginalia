@@ -11,7 +11,7 @@ Use `open_plan_review` to hand the reviewer a rendered plan they can annotate. T
 
 1. Draft the complete plan as one markdown document with real headings. The document is sliced into sections at its **shallowest heading level**, and that outline becomes the sidebar — structure the headings the way you want the plan navigated. The reviewer sees the whole document as one continuous page with no per-section chrome: your headings themselves are the section markers, and your per-section commentary renders as a quiet margin rail beside its section's text. The outline scrolls, it does not paginate.
 2. Call `open_plan_review` once with `title`, the full `markdown`, optional per-section `sections` entries (summary + anchored commentary), and optionally `proposedApprovalNote` prefilling the reviewer's approve screen.
-3. Answer live comment threads promptly with `reply_review_thread`, following the same live-thread rules as code review.
+3. Answer live comment threads promptly with `reply_review_thread`, following the same live-thread rules as code review. Plan threads invite essays — resist. Replies share the margin rail with the prose they annotate, so a long one buries the plan itself. Answer in a few sentences; let the next round's document carry the elaboration.
 4. When the `plan-review-pass` message arrives, revise the plan as **one batch** and call `open_plan_review` again with the **full updated markdown** and `previousRoundId` set to that pass's `snapshot` id. The reviewer's browser advances to the new round automatically.
 5. Repeat rounds until the reviewer approves. The `plan-review-approved` message carries their final `approval-note` and closes the session terminally.
 

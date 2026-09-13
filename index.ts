@@ -314,7 +314,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"When a code-review-thread message arrives, answer promptly with reply_review_thread using that thread id.",
 			"Answer each thread message inside exactly the thread that raised it, taking the thread id from the incoming message; never post placeholder or cross-reference replies into other threads.",
-			"Keep review-thread replies concise and specific to the anchored code; use chat for broader discussion.",
+			"Keep review-thread replies short \u2014 they render in a narrow rail beside the anchored code, so a long reply pushes that code off screen. Lead with the answer, aim for under ~80 words, and move longer discussion to chat or the next round.",
 			"Set resolves=true only when the concern is fully addressed, and never treat a proposal as a resolution.",
 			"Never edit code in response to an individual review thread; keep the worktree identical to the open snapshot until the code-review-pass message arrives, then apply feedback as one batch and open the next round with open_code_review previousRoundId set to that pass's snapshot id.",
 		],

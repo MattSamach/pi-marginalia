@@ -200,6 +200,19 @@ export function renderMarkdown(source, options) {
 			flushList();
 			continue;
 		}
+		// Lazy continuation: while a list is open, a plain line that starts no
+		// other block construct is wrapped text belonging to the item above it,
+		// not a new paragraph — otherwise every wrapped item tears the list
+		// apart and ordered numbering restarts.
+		if (listStack.length) {
+			const target = listStack[listStack.length - 1];
+			const item = target.items[target.items.length - 1];
+			if (item) {
+				item.content += " " + renderInline(line.trim());
+				item.endLine = lineNumber;
+				continue;
+			}
+		}
 		flushList();
 		if (!paragraph.length) paragraphStart = lineNumber;
 		paragraph.push(renderInline(line));

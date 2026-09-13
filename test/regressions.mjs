@@ -1118,6 +1118,14 @@ try {
 	assert.equal(renderMarkdown("Plain **bold** and *soft* text"), "<p>Plain <strong>bold</strong> and <em>soft</em> text</p>");
 	assert.equal(renderMarkdown("line one\nline two\n\nnext para"), "<p>line one<br>line two</p><p>next para</p>");
 	assert.equal(renderMarkdown("- a\n- **b**\n\n1. one\n2) two"), "<ul><li>a</li><li><strong>b</strong></li></ul><ol><li>one</li><li>two</li></ol>");
+	assert.equal(
+		renderMarkdown("1. first\n   wrapped one\n2. second\n   wrapped two\n3. third", { sourceLines: true }),
+		'<ol><li data-md-line="1" data-md-end="2">first wrapped one</li><li data-md-line="3" data-md-end="4">second wrapped two</li><li data-md-line="5" data-md-end="5">third</li></ol>',
+		"Wrapped items lazily continue their list — one <ol>, no restarted numbering, no torn-out paragraphs, honest end stamps.",
+	);
+	assert.equal(renderMarkdown("- alpha\n  wrapped alpha\n- beta"), "<ul><li>alpha wrapped alpha</li><li>beta</li></ul>", "Bulleted lists keep wrapped items too.");
+	assert.equal(renderMarkdown("- outer\n  - inner\n    inner wrap"), "<ul><li>outer<ul><li>inner inner wrap</li></ul></li></ul>", "Continuation joins the deepest open item.");
+	assert.equal(renderMarkdown("- item\n## heading after list"), "<ul><li>item</li></ul><h2>heading after list</h2>", "A real block construct still ends the list; lazy continuation only claims plain lines.");
 	assert.equal(renderMarkdown("see `a < b && **x**` here"), "<p>see <code>a &lt; b &amp;&amp; **x**</code> here</p>", "Code spans are escaped and never emphasized.");
 	assert.equal(renderMarkdown("```js\nif (a < b) alert(\"x\");\n```"), '<pre><code>if (a &lt; b) alert(&quot;x&quot;);</code></pre>', "Fences escape their contents and drop the language tag.");
 	assert.equal(renderMarkdown("```\nunterminated"), "<pre><code>unterminated</code></pre>");

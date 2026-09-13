@@ -107,20 +107,21 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 
 	const manifestSections = manifest.sections === undefined ? [] : manifest.sections;
 	if (!Array.isArray(manifestSections)) fail("Plan manifest sections must be an array.");
+	// Slugs are exact references and win outright; heading text is a
+	// convenience that fails loudly when the document repeats it.
+	const bySlug = new Map(sections.map((section) => [section.slug, section]));
 	const byHeading = new Map();
 	for (const section of sections) {
 		const key = section.title.toLowerCase();
-		// Duplicate heading text is legal in the document but ambiguous as a
-		// reference; such headings must be referenced by slug instead.
 		byHeading.set(key, byHeading.has(key) ? "ambiguous" : section);
-		byHeading.set(section.slug, section);
 	}
 	const claimed = new Set();
 	const extras = new Map();
 	const usedIds = new Set();
 	for (const entry of manifestSections) {
 		if (!entry || typeof entry !== "object" || typeof entry.heading !== "string") fail("Each manifest section needs a heading string.");
-		const section = byHeading.get(entry.heading.trim().toLowerCase());
+		const reference = entry.heading.trim();
+		const section = bySlug.get(reference) ?? byHeading.get(reference.toLowerCase());
 		if (section === "ambiguous") fail(`Heading "${entry.heading}" appears more than once in the plan; reference it by its slug instead.`);
 		if (!section) fail(`Manifest section "${entry.heading}" matches no plan heading. Available: ${sections.map((candidate) => candidate.title).join(" · ")}`);
 		if (claimed.has(section.slug)) fail(`Manifest references heading "${entry.heading}" more than once.`);
@@ -153,16 +154,37 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 		};
 	});
 	const id = createHash("sha256").update(`plan\0${title}\0${markdown}`).digest("hex");
-	// root scopes session replacement: opening a new plan closes the previous
-	// plan session, exactly as a new code review closes its repository's session.
 	return {
 		kind: "plan",
 		id,
 		title,
+		// root scopes session replacement: opening a new plan closes the previous
+		// plan session, exactly as a new code review closes its repository's.
 		root: "plan",
 		files,
 		markdownLines: lines.length,
 		// Rendered on the approve screen through the same field code reviews use.
 		...(manifest.proposedApprovalNote === undefined ? {} : { proposedCommitMessage: manifest.proposedApprovalNote.trim() }),
 	};
+}
+
+/**
+ * Resolve threadResponses' section references (heading text or slug) to slugs
+ * for a plan round. Slugs resolve exactly; duplicated heading text stays
+ * unresolved so the round-advance validation names the offending value. side
+ * is stamped only alongside explicit lines — a section-only anchor stays bare.
+ */
+export function resolvePlanResponses(review, responses) {
+	if (!Array.isArray(responses)) return responses;
+	const bySection = new Map();
+	for (const section of review.files) {
+		const heading = String(section.sectionTitle ?? "").toLowerCase();
+		bySection.set(heading, bySection.has(heading) ? "" : section.path);
+	}
+	for (const section of review.files) bySection.set(section.path.toLowerCase(), section.path);
+	return responses.map((response) => {
+		if (!response || typeof response !== "object" || response.file === undefined) return response;
+		const resolved = bySection.get(String(response.file).trim().toLowerCase()) || response.file;
+		return { ...response, file: resolved, ...(response.startLine === undefined ? {} : { side: "new" }) };
+	});
 }

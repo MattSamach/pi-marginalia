@@ -5,7 +5,7 @@ import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint,
 import { createReviewMessageQueue } from "./shared/delivery-queue.js";
 import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "./shared/feedback.js";
 import { createCodeReviewServer } from "./shared/server.js";
-import { buildPlanReview } from "./shared/plan-review.js";
+import { buildPlanReview, resolvePlanResponses } from "./shared/plan-review.js";
 
 type ReviewThreadTurn = { author: "user" | "pi"; body: string; ts: number; seq?: number; delivered?: boolean };
 type ReviewThread = {
@@ -244,16 +244,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		if (!manifest.previousRoundId && manifest.threadResponses !== undefined) {
 			throw new Error("threadResponses requires previousRoundId; fresh plans have no threads to respond to.");
 		}
-		// Responses may reference sections by heading text; resolve them to slugs.
-		// Duplicate heading text stays unresolved (slugs remain exact).
-		const bySection = new Map<string, string>();
-		for (const section of review.files as { path: string; sectionTitle?: string }[]) {
-			const heading = String(section.sectionTitle ?? "").toLowerCase();
-			bySection.set(heading, bySection.has(heading) ? "" : section.path);
-			bySection.set(section.path.toLowerCase(), section.path);
-		}
-		const responses = manifest.threadResponses?.map((response) => (response.file === undefined ? response : { ...response, file: bySection.get(response.file.trim().toLowerCase()) || response.file, side: "new" }));
-		return openSession(ctx, review, manifest.previousRoundId, responses, {});
+		return openSession(ctx, review, manifest.previousRoundId, resolvePlanResponses(review, manifest.threadResponses), {});
 	};
 
 	pi.registerTool({

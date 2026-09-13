@@ -13,7 +13,7 @@ import { computeIntraline } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
 import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS, threadsAwaitingResponse } from "../shared/threads.js";
 import { createReviewMessageQueue } from "../shared/delivery-queue.js";
-import { buildPlanReview, PLAN_LIMITS, sectionizePlan } from "../shared/plan-review.js";
+import { buildPlanReview, PLAN_LIMITS, resolvePlanResponses, sectionizePlan } from "../shared/plan-review.js";
 
 const exec = promisify(execFile);
 const git = (cwd, ...args) => exec("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -1186,6 +1186,20 @@ try {
 	assert.match(formatThreadMessageXml(plan, planSelection.thread, planSelection.thread.turns[0], 1), /^<plan-review-thread /, "Plan threads speak their own root tag.");
 	assert.match(renderReviewHtml(buildPlanReview({ title: "T", markdown: "## A\nx", proposedApprovalNote: "Adopt & schedule <it>" }), "n"), /<textarea data-approve-message maxlength="20000">Adopt &amp; schedule &lt;it&gt;<\/textarea>/, "The proposed approval note prefills the approve screen, escaped.");
 	assert.throws(() => buildPlanReview({ title: "T", markdown: "## A\nx", proposedApprovalNote: "  " }), /proposedApprovalNote/);
+	const dupPlan = buildPlanReview({ title: "x", markdown: "## Same\na\n## Same\nb\n## Other\nc" });
+	assert.deepEqual(
+		resolvePlanResponses(dupPlan, [
+			{ respondsTo: "t1", resolution: "addressed", body: "b", file: "Other", startLine: 6, endLine: 6 },
+			{ respondsTo: "t2", resolution: "addressed", body: "b", file: "same" },
+			{ respondsTo: "t3", resolution: "addressed", body: "b" },
+		]),
+		[
+			{ respondsTo: "t1", resolution: "addressed", body: "b", file: "other", startLine: 6, endLine: 6, side: "new" },
+			{ respondsTo: "t2", resolution: "addressed", body: "b", file: "same" },
+			{ respondsTo: "t3", resolution: "addressed", body: "b" },
+		],
+		"Heading refs resolve to slugs, side is stamped only with lines, slugs of duplicate headings resolve exactly, and anchorless responses pass through.",
+	);
 	const markdownHtml = renderReviewHtml(applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", summary: "Adds **two** lines", commentary: [{ id: "md-note", body: "Use `x < y` — see [ref](https://example.com)", side: "new", startLine: 1, endLine: 1 }] }] }), "md-nonce");
 	assert.match(markdownHtml, /<div class="file-summary md"><p>Adds <strong>two<\/strong> lines<\/p><\/div>/, "File summaries render markdown server-side.");
 	assert.match(markdownHtml, /<div class="agent-note-body md"><p>Use <code>x &lt; y<\/code> — see <a href="https:\/\/example\.com"[^>]*rel="noopener noreferrer">ref<\/a><\/p><\/div>/, "Commentary notes render markdown with safe links.");
@@ -2127,10 +2141,10 @@ try {
 				await planPage.waitForFunction(() => document.querySelector("[data-review-file].active")?.dataset.path === "steps" && document.querySelector('[data-md-line="8"].nav-cursor'), { polling: 100 });
 				// Round 2: the revised plan carries threads and marks changed sections.
 				const planRound2 = buildPlanReview({ title: "Test Plan", markdown: planMarkdown.replace("- fast", "- blazingly fast") });
-				const planAdvance = planServer.addRound(planRound2, plan.id, [
-					{ respondsTo: planPosts[0].id, resolution: "addressed", body: "Made it measurable.", file: "goals-b", side: "new", startLine: 4, endLine: 4 },
+				const planAdvance = planServer.addRound(planRound2, plan.id, resolvePlanResponses(planRound2, [
+					{ respondsTo: planPosts[0].id, resolution: "addressed", body: "Made it measurable.", file: "Goals <b>", startLine: 4, endLine: 4 },
 					{ respondsTo: planPosts[1].id, resolution: "needs-discussion", body: "Still deciding.", file: "goals-b" },
-				]);
+				]));
 				assert.equal(planAdvance.round, 2, "Plan rounds advance through the generic round machinery.");
 				await planPage.waitForFunction(() => document.body.dataset.round === "2", { polling: 100 });
 				assert.equal(await planPage.evaluate(() => {

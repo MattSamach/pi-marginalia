@@ -215,7 +215,7 @@
   // points — replacing the draft, sending the round, and approving.
   const confirmDiscardDraft = () => {
     if (!draft) return true;
-    if (!window.confirm('Discard the unfinished diff comment?')) return false;
+    if (!window.confirm('Discard the unfinished comment?')) return false;
     cancelDraft();
     return true;
   };
@@ -356,14 +356,14 @@
     if (!highlight) return;
     const pendingRange = range.cloneRange();
     if (draft) {
-      if (!window.confirm('Discard the unfinished diff comment?')) {
+      if (!window.confirm('Discard the unfinished comment?')) {
         selection.removeAllRanges();
         return;
       }
       cancelDraft();
     }
     if ([...highlights.values()].some((existing) => overlaps(pendingRange, existing))) {
-      setStatus('Choose code that is not already highlighted.', true);
+      setStatus(planMode ? 'Choose text that is not already highlighted.' : 'Choose code that is not already highlighted.', true);
       return;
     }
     const highlightId = nextHighlightId++;
@@ -401,7 +401,7 @@
     textarea.focus();
     saveSelectionDraft('');
     syncDraftDot();
-    setStatus('Add feedback for the highlighted diff.');
+    setStatus(planMode ? 'Add feedback for the highlighted plan text.' : 'Add feedback for the highlighted diff.');
   };
   // Lazily reveal unchanged lines around hunks from the frozen snapshot's
   // pinned HEAD blob. Revealed rows are visual context only: they are not part
@@ -1303,7 +1303,8 @@
       resolveCurrent();
     } else if (event.key === 'x') {
       event.preventDefault();
-      const section = activeFile();
+      // Plans have no viewed checklist; the key is inert there.
+      const section = planMode ? undefined : activeFile();
       if (section) setViewed(section.dataset.path, !viewedFiles.has(section.dataset.path));
     } else if (event.key === '?') {
       event.preventDefault();

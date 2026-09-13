@@ -237,9 +237,16 @@
       spyPending = false;
       if (planFocus()) return;
       let best;
-      for (const section of fileSections) {
-        if (section.getBoundingClientRect().top <= 140) best = section;
-        else break;
+      // At the document's end the trailing section wins outright: a short
+      // final section might never reach the viewport-top band, and a nav
+      // click to it must not be overridden by the settling spy.
+      if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 1) {
+        best = fileSections[fileSections.length - 1];
+      } else {
+        for (const section of fileSections) {
+          if (section.getBoundingClientRect().top <= 140) best = section;
+          else break;
+        }
       }
       if (!best || Number(best.dataset.reviewFile) === activeIndex) return;
       activeIndex = Number(best.dataset.reviewFile);

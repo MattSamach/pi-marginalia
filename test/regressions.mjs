@@ -2139,6 +2139,17 @@ try {
 				await planPage.click("[data-view-toggle]");
 				await planPage.waitForFunction(() => !document.body.classList.contains("plan-focus"), { polling: 100 });
 				assert.equal(await planPage.evaluate(() => [...document.querySelectorAll("[data-review-file]")].every((section) => getComputedStyle(section).display !== "none")), true, "The whole document returns on untoggle.");
+				// The spy must never override deliberate navigation, and the document
+				// bottom always belongs to the last section.
+				await planPage.evaluate(() => window.scrollTo(0, 0));
+				await planPage.waitForFunction(() => document.querySelector('[data-review-file="0"]').classList.contains("active"), { polling: 100 });
+				await planPage.evaluate(() => document.querySelector('[data-file-nav="2"]').click());
+				await new Promise((resolvePromise) => setTimeout(resolvePromise, 700));
+				assert.equal(await planPage.$eval('[data-file-nav="2"]', (nav) => nav.classList.contains("active")), true, "A nav click survives the spy's settling.");
+				await planPage.evaluate(() => window.scrollTo(0, 0));
+				await planPage.waitForFunction(() => document.querySelector('[data-review-file="0"]').classList.contains("active"), { polling: 100 });
+				await planPage.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+				await planPage.waitForFunction(() => document.querySelector('[data-review-file="2"]').classList.contains("active"), { polling: 100 });
 				await planPage.evaluate(() => {
 					document.querySelector('[data-file-nav="1"]').click();
 					const block = document.querySelector('.review-file.active [data-md-line="4"]');

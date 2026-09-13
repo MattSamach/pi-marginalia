@@ -1283,6 +1283,33 @@ try {
 			});
 			assert.equal(staleBadgeColors.badge, staleBadgeColors.warning, "The stale badge must keep its warning tint over the generic badge rule, in whichever color scheme the harness resolves.");
 			assert.notEqual(staleBadgeColors.badge, staleBadgeColors.generic, "The warning tint must stay distinguishable from generic badge grey.");
+			const themeProbe = () => page.evaluate(() => {
+				const probe = document.createElement("span");
+				probe.style.color = "var(--ok)";
+				probe.style.backgroundColor = "var(--mark)";
+				document.body.append(probe);
+				const ok = getComputedStyle(probe).color;
+				const mark = getComputedStyle(probe).backgroundColor;
+				probe.remove();
+				return {
+					ok,
+					mark,
+					highlight: getComputedStyle(document.querySelector(".diff-code span"), "::highlight(pi-code-review-feedback)").backgroundColor,
+					approve: getComputedStyle(document.querySelector("[data-approve]")).backgroundColor,
+					background: getComputedStyle(document.body).backgroundColor,
+				};
+			});
+			const lightTheme = await themeProbe();
+			assert.equal(lightTheme.approve, lightTheme.ok, "The approve button follows the scheme-aware ok color.");
+			assert.equal(lightTheme.highlight, lightTheme.mark, "var() must resolve inside the ::highlight pseudo-element.");
+			await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }]);
+			const darkTheme = await themeProbe();
+			assert.equal(darkTheme.approve, darkTheme.ok, "The approve button follows --ok in dark mode too.");
+			assert.equal(darkTheme.highlight, darkTheme.mark, "The selection mark follows --mark in dark mode too.");
+			assert.notEqual(darkTheme.ok, lightTheme.ok, "Dark mode resolves its own ok color, not light's.");
+			assert.notEqual(darkTheme.highlight, lightTheme.highlight, "The selection mark changes with the scheme.");
+			assert.notEqual(darkTheme.background, lightTheme.background, "The page background follows the OS scheme.");
+			await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "light" }]);
 			assert.equal(await page.$eval('details.reference-files', (details) => details.open), false, "Reference files should start collapsed.");
 			await page.waitForFunction(() => document.querySelector('[data-thread-tally]')?.hidden === false);
 			assert.match(await page.$eval('[data-thread-tally]', (section) => section.textContent), /2 open.*2 awaiting you.*0 awaiting Pi.*0 resolved/, "Seeded notes count uniformly from the start.");

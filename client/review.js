@@ -130,7 +130,7 @@
 
   const setStatus = (message, error = false) => {
     globalStatus.textContent = message;
-    globalStatus.style.color = error ? '#cf222e' : '';
+    globalStatus.style.color = error ? 'var(--danger)' : '';
   };
   const errorMessage = (error) => (error instanceof Error ? error.message : 'Request failed');
   const postJson = async (path, payload) => {
@@ -932,7 +932,6 @@
       ? (direction > 0 ? 0 : fileSections.length - 1)
       : (activeIndex + direction + fileSections.length) % fileSections.length;
     if (!confirmDiscardDraft(fileSections[next]?.dataset.path)) return;
-    clearHunkCursor();
     showFile(Number(fileSections[next]?.dataset.reviewFile ?? next));
     const path = fileSections.find((section) => Number(section.dataset.reviewFile) === activeIndex)?.dataset.path;
     if (path) setStatus(path);
@@ -1232,7 +1231,6 @@
       event.preventDefault();
       if (!overviewSection) setStatus('This review has no overview.');
       else if (!showingOverview && confirmDiscardDraft()) {
-        clearHunkCursor();
         showOverview();
         setStatus('Overview.');
       }

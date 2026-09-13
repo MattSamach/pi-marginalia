@@ -1120,6 +1120,33 @@ try {
 	const breakout = renderMarkdown('[x](https://e.com/"onmouseover=alert(1))');
 	assert.ok(breakout.includes('href="https://e.com/&quot;onmouseover=alert(1"'), "Quotes in URLs stay entity-encoded inside the attribute value.");
 	assert.ok(!/"\s+onmouseover/.test(breakout), "No attribute can be injected through a crafted URL.");
+	// Document blocks for plan review: headings, rules, quotes, tables, nesting.
+	assert.equal(renderMarkdown("# One <b>\n### Three *em*\n####### seven"), "<h1>One &lt;b&gt;</h1><h3>Three <em>em</em></h3><p>####### seven</p>", "Headings cap at six hashes and escape their content.");
+	assert.equal(renderMarkdown("above\n---\n* * *\n- - -\nbelow"), "<p>above</p><hr><hr><hr><p>below</p>", "Rule variants render as hr — including dash-space forms that could read as list items.");
+	assert.equal(renderMarkdown("> quoted <script>\n> line two\n>\n> next para"), "<blockquote><p>quoted &lt;script&gt;<br>line two</p><p>next para</p></blockquote>", "Blockquotes match the escaped marker, escape contents, and split paragraphs.");
+	assert.equal(
+		renderMarkdown("| A | B |\n| --- | --- |\n| `x < y` | <img src=x> |"),
+		"<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td><code>x &lt; y</code></td><td>&lt;img src=x&gt;</td></tr></tbody></table>",
+		"Tables render whitelisted cells with inline markdown and full escaping.",
+	);
+	assert.equal(renderMarkdown("a | b\nplain"), "<p>a | b<br>plain</p>", "A pipe line without a separator row stays a paragraph.");
+	assert.equal(
+		renderMarkdown("- top\n  - inner **x**\n  - inner 2\n- top 2\n  1. num\n- top 3"),
+		"<ul><li>top<ul><li>inner <strong>x</strong></li><li>inner 2</li></ul></li><li>top 2<ol><li>num</li></ol></li><li>top 3</li></ul>",
+		"Lists nest by indentation, mixing ordered children under unordered parents.",
+	);
+	assert.equal(
+		renderMarkdown("# H\n\npara\ntwo\n\n- a\n  - b\n\n```\ncode\n```", { sourceLines: true }),
+		'<h1 data-md-line="1" data-md-end="1">H</h1><p data-md-line="3" data-md-end="4">para<br>two</p><ul><li data-md-line="6" data-md-end="6">a<ul><li data-md-line="7" data-md-end="7">b</li></ul></li></ul><pre data-md-line="9" data-md-end="11"><code>code</code></pre>',
+		"sourceLines maps every block back to its 1-based source range.",
+	);
+	assert.doesNotMatch(renderMarkdown("# H\n\n- a"), /data-md-line/, "Without the option no source attributes are emitted — thread bodies stay unchanged.");
+	assert.equal(
+		renderMarkdown("> a\n> b\r\n\r\n| A |\n| - |\n| x |", { sourceLines: true }),
+		'<blockquote data-md-line="1" data-md-end="2"><p>a<br>b</p></blockquote><table data-md-line="4" data-md-end="6"><thead><tr><th>A</th></tr></thead><tbody><tr><td>x</td></tr></tbody></table>',
+		"Blockquote and table end ranges stay exact, and CRLF input keeps line numbers aligned.",
+	);
+	assert.equal(renderMarkdown("option a | option b\n---"), "<p>option a | option b</p><hr>", "A separator whose column count mismatches the pipe line above is not a table.");
 	const markdownHtml = renderReviewHtml(applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", summary: "Adds **two** lines", commentary: [{ id: "md-note", body: "Use `x < y` — see [ref](https://example.com)", side: "new", startLine: 1, endLine: 1 }] }] }), "md-nonce");
 	assert.match(markdownHtml, /<div class="file-summary md"><p>Adds <strong>two<\/strong> lines<\/p><\/div>/, "File summaries render markdown server-side.");
 	assert.match(markdownHtml, /<div class="agent-note-body md"><p>Use <code>x &lt; y<\/code> — see <a href="https:\/\/example\.com"[^>]*rel="noopener noreferrer">ref<\/a><\/p><\/div>/, "Commentary notes render markdown with safe links.");

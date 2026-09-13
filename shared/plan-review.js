@@ -104,13 +104,21 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 
 	const manifestSections = manifest.sections === undefined ? [] : manifest.sections;
 	if (!Array.isArray(manifestSections)) fail("Plan manifest sections must be an array.");
-	const byHeading = new Map(sections.map((section) => [section.title.toLowerCase(), section]));
+	const byHeading = new Map();
+	for (const section of sections) {
+		const key = section.title.toLowerCase();
+		// Duplicate heading text is legal in the document but ambiguous as a
+		// reference; such headings must be referenced by slug instead.
+		byHeading.set(key, byHeading.has(key) ? "ambiguous" : section);
+		byHeading.set(section.slug, section);
+	}
 	const claimed = new Set();
 	const extras = new Map();
 	const usedIds = new Set();
 	for (const entry of manifestSections) {
 		if (!entry || typeof entry !== "object" || typeof entry.heading !== "string") fail("Each manifest section needs a heading string.");
 		const section = byHeading.get(entry.heading.trim().toLowerCase());
+		if (section === "ambiguous") fail(`Heading "${entry.heading}" appears more than once in the plan; reference it by its slug instead.`);
 		if (!section) fail(`Manifest section "${entry.heading}" matches no plan heading. Available: ${sections.map((candidate) => candidate.title).join(" · ")}`);
 		if (claimed.has(section.slug)) fail(`Manifest references heading "${entry.heading}" more than once.`);
 		claimed.add(section.slug);
@@ -142,5 +150,7 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 		};
 	});
 	const id = createHash("sha256").update(`plan\0${title}\0${markdown}`).digest("hex");
-	return { kind: "plan", id, title, files, markdownLines: lines.length };
+	// root scopes session replacement: opening a new plan closes the previous
+	// plan session, exactly as a new code review closes its repository's session.
+	return { kind: "plan", id, title, root: "plan", files, markdownLines: lines.length };
 }

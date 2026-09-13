@@ -82,6 +82,7 @@
   const approveOverlay = document.querySelector('[data-approve-overlay]');
   const approveMessage = document.querySelector('[data-approve-message]');
   const approveStale = document.querySelector('[data-approve-stale]');
+  const planMode = document.body.dataset.reviewKind === 'plan';
   let stale = false;
   const staleBadgeBaseTitle = staleBadge?.title ?? '';
   // Amber sidebar dots on the files whose reviewed content drifted; paths
@@ -303,6 +304,22 @@
     if (!/(?:^#|[#&])(?:thread|loc)=/.test(window.location.hash || '')) showFile(Number(section.dataset.reviewFile));
     syncDraftDot();
   };
+  // Plan documents anchor on rendered markdown blocks instead of diff rows;
+  // each block carries its absolute source-line range.
+  const planBlockAt = (section, line) => [...section.querySelectorAll('[data-md-line]')].find((block) => Number(block.dataset.mdLine) <= line && line <= Number(block.dataset.mdEnd));
+  const closestBlock = (node) => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('[data-md-line]');
+  const selectedBlocks = (range) => {
+    const startBlock = closestBlock(range.startContainer);
+    const endBlock = closestBlock(range.endContainer);
+    const startSection = startBlock?.closest('[data-review-file]');
+    const endSection = endBlock?.closest('[data-review-file]');
+    if (!startBlock || !endBlock || !startSection || startSection !== endSection) return undefined;
+    return {
+      section: startSection,
+      planStart: Math.min(Number(startBlock.dataset.mdLine), Number(endBlock.dataset.mdLine)),
+      planEnd: Math.max(Number(startBlock.dataset.mdEnd), Number(endBlock.dataset.mdEnd)),
+    };
+  };
   const closestCode = (node) => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('.diff-code');
   const selectedRows = (range) => {
     const startCode = closestCode(range.startContainer);
@@ -326,9 +343,9 @@
     const selection = window.getSelection();
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return;
     const range = selection.getRangeAt(0);
-    const selected = selectedRows(range);
+    const selected = planMode ? selectedBlocks(range) : selectedRows(range);
     if (!selected) {
-      setStatus('Select diff code within a single file.', true);
+      setStatus(planMode ? 'Select plan text within a single section.' : 'Select diff code within a single file.', true);
       return;
     }
     if (selected.expanded) {
@@ -356,20 +373,24 @@
       setStatus('Text highlighting is not supported by this browser.', true);
       return;
     }
-    const oldLines = selected.rows.map((row) => Number(row.dataset.oldLine)).filter(Number.isInteger);
-    const newLines = selected.rows.map((row) => Number(row.dataset.newLine)).filter(Number.isInteger);
-    const kinds = new Set(selected.rows.map((row) => row.dataset.kind));
-    const side = kinds.size === 1 && kinds.has('add') ? 'new' : kinds.size === 1 && kinds.has('del') ? 'old' : 'both';
-    draft = {
-      highlightId,
-      file: selected.section.dataset.path,
-      side,
-      oldStart: oldLines.length ? Math.min(...oldLines) : undefined,
-      oldEnd: oldLines.length ? Math.max(...oldLines) : undefined,
-      newStart: newLines.length ? Math.min(...newLines) : undefined,
-      newEnd: newLines.length ? Math.max(...newLines) : undefined,
-      highlight,
-    };
+    if (planMode) {
+      draft = { highlightId, file: selected.section.dataset.path, side: 'new', newStart: selected.planStart, newEnd: selected.planEnd, highlight };
+    } else {
+      const oldLines = selected.rows.map((row) => Number(row.dataset.oldLine)).filter(Number.isInteger);
+      const newLines = selected.rows.map((row) => Number(row.dataset.newLine)).filter(Number.isInteger);
+      const kinds = new Set(selected.rows.map((row) => row.dataset.kind));
+      const side = kinds.size === 1 && kinds.has('add') ? 'new' : kinds.size === 1 && kinds.has('del') ? 'old' : 'both';
+      draft = {
+        highlightId,
+        file: selected.section.dataset.path,
+        side,
+        oldStart: oldLines.length ? Math.min(...oldLines) : undefined,
+        oldEnd: oldLines.length ? Math.max(...oldLines) : undefined,
+        newStart: newLines.length ? Math.min(...newLines) : undefined,
+        newEnd: newLines.length ? Math.max(...newLines) : undefined,
+        highlight,
+      };
+    }
     const composer = selected.section.querySelector('[data-selection-composer]');
     composer.hidden = false;
     composer.querySelector('[data-selection-quote]').textContent = highlight;
@@ -943,9 +964,9 @@
       setStatus('Open a file to walk its hunks — ] switches files.');
       return;
     }
-    const hunks = [...section.querySelectorAll('tr[data-kind="hunk"]')];
+    const hunks = [...section.querySelectorAll(planMode ? '[data-md-line]' : 'tr[data-kind="hunk"]')];
     if (!hunks.length) {
-      setStatus('This file has no hunks to walk.');
+      setStatus(planMode ? 'This section has no blocks to walk.' : 'This file has no hunks to walk.');
       return;
     }
     const at = hunkCursor ? hunks.indexOf(hunkCursor) : -1;
@@ -1084,6 +1105,10 @@
       const section = note.closest('[data-review-file]');
       const side = note.dataset.anchorSide;
       const line = note.dataset.anchorStart;
+      if (planMode) {
+        planBlockAt(section, Number(line))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
       const selector = side === 'old' ? `[data-old-line="${line}"]` : side === 'new' ? `[data-new-line="${line}"]` : `[data-old-line="${line}"], [data-new-line="${line}"]`;
       section.querySelector(selector)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
@@ -1314,9 +1339,11 @@
     const section = sectionForPath(parts[1]);
     if (!section) return;
     showFile(Number(section.dataset.reviewFile));
-    const row = section.querySelector(parts[2] === 'L' ? 'tr[data-new-line="' + parts[3] + '"]' : 'tr[data-old-line="' + parts[3] + '"]');
+    const row = planMode
+      ? (parts[2] === 'L' ? planBlockAt(section, Number(parts[3])) : undefined)
+      : section.querySelector(parts[2] === 'L' ? 'tr[data-new-line="' + parts[3] + '"]' : 'tr[data-old-line="' + parts[3] + '"]');
     if (!row) {
-      setStatus('That line is not visible in this diff — it may sit in an unexpanded gap.', true);
+      setStatus(planMode ? 'That line has no rendered block in this plan.' : 'That line is not visible in this diff — it may sit in an unexpanded gap.', true);
       return;
     }
     clearHunkCursor();

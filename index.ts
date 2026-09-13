@@ -5,6 +5,7 @@ import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint,
 import { createReviewMessageQueue } from "./shared/delivery-queue.js";
 import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "./shared/feedback.js";
 import { createCodeReviewServer } from "./shared/server.js";
+import { buildPlanReview } from "./shared/plan-review.js";
 
 type ReviewThreadTurn = { author: "user" | "pi"; body: string; ts: number; seq?: number; delivered?: boolean };
 type ReviewThread = {
@@ -49,6 +50,33 @@ const reviewOverviewSchema = Type.Object({
 	reviewFocus: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "At most one area where human judgment is especially useful." })),
 	risks: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "At most one material risk, limitation, or deferred gap." })),
 });
+const planCommentarySchema = Type.Object({
+	id: Type.String({ minLength: 1, maxLength: 20_000, description: "Stable ID unique within this plan; used to identify user replies." }),
+	body: Type.String({ minLength: 1, maxLength: 20_000, description: "Pi's note on this part of the plan — rationale, tradeoff, open question." }),
+	startLine: Type.Optional(Type.Integer({ minimum: 1, description: "Absolute 1-based source line in the plan markdown this note anchors to; must fall inside its section." })),
+	endLine: Type.Optional(Type.Integer({ minimum: 1 })),
+});
+const planSectionSchema = Type.Object({
+	heading: Type.String({ minLength: 1, maxLength: 500, description: "Exact heading text of a plan section (case-insensitive match)." }),
+	summary: Type.Optional(Type.String({ maxLength: 2_000, description: "Section-level context: why this section is shaped this way, what to scrutinize." })),
+	commentary: Type.Optional(Type.Array(planCommentarySchema, { maxItems: 20 })),
+});
+const openPlanReviewSchema = Type.Object({
+	title: Type.String({ minLength: 1, maxLength: 200 }),
+	markdown: Type.String({ minLength: 1, maxLength: 1_048_576, description: "The full plan document as markdown. It is sliced into sections at its shallowest heading level; the reviewer annotates the rendered document." }),
+	sections: Type.Optional(Type.Array(planSectionSchema, { maxItems: 200, description: "Optional per-section summaries and anchored commentary, referenced by heading text." })),
+	previousRoundId: Type.Optional(Type.String({ minLength: 8, maxLength: 200, description: "Snapshot id of the current round of an open plan session (the snapshot attribute of the plan-review-pass message). Opens the revised plan as the next round in the same browser session." })),
+	threadResponses: Type.Optional(Type.Array(Type.Object({
+		respondsTo: Type.String({ minLength: 1, maxLength: 200, description: "Open thread id from the previous round's plan-review-pass message." }),
+		resolution: Type.String({ pattern: "^(addressed|declined|needs-discussion)$" }),
+		body: Type.String({ minLength: 1, maxLength: 20_000, description: "Resolution commentary shown at the top of the carried thread." }),
+		file: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Section of the new plan (heading text or slug) where the reviewer should verify the response. Omit only when the anchor is truly gone." })),
+		startLine: Type.Optional(Type.Integer({ minimum: 1, description: "Absolute source line in the NEW plan markdown." })),
+		endLine: Type.Optional(Type.Integer({ minimum: 1 })),
+	}), { maxItems: 400, description: "Required with previousRoundId when the previous round has open threads: exactly one response per open thread." })),
+});
+type OpenPlanReviewInput = Static<typeof openPlanReviewSchema>;
+
 const openCodeReviewSchema = Type.Object({
 	title: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
 	proposedCommitMessage: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000, description: "Proposed commit message prefilled on the reviewer's Approve screen; the reviewer may edit it before approving. Omitted next rounds keep the previous proposal." })),
@@ -138,17 +166,12 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	const queue = createReviewMessageQueue((messages: string[]) => pi.sendUserMessage(messages.join("\n\n")));
 
 	type ReviewRound = { number: number; review: { id: string; root: string } };
-	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal) => {
-		const snapshot = await collectReviewSnapshot(ctx.cwd, { signal });
-		const review = applyReviewManifest(snapshot, manifest);
-		const previousRoundId = "previousRoundId" in manifest ? manifest.previousRoundId : undefined;
-		if (!previousRoundId && "threadResponses" in manifest && manifest.threadResponses !== undefined) {
-			throw new Error("threadResponses requires previousRoundId; fresh reviews have no threads to respond to.");
-		}
+	const openSession = async (ctx: ExtensionContext, review: { kind?: string; id: string; root: string; title: string; files: { path: string }[] }, previousRoundId: string | undefined, threadResponses: unknown, serverExtras: Record<string, unknown>) => {
+		const noun = review.kind === "plan" ? "Plan" : "Review";
 		if (previousRoundId) {
 			const server = [...servers].find((candidate) => candidate.hasRound(previousRoundId));
 			if (!server) throw new Error(`No open review session contains round ${previousRoundId.slice(0, 12)}. Open a fresh review without previousRoundId.`);
-			const added = server.addRound(review, previousRoundId, "threadResponses" in manifest ? manifest.threadResponses : undefined);
+			const added = server.addRound(review, previousRoundId, threadResponses);
 			if (added.error === "approved") throw new Error("This review session was approved and is closed; open a fresh review without previousRoundId if another unit needs review.");
 			if (added.error === "superseded") throw new Error(`Round ${previousRoundId.slice(0, 12)} is already superseded; the current round is ${added.currentRoundId?.slice(0, 12)} (round ${added.currentRound}).`);
 			if (added.error === "wrong-root") throw new Error("The new snapshot belongs to a different repository than the open review session.");
@@ -168,27 +191,27 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 				// not be reported as a delivery failure (the server would requeue an
 				// escalation whose content is already on its way).
 				try {
-					ctx.ui.notify(`Review thread ${thread.id}: ${turns.length === 1 ? "new reviewer message" : `${turns.length} reviewer messages`}${queued ? " (queued until Pi settles)" : ""}.`, "info");
+					ctx.ui.notify(`${noun} thread ${thread.id}: ${turns.length === 1 ? "new reviewer message" : `${turns.length} reviewer messages`}${queued ? " (queued until Pi settles)" : ""}.`, "info");
 				} catch {}
 			},
 			onFinishPass: async (round: ReviewRound, note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
-				let stale = true;
-				try {
-					stale = (await currentSnapshotId(round.review.root)) !== round.review.id;
-				} catch {}
+				// Plans have no worktree to drift from; only code snapshots re-check.
+				let stale = false;
+				if (review.kind !== "plan") {
+					stale = true;
+					try {
+						stale = (await currentSnapshotId(round.review.root)) !== round.review.id;
+					} catch {}
+				}
 				const queued = queue.post(formatReviewPassXml(round.review, threads, summary, stale, note, round.number), ctx.isIdle());
-				ctx.ui.notify(`Review round ${round.number} pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s)${queued ? " (queued until Pi settles)" : ""}.`, "info");
+				ctx.ui.notify(`${noun} round ${round.number} pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s)${queued ? " (queued until Pi settles)" : ""}.`, "info");
 				return { stale };
-			},
-			staleness: {
-				fingerprint: () => computeWorktreeFingerprint(review.root),
-				snapshot: () => currentSnapshotProbe(review.root),
 			},
 			onApprove: async (round: ReviewRound, message: string, staleNow: boolean) => {
 				const queued = queue.post(formatReviewApprovedXml(round.review, round.number, message, staleNow), ctx.isIdle());
-				ctx.ui.notify(`Review round ${round.number} approved${staleNow ? " (worktree has drifted)" : ""}${queued ? " (queued until Pi settles)" : ""}.`, "info");
+				ctx.ui.notify(`${noun} round ${round.number} approved${staleNow ? " (worktree has drifted)" : ""}${queued ? " (queued until Pi settles)" : ""}.`, "info");
 			},
-			contextLines: createPinnedBlobContextReader(),
+			...serverExtras,
 		});
 		servers.add(server);
 		try {
@@ -199,6 +222,37 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			throw error;
 		}
 		return { review, server, round: 1, identical: false };
+	};
+	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal) => {
+		const snapshot = await collectReviewSnapshot(ctx.cwd, { signal });
+		const review = applyReviewManifest(snapshot, manifest);
+		const previousRoundId = "previousRoundId" in manifest ? manifest.previousRoundId : undefined;
+		if (!previousRoundId && "threadResponses" in manifest && manifest.threadResponses !== undefined) {
+			throw new Error("threadResponses requires previousRoundId; fresh reviews have no threads to respond to.");
+		}
+		return openSession(ctx, review, previousRoundId, "threadResponses" in manifest ? manifest.threadResponses : undefined, {
+			staleness: {
+				fingerprint: () => computeWorktreeFingerprint(review.root),
+				snapshot: () => currentSnapshotProbe(review.root),
+			},
+			contextLines: createPinnedBlobContextReader(),
+		});
+	};
+	const openPlan = async (ctx: ExtensionContext, manifest: OpenPlanReviewInput) => {
+		const review = buildPlanReview(manifest);
+		if (!manifest.previousRoundId && manifest.threadResponses !== undefined) {
+			throw new Error("threadResponses requires previousRoundId; fresh plans have no threads to respond to.");
+		}
+		// Responses may reference sections by heading text; resolve them to slugs.
+		// Duplicate heading text stays unresolved (slugs remain exact).
+		const bySection = new Map<string, string>();
+		for (const section of review.files as { path: string; sectionTitle?: string }[]) {
+			const heading = String(section.sectionTitle ?? "").toLowerCase();
+			bySection.set(heading, bySection.has(heading) ? "" : section.path);
+			bySection.set(section.path.toLowerCase(), section.path);
+		}
+		const responses = manifest.threadResponses?.map((response) => (response.file === undefined ? response : { ...response, file: bySection.get(response.file.trim().toLowerCase()) || response.file, side: "new" }));
+		return openSession(ctx, review, manifest.previousRoundId, responses, {});
 	};
 
 	pi.registerTool({
@@ -227,6 +281,35 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			return {
 				content: [{ type: "text", text: `Opened code review ${review.id.slice(0, 12)}${round && round > 1 ? ` as round ${round}; the reviewer's browser advances automatically` : ""} with ${review.files.length} changed file(s). The browser posts live comment threads; reply with reply_review_thread and wait for the reviewer's code-review-pass message.` }],
 				details: { snapshot: review.id, round, files: review.files.map((file: { path: string }) => file.path), url: server.url.replace(/\?.*$/, "") },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "open_plan_review",
+		label: "Open Plan Review",
+		description: "Open a browser review of a markdown plan document. The plan is sliced into sections at its shallowest heading level; the reviewer reads the rendered document, selects text to open comment threads, and replies to your per-section commentary. Threads arrive as plan-review-thread messages; answer each with reply_review_thread, and treat the plan-review-pass message as the signal that the pass is complete. To revise, call this tool again with the FULL updated markdown and previousRoundId set to that pass's snapshot id: the new plan opens as the next round in the same browser session. The next round must include threadResponses: exactly one {respondsTo, resolution, body} per open thread whose reviewer content you have received, anchored to a section (heading text) and absolute source lines of the NEW markdown, or no section only when the concern's home is truly gone. When the reviewer approves, a plan-review-approved message carries their approval note and the session closes terminally.",
+		promptSnippet: "Open a browser review of a markdown plan with sections, threads, and rounds",
+		promptGuidelines: [
+			"Use open_plan_review when the user wants to iterate on a plan, proposal, or design document interactively — draft the full plan as markdown with clear headings, then open it for annotation.",
+			"Give plan sections real headings; the document is sliced into sections at its shallowest heading level and the sidebar becomes that outline.",
+			"Use open_plan_review sections[].commentary for rationale and open questions anchored to specific plan lines — the reviewer replies in place.",
+			"After a plan-review-pass message, revise the plan as one batch and reopen with previousRoundId and the full updated markdown; answer every open thread in threadResponses with an honest resolution anchored into the new document.",
+			"Plan approval is not an instruction to start coding; it closes the planning session with the reviewer's approval note. Follow the session's own workflow for what happens next.",
+		],
+		parameters: openPlanReviewSchema,
+		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
+			onUpdate?.({ content: [{ type: "text", text: "Building the plan review…" }], details: {} });
+			const { review, server, round, identical } = await openPlan(ctx, params);
+			if (identical) {
+				return {
+					content: [{ type: "text", text: `The plan is identical to round ${round} — nothing changed. The session stays on that round; continue answering its threads with reply_review_thread.` }],
+					details: { snapshot: review.id, round, identical: true },
+				};
+			}
+			return {
+				content: [{ type: "text", text: `Opened plan review ${review.id.slice(0, 12)}${round && round > 1 ? ` as round ${round}; the reviewer's browser advances automatically` : ""} with ${review.files.length} section(s). The browser posts live comment threads; reply with reply_review_thread and wait for the reviewer's plan-review-pass message.` }],
+				details: { snapshot: review.id, round, sections: review.files.map((file: { path: string }) => file.path), url: server.url.replace(/\?.*$/, "") },
 			};
 		},
 	});

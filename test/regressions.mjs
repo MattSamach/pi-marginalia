@@ -1165,6 +1165,8 @@ try {
 	assert.throws(() => buildPlanReview({ title: "x", markdown: planMarkdown, sections: [{ heading: "missing" }] }), /matches no plan heading/);
 	assert.throws(() => buildPlanReview({ title: "x", markdown: planMarkdown, sections: [{ heading: "Steps", commentary: [{ id: "s1", body: "b", startLine: 3 }] }] }), /outside its section/);
 	assert.throws(() => buildPlanReview({ title: "x", markdown: planMarkdown, sections: [{ heading: "Steps" }, { heading: "steps" }] }), /more than once/);
+	assert.throws(() => buildPlanReview({ title: "x", markdown: "## Same\na\n## Same\nb", sections: [{ heading: "Same" }] }), /reference it by its slug/, "Duplicate heading text is ambiguous as a reference.");
+	assert.equal(buildPlanReview({ title: "x", markdown: "## Same\na\n## Same\nb", sections: [{ heading: "same-2", summary: "второй" }] }).files[1].summary, "второй", "Slugs stay exact references even for duplicate headings.");
 	const planStore = createThreadStore(plan);
 	const planSelection = planStore.postUserTurn({ source: "selection", file: "goals-b", side: "new", newStart: 4, newEnd: 5, highlight: "- fast\n- safe", body: "Tighten these goals." });
 	assert.equal(planSelection.thread.status, "open", "Plan selections anchor on absolute source lines.");
@@ -2072,6 +2074,54 @@ try {
 				await ctxPage.close();
 			} finally {
 				await ctxServer.close();
+			}
+
+			// Plan review: rendered markdown sections host selection threads anchored
+			// on absolute source lines, section commentary replies, and block nav.
+			const planPosts = [];
+			const planServer = await createCodeReviewServer(plan, {
+				onThreadPost: async (_round, thread) => {
+					planPosts.push(thread);
+				},
+				onFinishPass: async () => ({ stale: false }),
+			});
+			try {
+				const planPage = await browser.newPage();
+				await planPage.goto(planServer.url, { waitUntil: "domcontentloaded" });
+				await planPage.waitForFunction(() => document.body.dataset.reviewKind === "plan" && document.querySelector(".plan-doc"), { polling: 100 });
+				assert.equal(await planPage.$eval('[data-file-nav="1"]', (nav) => nav.textContent.includes("Goals <b>")), true, "The sidebar lists section titles.");
+				await planPage.evaluate(() => {
+					document.querySelector('[data-file-nav="1"]').click();
+					const block = document.querySelector('.review-file.active [data-md-line="4"]');
+					const range = document.createRange();
+					range.selectNodeContents(block);
+					const selection = window.getSelection();
+					selection.removeAllRanges();
+					selection.addRange(range);
+					block.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await planPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false, { polling: 100 });
+				assert.equal(await planPage.$eval(".review-file.active [data-selection-quote]", (quote) => quote.textContent), "fast", "The quote carries the rendered selection text.");
+				await planPage.type(".review-file.active [data-selection-feedback]", "Make this measurable.");
+				await planPage.click(".review-file.active [data-selection-add]");
+				await planPage.waitForFunction(() => document.querySelector(".thread-card"), { polling: 100 });
+				assert.deepEqual(
+					[planPosts[0].file, planPosts[0].side, planPosts[0].newStart, planPosts[0].newEnd, planPosts[0].highlight],
+					["goals-b", "new", 4, 4, "fast"],
+					"Plan selection threads anchor on the block's absolute source lines.",
+				);
+				await planPage.type('.review-file.active [data-commentary-reply="g1"]', "Agreed, keep the note.");
+				await planPage.click('.review-file.active [data-commentary-post="g1"]');
+				await planPage.waitForFunction(() => document.querySelector('[data-commentary-thread="g1"] .thread-card'), { polling: 100 });
+				assert.equal(planPosts[1].commentaryId, "g1", "Section commentary hosts reply threads.");
+				await planPage.keyboard.press("Escape");
+				await planPage.keyboard.press("j");
+				assert.equal(await planPage.evaluate(() => document.querySelector(".nav-cursor")?.dataset.mdLine !== undefined), true, "j walks rendered blocks in plan mode.");
+				await planPage.goto(`${new URL(planServer.url).origin}/#loc=steps:L8`, { waitUntil: "domcontentloaded" });
+				await planPage.waitForFunction(() => document.querySelector("[data-review-file].active")?.dataset.path === "steps" && document.querySelector('[data-md-line="8"].nav-cursor'), { polling: 100 });
+				await planPage.close();
+			} finally {
+				await planServer.close();
 			}
 
 			// Per-file drift marks: the staleness event lights amber dots on exactly

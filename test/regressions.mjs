@@ -2168,6 +2168,8 @@ try {
 				await planPage.type('[data-path="goals-b"] [data-selection-feedback]', "Make this measurable.");
 				await planPage.$eval('[data-path="goals-b"] [data-selection-add]', (button) => button.click());
 				await planPage.waitForFunction(() => document.querySelector(".thread-card"), { polling: 100 });
+				assert.equal(await planPage.evaluate(() => getComputedStyle(document.querySelector('[data-path="goals-b"] .plan-rail .user-comments')).display), "block", "The rail's thread block reveals once a card exists.");
+				assert.equal(await planPage.evaluate(() => getComputedStyle(document.querySelector('[data-path="steps"] .plan-rail .user-comments')).display), "none", "Card-less rails keep their thread block hidden.");
 				assert.deepEqual(
 					[planPosts[0].file, planPosts[0].side, planPosts[0].newStart, planPosts[0].newEnd, planPosts[0].highlight],
 					["goals-b", "new", 4, 4, "fast"],

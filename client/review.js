@@ -190,8 +190,11 @@
     navButtons.forEach((item) => item.classList.toggle('active', Number(item.dataset.fileNav) === index));
     window.scrollTo({ top: 0, behavior: 'instant' });
   };
-  const confirmDiscardDraft = () => {
+  const confirmDiscardDraft = (targetPath) => {
     if (!draft) return true;
+    // Navigating to the file that hosts the draft abandons nothing — the
+    // composer is right there — so it must never ask.
+    if (targetPath !== undefined && targetPath === draft.file) return true;
     if (!window.confirm('Discard the unfinished diff comment?')) return false;
     cancelDraft();
     return true;
@@ -264,6 +267,9 @@
     const textarea = composer.querySelector('[data-selection-feedback]');
     textarea.value = parsed.text ?? '';
     composer.querySelector('[data-selection-add]').disabled = !textarea.value.trim();
+    // Land on the draft's file so the restored composer is visible; an
+    // explicit deep link in the hash wins the navigation instead.
+    if (!/(?:^#|[#&])(?:thread|loc)=/.test(window.location.hash || '')) showFile(Number(section.dataset.reviewFile));
   };
   const closestCode = (node) => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('.diff-code');
   const selectedRows = (range) => {
@@ -877,9 +883,11 @@
       setStatus('Nothing awaiting you.');
       return;
     }
-    if (!confirmDiscardDraft()) return;
-    if (direction > 0) navIndex = (navIndex + 1) % awaiting.length;
-    else navIndex = navIndex < 0 ? awaiting.length - 1 : (navIndex - 1 + awaiting.length) % awaiting.length;
+    const nextIndex = direction > 0
+      ? (navIndex + 1) % awaiting.length
+      : navIndex < 0 ? awaiting.length - 1 : (navIndex - 1 + awaiting.length) % awaiting.length;
+    if (!confirmDiscardDraft(awaiting[nextIndex].file)) return;
+    navIndex = nextIndex;
     revealThread(awaiting[navIndex]);
   };
   const revealThread = (thread) => {
@@ -920,11 +928,11 @@
   };
   const stepFile = (direction) => {
     if (!fileSections.length) return;
-    if (!confirmDiscardDraft()) return;
-    clearHunkCursor();
     const next = showingOverview
       ? (direction > 0 ? 0 : fileSections.length - 1)
       : (activeIndex + direction + fileSections.length) % fileSections.length;
+    if (!confirmDiscardDraft(fileSections[next]?.dataset.path)) return;
+    clearHunkCursor();
     showFile(Number(fileSections[next]?.dataset.reviewFile ?? next));
     const path = fileSections.find((section) => Number(section.dataset.reviewFile) === activeIndex)?.dataset.path;
     if (path) setStatus(path);
@@ -1092,7 +1100,7 @@
     const blockers = [...threads.values()].filter((thread) => thread.status === 'open').sort((left, right) => sectionIndexOf(left) - sectionIndexOf(right) || threadNumber(left) - threadNumber(right));
     if (blockers.length) {
       setStatus(blockers.length + ' thread' + (blockers.length === 1 ? '' : 's') + ' still open — resolve every thread to approve.', true);
-      if (confirmDiscardDraft()) revealThread(blockers[0]);
+      if (confirmDiscardDraft(blockers[0].file)) revealThread(blockers[0]);
       return;
     }
     if (!approveOverlay) return;
@@ -1133,7 +1141,7 @@
   });
   navButtons.forEach((button) => {
     button.addEventListener('click', () => {
-      if (!confirmDiscardDraft()) return;
+      if (!confirmDiscardDraft(reviewRoot.querySelector('[data-review-file="' + button.dataset.fileNav + '"]')?.dataset.path)) return;
       showFile(Number(button.dataset.fileNav));
       setStatus('Select changed code or reply to Pi.');
     });
@@ -1277,7 +1285,7 @@
     if (!parts) return;
     const section = sectionForPath(parts[1]);
     if (!section) return;
-    if (!confirmDiscardDraft()) return;
+    if (!confirmDiscardDraft(section.dataset.path)) return;
     showFile(Number(section.dataset.reviewFile));
     const row = section.querySelector(parts[2] === 'L' ? 'tr[data-new-line="' + parts[3] + '"]' : 'tr[data-old-line="' + parts[3] + '"]');
     if (!row) {

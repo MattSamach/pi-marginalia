@@ -1663,6 +1663,51 @@ try {
 				});
 				assert.equal(await plainPage.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("picr:")).length), 0, "Clearing a draft removes its stored copy.");
 
+				// A restored selection draft must be reachable: reload lands on its
+				// file with the composer visible, and navigating to that file never
+				// asks to discard — only navigating away does.
+				const draftDialogs = [];
+				const recordDialog = (dialog) => {
+					draftDialogs.push(dialog.message());
+					dialog.dismiss().catch(() => {});
+				};
+				plainPage.on("dialog", recordDialog);
+				const draftFilePath = await plainPage.evaluate(() => {
+					const active = document.querySelector(".review-file.active");
+					const rowSelector = "tr.diff-add .diff-code span, tr.diff-del .diff-code span, tr.diff-context .diff-code span";
+					const section = [...document.querySelectorAll("[data-review-file]")].find((candidate) => candidate !== active && candidate.querySelector(rowSelector));
+					document.querySelector(`[data-file-nav="${section.dataset.reviewFile}"]`).click();
+					const code = section.querySelector(rowSelector);
+					const range = document.createRange();
+					range.selectNodeContents(code);
+					const selection = window.getSelection();
+					selection.removeAllRanges();
+					selection.addRange(range);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+					return section.dataset.path;
+				});
+				await plainPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false, { polling: 100 });
+				await plainPage.type(".review-file.active [data-selection-feedback]", "trapped draft");
+				await plainPage.evaluate(() => window.history.replaceState(null, "", window.location.pathname));
+				await plainPage.reload({ waitUntil: "domcontentloaded" });
+				await plainPage.waitForFunction(() => document.querySelector("[data-selection-composer]:not([hidden])"), { polling: 100 });
+				assert.equal(await plainPage.evaluate(() => document.querySelector(".review-file.active")?.dataset.path), draftFilePath, "Reload must land on the draft's own file.");
+				assert.equal(await plainPage.evaluate(() => {
+					const composer = document.querySelector("[data-selection-composer]:not([hidden])");
+					return composer.offsetParent !== null && composer.querySelector("[data-selection-feedback]").value;
+				}), "trapped draft", "The restored composer is visible with its text.");
+				await plainPage.evaluate(() => document.querySelector(`[data-file-nav="${document.querySelector(".review-file.active").dataset.reviewFile}"]`).click());
+				assert.equal(draftDialogs.length, 0, "Navigating to the draft's own file must not ask to discard.");
+				assert.equal(await plainPage.evaluate(() => !!document.querySelector("[data-selection-composer]:not([hidden])")), true, "The draft survives same-file navigation.");
+				await plainPage.keyboard.press("]");
+				assert.equal(draftDialogs.length, 1, "Navigating away still asks first.");
+				assert.equal(await plainPage.evaluate(() => document.querySelector(".review-file.active")?.dataset.path), draftFilePath, "Dismissing the prompt keeps the draft's file active.");
+				plainPage.off("dialog", recordDialog);
+				plainPage.once("dialog", (dialog) => dialog.accept());
+				await plainPage.keyboard.press("]");
+				await plainPage.waitForFunction(() => !document.querySelector("[data-selection-composer]:not([hidden])"), { polling: 100 });
+				assert.equal(await plainPage.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("picr:")).length), 0, "Accepting the discard clears the stored draft.");
+
 				const navHomePath = await plainPage.$eval(".review-file.active", (section) => section.dataset.path);
 				await plainPage.keyboard.press("]");
 				assert.notEqual(await plainPage.$eval(".review-file.active", (section) => section.dataset.path), navHomePath, "] must move to the next file.");

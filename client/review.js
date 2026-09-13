@@ -23,6 +23,34 @@
   const isSuperseded = () => myRound < currentRound;
   const isLocked = () => isSuperseded() || phase !== 'reviewing';
 
+  // Composer drafts survive reloads in localStorage, namespaced by snapshot id
+  // (the origin is per-session — port included — so scope is naturally bounded).
+  const DRAFT_NAMESPACE = 'picr:' + (document.body.dataset.reviewId || 'unknown') + ':';
+  const draftKey = (name) => DRAFT_NAMESPACE + name;
+  const saveDraft = (name, value) => {
+    try {
+      if (value && value.trim()) localStorage.setItem(draftKey(name), value);
+      else localStorage.removeItem(draftKey(name));
+    } catch {}
+  };
+  const readDraft = (name) => {
+    try {
+      return localStorage.getItem(draftKey(name)) ?? '';
+    } catch {
+      return '';
+    }
+  };
+  const removeDraft = (name) => saveDraft(name, '');
+  // Only the live current-round page prunes: superseded pages must never touch
+  // the active round's namespace.
+  if (loadedAsCurrent) {
+    try {
+      for (const key of Object.keys(localStorage)) {
+        if (key.startsWith('picr:') && !key.startsWith(DRAFT_NAMESPACE)) localStorage.removeItem(key);
+      }
+    } catch {}
+  }
+
   const threads = new Map();
   const highlights = new Map();
   let nextHighlightId = 1;
@@ -196,7 +224,37 @@
     const composer = sectionForPath(draft.file)?.querySelector('[data-selection-composer]');
     if (composer) composer.hidden = true;
     draft = undefined;
+    removeDraft('selection');
     window.getSelection()?.removeAllRanges();
+  };
+  const saveSelectionDraft = (text) => {
+    if (!draft) return;
+    saveDraft('selection', JSON.stringify({ file: draft.file, side: draft.side, oldStart: draft.oldStart, oldEnd: draft.oldEnd, newStart: draft.newStart, newEnd: draft.newEnd, highlight: draft.highlight, text: text ?? '' }));
+  };
+  // Rebuild a reloaded selection draft: composer, quote, anchor, and text —
+  // without the visual text highlight, which needs a live selection range.
+  const restoreSelectionDraft = () => {
+    const saved = readDraft('selection');
+    if (!saved || draft) return;
+    let parsed;
+    try {
+      parsed = JSON.parse(saved);
+    } catch {
+      removeDraft('selection');
+      return;
+    }
+    const section = sectionForPath(parsed.file);
+    const composer = section?.querySelector('[data-selection-composer]');
+    if (!composer || typeof parsed.highlight !== 'string') {
+      removeDraft('selection');
+      return;
+    }
+    draft = { highlightId: undefined, file: parsed.file, side: parsed.side, oldStart: parsed.oldStart, oldEnd: parsed.oldEnd, newStart: parsed.newStart, newEnd: parsed.newEnd, highlight: parsed.highlight };
+    composer.hidden = false;
+    composer.querySelector('[data-selection-quote]').textContent = parsed.highlight;
+    const textarea = composer.querySelector('[data-selection-feedback]');
+    textarea.value = parsed.text ?? '';
+    composer.querySelector('[data-selection-add]').disabled = !textarea.value.trim();
   };
   const closestCode = (node) => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('.diff-code');
   const selectedRows = (range) => {
@@ -273,6 +331,7 @@
     composer.querySelector('[data-selection-add]').disabled = true;
     selection.removeAllRanges();
     textarea.focus();
+    saveSelectionDraft('');
     setStatus('Add feedback for the highlighted diff.');
   };
   // Lazily reveal unchanged lines around hunks from the frozen snapshot's
@@ -378,7 +437,10 @@
   document.querySelectorAll('[data-selection-composer]').forEach((composer) => {
     const textarea = composer.querySelector('[data-selection-feedback]');
     const add = composer.querySelector('[data-selection-add]');
-    textarea.addEventListener('input', () => { add.disabled = !textarea.value.trim(); });
+    textarea.addEventListener('input', () => {
+      add.disabled = !textarea.value.trim();
+      saveSelectionDraft(textarea.value);
+    });
     textarea.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
       event.preventDefault();
@@ -407,6 +469,7 @@
         });
         threadHighlights.set(result.thread.id, draft.highlightId);
         draft = undefined;
+        removeDraft('selection');
         composer.hidden = true;
         textarea.value = '';
         upsertThread(result.thread);
@@ -667,7 +730,10 @@
       send.dataset.threadSend = thread.id;
       send.textContent = 'Reply';
       send.disabled = !previousDraft.trim();
-      textarea.addEventListener('input', () => { send.disabled = !textarea.value.trim(); });
+      textarea.addEventListener('input', () => {
+        send.disabled = !textarea.value.trim();
+        saveDraft('thread:' + thread.id, textarea.value);
+      });
       textarea.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
         event.preventDefault();
@@ -684,6 +750,9 @@
         textarea.value = '';
         try {
           const result = await postJson(POST_PATH, { threadId: thread.id, body, ...(quiet ? { quiet: true } : {}) });
+          // Sync storage to whatever the textarea holds NOW — clearing outright
+          // would wipe a new draft typed while this send was in flight.
+          saveDraft('thread:' + thread.id, card.querySelector('[data-thread-reply]')?.value ?? '');
           upsertThread(result.thread);
           postedStatus(result, 'Reply sent to Pi.');
         } catch (error) {
@@ -896,7 +965,11 @@
     const article = button.closest('.agent-note');
     const section = button.closest('[data-review-file]');
     const textarea = article.querySelector('[data-commentary-reply]');
-    textarea.addEventListener('input', () => { button.disabled = !textarea.value.trim(); });
+    const commentaryDraftName = 'commentary:' + section.dataset.path + ':' + button.dataset.commentaryPost;
+    textarea.addEventListener('input', () => {
+      button.disabled = !textarea.value.trim();
+      saveDraft(commentaryDraftName, textarea.value);
+    });
     textarea.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
       event.preventDefault();
@@ -913,6 +986,7 @@
       try {
         const result = await postJson(POST_PATH, { round: myRound, ...(quiet ? { quiet: true } : {}), source: 'commentary', file: section.dataset.path, commentaryId: button.dataset.commentaryPost, body });
         textarea.value = '';
+        removeDraft(commentaryDraftName);
         upsertThread(result.thread);
         postedStatus(result, 'Reply sent to Pi.');
       } catch (error) {
@@ -932,7 +1006,10 @@
   const overviewPost = document.querySelector('[data-overview-post]');
   const overviewTextarea = document.querySelector('[data-overview-feedback]');
   if (overviewPost && overviewTextarea) {
-    overviewTextarea.addEventListener('input', () => { overviewPost.disabled = !overviewTextarea.value.trim(); });
+    overviewTextarea.addEventListener('input', () => {
+      overviewPost.disabled = !overviewTextarea.value.trim();
+      saveDraft('overview', overviewTextarea.value);
+    });
     overviewTextarea.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
       event.preventDefault();
@@ -949,6 +1026,7 @@
       try {
         const result = await postJson(POST_PATH, { round: myRound, ...(quiet ? { quiet: true } : {}), source: 'overview', body });
         overviewTextarea.value = '';
+        removeDraft('overview');
         upsertThread(result.thread);
         postedStatus(result, 'Feedback sent to Pi.');
       } catch (error) {
@@ -1187,6 +1265,35 @@
     deepLinked = true;
     focusHashThread();
   };
+  let draftsRestored = false;
+  const restoreDrafts = () => {
+    if (draftsRestored) return;
+    draftsRestored = true;
+    const overviewSaved = readDraft('overview');
+    const overviewBox = document.querySelector('[data-overview-feedback]');
+    if (overviewBox && overviewSaved && !overviewBox.value) {
+      overviewBox.value = overviewSaved;
+      overviewBox.dispatchEvent(new Event('input'));
+    }
+    document.querySelectorAll('[data-commentary-reply]').forEach((textarea) => {
+      const section = textarea.closest('[data-review-file]');
+      if (!section || textarea.value) return;
+      const saved = readDraft('commentary:' + section.dataset.path + ':' + textarea.dataset.commentaryReply);
+      if (!saved) return;
+      textarea.value = saved;
+      textarea.dispatchEvent(new Event('input'));
+    });
+    // Thread replies restore once here — never inside renderThread, where a
+    // mid-flight SSE re-render could resurrect a draft the send is clearing.
+    document.querySelectorAll('[data-thread-reply]').forEach((textarea) => {
+      if (textarea.value) return;
+      const saved = readDraft('thread:' + textarea.dataset.threadReply);
+      if (!saved) return;
+      textarea.value = saved;
+      textarea.dispatchEvent(new Event('input'));
+    });
+    restoreSelectionDraft();
+  };
   const events = new EventSource(EVENTS_PATH + '?round=' + myRound);
   events.addEventListener('init', (event) => {
     const data = JSON.parse(event.data);
@@ -1214,6 +1321,7 @@
       if (!threads.has(cardElement.dataset.threadCard)) removeThread(cardElement.dataset.threadCard);
     });
     updateAggregates();
+    restoreDrafts();
     applyDeepLink();
   });
   events.addEventListener('thread', (event) => {
@@ -1318,9 +1426,9 @@
     // Drafts on a superseded round are already dead; never block advancing past
     // them — and an approved session is terminal, so nothing left is a draft.
     if (autoNavigating || isSuperseded() || phase === 'approved') return;
-    // defaultValue exempts prefilled content (the approve overlay's proposed
-    // commit message) while still guarding anything the reviewer typed.
-    const hasDraftText = draft || [...document.querySelectorAll('textarea')].some((textarea) => textarea.value.trim() && textarea.value !== textarea.defaultValue);
+    // Composer drafts persist to localStorage, so leaving loses nothing there;
+    // only open queued-message editors hold unsaved content.
+    const hasDraftText = [...document.querySelectorAll('[data-turn-editor]')].some((editor) => editor.value.trim());
     if (!hasDraftText) return;
     event.preventDefault();
     event.returnValue = '';

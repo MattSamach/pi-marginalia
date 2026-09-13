@@ -1649,6 +1649,20 @@ try {
 				assert.equal(await plainPage.$eval("[data-shortcuts-overlay]", (overlay) => overlay.hidden), false, "The header hint must open the shortcuts guide.");
 				await plainPage.keyboard.press("Escape");
 
+				await plainPage.evaluate(() => {
+					const section = document.querySelector(".thread-card [data-thread-reply]").closest("[data-review-file]");
+					document.querySelector(`[data-file-nav="${section.dataset.reviewFile}"]`).click();
+				});
+				await plainPage.waitForFunction(() => !document.querySelector(".thread-card [data-thread-reply]").closest("[data-review-file]").hidden);
+				await plainPage.type(".thread-card [data-thread-reply]", "persisted draft reply");
+				await plainPage.reload({ waitUntil: "domcontentloaded" });
+				await plainPage.waitForFunction(() => document.querySelector(".thread-card [data-thread-reply]")?.value === "persisted draft reply", {});
+				await plainPage.$eval(".thread-card [data-thread-reply]", (textarea) => {
+					textarea.value = "";
+					textarea.dispatchEvent(new Event("input", { bubbles: true }));
+				});
+				assert.equal(await plainPage.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("picr:")).length), 0, "Clearing a draft removes its stored copy.");
+
 				const navHomePath = await plainPage.$eval(".review-file.active", (section) => section.dataset.path);
 				await plainPage.keyboard.press("]");
 				assert.notEqual(await plainPage.$eval(".review-file.active", (section) => section.dataset.path), navHomePath, "] must move to the next file.");
@@ -1769,6 +1783,37 @@ try {
 				});
 				await ctxPage.waitForFunction(() => document.querySelector("[data-global-status]").textContent.includes("read-only"));
 				assert.equal(await ctxPage.$eval("[data-selection-composer]", (composer) => composer.hidden), true, "Expanded context never opens the comment composer.");
+				await ctxPage.evaluate(() => {
+					const code = document.querySelector(".review-file.active tr.diff-add .diff-code span");
+					const range = document.createRange();
+					range.selectNodeContents(code);
+					const selection = window.getSelection();
+					selection.removeAllRanges();
+					selection.addRange(range);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await ctxPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false);
+				await ctxPage.type(".review-file.active [data-selection-feedback]", "selection survives reload");
+				const ctxQuote = await ctxPage.$eval(".review-file.active [data-selection-quote]", (quote) => quote.textContent);
+				await ctxPage.reload({ waitUntil: "domcontentloaded" });
+				await ctxPage.waitForFunction(() => document.querySelector(".review-file.active [data-selection-composer]")?.hidden === false, {});
+				assert.equal(await ctxPage.$eval(".review-file.active [data-selection-feedback]", (textarea) => textarea.value), "selection survives reload", "Selection drafts restore their text after a reload.");
+				assert.equal(await ctxPage.$eval(".review-file.active [data-selection-quote]", (quote) => quote.textContent), ctxQuote, "Selection drafts restore their quoted anchor.");
+				await ctxPage.$eval(".review-file.active [data-selection-add]", (button) => button.click());
+				await ctxPage.waitForFunction(() => document.querySelector(".thread-card"), {});
+				assert.equal(await ctxPage.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("picr:")).length), 0, "Posting a restored draft clears its stored copy.");
+				// The prune is the only path that deletes another namespace's data: a
+				// round advance must clear the old round's keys, and a superseded page
+				// must never touch the live round's.
+				await ctxPage.evaluate(() => localStorage.setItem("picr:stale-namespace:overview", "old draft"));
+				const ctxThreadId = await ctxPage.$eval(".thread-card", (card) => card.dataset.threadCard);
+				assert.equal(ctxServer.addRound({ ...contextReview, id: altId(contextReview.id, 12) }, contextReview.id, [{ respondsTo: ctxThreadId, resolution: "needs-discussion", body: "Carrying across the advance.", file: "ctx.txt" }]).round, 2);
+				await ctxPage.waitForFunction(() => document.body.dataset.round === "2");
+				assert.equal(await ctxPage.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("picr:") && !key.startsWith("picr:" + document.body.dataset.reviewId + ":")).length), 0, "The new round's page prunes foreign draft namespaces.");
+				await ctxPage.evaluate(() => localStorage.setItem("picr:" + document.body.dataset.reviewId + ":overview", "live round draft"));
+				await ctxPage.goto(`${new URL(ctxServer.url).origin}/round/1`, { waitUntil: "domcontentloaded" });
+				await ctxPage.waitForFunction(() => document.body.dataset.round === "1");
+				assert.equal(await ctxPage.evaluate(() => Object.values(localStorage).includes("live round draft")), true, "A superseded page never prunes the live round's drafts.");
 				await ctxPage.close();
 			} finally {
 				await ctxServer.close();

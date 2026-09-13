@@ -43,6 +43,7 @@ Everything that needs your attention is one uniform queue: every Pi commentary n
 12. Approve to close: the green **Approve** button tallies open threads (clicking jumps to the first blocker) and unlocks only when every thread — queued and carried included — is resolved. The confirmation screen shows file stats, warns if the repository has drifted from the snapshot, and lets you edit the proposed commit message. Confirming closes the session terminally: Pi receives your final commit message, mutations lock, and pages stay readable.
 13. Trust the topbar drift badge: while the page is open, the server periodically re-checks the repository against the frozen snapshot (a cheap fingerprint gates the full re-collection). If they diverge — edits, staging, or a commit — a **no longer matches this snapshot** badge appears; informational only; reading and commenting stay open, and the badge clears if the tree returns. It is hidden while Pi revises, when drift is expected.
 14. Click **Send round to Pi** to hand Pi one summary of the pass. It lists open threads you engaged with; your untouched notes are never echoed back to Pi.
+15. Drafts survive reloads: unfinished comments — selection drafts (anchor and quote included), thread and note replies, overview feedback — persist in the browser's storage keyed by the snapshot, restore when the page reopens, and clear the moment they post.
 
 While Pi is busy, posts queue and are delivered together the moment Pi settles, so a slow turn never blocks you; Pi then answers each queued thread in one pass.
 

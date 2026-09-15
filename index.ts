@@ -1,6 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { basename, isAbsolute, resolve } from "node:path";
+import { homedir } from "node:os";
 import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint, createPinnedBlobContextReader, currentSnapshotId, currentSnapshotProbe } from "./shared/git-review.js";
 import { createReviewMessageQueue } from "./shared/delivery-queue.js";
 import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "./shared/feedback.js";
@@ -239,6 +242,23 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			contextLines: createPinnedBlobContextReader(),
 		});
 	};
+	// The latest assistant markdown in the current branch, for reviewing Pi's
+	// own response as a document.
+	const lastAssistantMarkdown = (ctx: ExtensionContext): string | undefined => {
+		const branch = ctx.sessionManager.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.type !== "message") continue;
+			const message = entry.message;
+			if (!("role" in message) || message.role !== "assistant" || !Array.isArray(message.content)) continue;
+			const text = message.content
+				.filter((block): block is { type: "text"; text: string } => typeof block === "object" && block !== null && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string" && !!block.text.trim())
+				.map((block) => block.text)
+				.join("\n\n");
+			if (text) return text;
+		}
+		return undefined;
+	};
 	const openPlan = async (ctx: ExtensionContext, manifest: OpenPlanReviewInput) => {
 		const review = buildPlanReview(manifest);
 		if (!manifest.previousRoundId && manifest.threadResponses !== undefined) {
@@ -419,6 +439,40 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			try {
 				const { review } = await openReview(ctx, { files: [] });
 				ctx.ui.notify(`Opened static review ${review.id.slice(0, 12)} (${review.files.length} files).`, "info");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("plan-browser", {
+		description: "Open a browser document review of Pi's latest response, or of any markdown file (/plan-browser [path])",
+		handler: async (args, ctx) => {
+			const normalized = args.trim();
+			if (normalized === "--help" || normalized === "-h") {
+				ctx.ui.notify("Usage: /plan-browser [path]\n\nBare: reviews Pi's latest response as a rendered document.\nWith a path: reviews that markdown file.\nComments you post arrive in this session as plan-review threads; Pi answers with reply_review_thread.", "info");
+				return;
+			}
+			try {
+				let markdown: string;
+				let title: string;
+				if (normalized) {
+					const expanded = normalized === "~" || normalized.startsWith("~/") ? homedir() + normalized.slice(1) : normalized;
+					const filePath = isAbsolute(expanded) ? expanded : resolve(ctx.cwd, expanded);
+					markdown = await readFile(filePath, "utf8");
+					title = basename(filePath);
+				} else {
+					const found = lastAssistantMarkdown(ctx);
+					if (!found) {
+						ctx.ui.notify("No assistant markdown found in the current branch.", "warning");
+						return;
+					}
+					markdown = found;
+					const heading = /^#{1,6}\s+(.+)$/m.exec(found);
+					title = (heading ? heading[1].trim() : "Pi's latest response") || "Pi's latest response";
+				}
+				const { review } = await openPlan(ctx, { title: title.slice(0, 200), markdown });
+				ctx.ui.notify(`Opened document review "${title.slice(0, 80)}" (${review.files.length} section(s)).`, "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}

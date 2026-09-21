@@ -1449,6 +1449,12 @@ try {
 			await page.evaluate(() => { localStorage.removeItem("picr-theme"); localStorage.removeItem("picr-scheme"); });
 			await page.reload({ waitUntil: "domcontentloaded" });
 			assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "slate", "Clearing the stored choice restores the default.");
+			await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }]);
+			await page.$eval("[data-scheme-picker]", (select) => { select.value = "light"; select.dispatchEvent(new Event("change")); });
+			assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(247, 248, 248)", "Forced light beats the dark OS scheme on every auto-dark guard.");
+			await page.evaluate(() => localStorage.removeItem("picr-scheme"));
+			await page.$eval("[data-scheme-picker]", (select) => { select.value = "auto"; select.dispatchEvent(new Event("change")); });
+			await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "light" }]);
 			assert.equal(await page.$eval('details.reference-files', (details) => details.open), false, "Reference files should start collapsed.");
 			await page.waitForFunction(() => document.querySelector('[data-thread-tally]')?.hidden === false);
 			assert.match(await page.$eval('[data-thread-tally]', (section) => section.textContent), /2 open.*2 awaiting you.*0 awaiting Pi.*0 resolved/, "Seeded notes count uniformly from the start.");
@@ -2299,7 +2305,7 @@ try {
 					await railPage.setViewport({ width: 1200, height: 800 });
 					await railPage.goto(railServer.url, { waitUntil: "domcontentloaded" });
 					await railPage.waitForFunction(() => document.body.dataset.reviewKind === "plan", { polling: 100 });
-					const post = async (line, text) => {
+					const post = async (line, text, quiet) => {
 						await railPage.evaluate((targetLine) => {
 							const block = document.querySelector('[data-path="steps"] [data-md-line="' + targetLine + '"]');
 							const range = document.createRange();
@@ -2311,9 +2317,15 @@ try {
 						}, line);
 						await railPage.waitForFunction(() => document.querySelector('[data-path="steps"] [data-selection-composer]')?.hidden === false, { polling: 100 });
 						await railPage.type('[data-path="steps"] [data-selection-feedback]', text);
-						await railPage.$eval('[data-path="steps"] [data-selection-add]', (button) => button.click());
+						if (quiet) {
+							await railPage.$eval('[data-path="steps"] [data-selection-feedback]', (textarea) => {
+								textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+							});
+						} else {
+							await railPage.$eval('[data-path="steps"] [data-selection-add]', (button) => button.click());
+						}
 					};
-					await post(8, "On the first step.");
+					await post(8, "On the first step.", true);
 					await railPage.waitForFunction(() => document.querySelectorAll(".thread-card").length === 1, { polling: 100 });
 					assert.equal(await railPage.evaluate(() => {
 						const card = document.querySelector('[data-path="steps"] .plan-rail .thread-card');
@@ -2328,6 +2340,15 @@ try {
 						const second = cards.find((card) => card.dataset.anchorStart === "9");
 						return cards.indexOf(first) < cards.indexOf(second) && second.getBoundingClientRect().top >= first.getBoundingClientRect().bottom;
 					}), true, "A colliding neighbor keeps anchor order and pushes below, never overlapping.");
+					// Mutation relayout: deleting the queued first comment must let the
+					// second snap back to exact alignment with its own block.
+					await railPage.$eval('.thread-card[data-anchor-start="8"] [data-turn-delete]', (button) => button.click());
+					await railPage.waitForFunction(() => document.querySelectorAll(".thread-card").length === 1, { polling: 100 });
+					await railPage.waitForFunction(() => {
+						const card = document.querySelector('[data-path="steps"] .plan-rail .thread-card');
+						const block = document.querySelector('[data-path="steps"] [data-md-line="9"]');
+						return Math.abs(card.getBoundingClientRect().top - block.getBoundingClientRect().top) <= 2;
+					}, { polling: 100 });
 					await railPage.close();
 				} finally {
 					await railServer.close();

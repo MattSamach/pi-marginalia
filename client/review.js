@@ -229,6 +229,9 @@
     navButtons.forEach((item) => item.classList.toggle('active', Number(item.dataset.fileNav) === index));
     if (planMode && !planFocus()) document.querySelector('[data-review-file="' + index + '"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     else window.scrollTo({ top: 0, behavior: 'instant' });
+    // A section shown after being display-hidden (focus view) skipped every
+    // layout that ran while it had no boxes; refresh its rail now.
+    if (planMode) layoutPlanRail(document.querySelector('[data-review-file="' + index + '"]'));
   };
   // The tie between a note and its text reads in both directions: hovering a
   // note tints the lines it anchors (blocks in plan mode, diff rows in code
@@ -749,6 +752,7 @@
     const closeEditor = () => {
       delete textarea.dataset.turnEditor;
       renderThread(threads.get(thread.id));
+      layoutPlanRails();
     };
     textarea.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
@@ -786,6 +790,7 @@
     row.append(cancel, save);
     entry.append(author, textarea, row);
     if (focus) textarea.focus();
+    layoutPlanRails();
   };
   const threadHost = (thread) => {
     if (thread.carried) return [...document.querySelectorAll('[data-carried-host]')].find((host) => host.dataset.carriedHost === thread.id);
@@ -844,6 +849,10 @@
         card.dataset.anchorStart = String(anchorLine);
         const successor = [...host.children].find((sibling) => sibling !== card && (sibling.matches('[data-selection-composer]') || (sibling.matches('[data-thread-card]') && Number(sibling.dataset.anchorStart) > anchorLine)));
         host.insertBefore(card, successor ?? null);
+      } else if (planMode && host.matches('.plan-rail')) {
+        // Anchorless strays (orphaned commentary threads) still keep the
+        // composer as the rail's last child.
+        host.insertBefore(card, host.querySelector('[data-selection-composer]'));
       } else {
         host.append(card);
       }

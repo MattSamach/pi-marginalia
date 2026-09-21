@@ -11,7 +11,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node ./test/regressions.mjs",
+    "test": "node ./test/regressions.mjs && node ./test/plan-browser-rpc.mjs",
     "check": "npm run typecheck && npm test"
   },
   "peerDependencies": {

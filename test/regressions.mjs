@@ -2177,8 +2177,17 @@ try {
 				await planPage.type('[data-path="goals-b"] [data-selection-feedback]', "Make this measurable.");
 				await planPage.$eval('[data-path="goals-b"] [data-selection-add]', (button) => button.click());
 				await planPage.waitForFunction(() => document.querySelector(".thread-card"), { polling: 100 });
-				assert.equal(await planPage.evaluate(() => getComputedStyle(document.querySelector('[data-path="goals-b"] .plan-rail .user-comments')).display), "block", "The rail's thread block reveals once a card exists.");
-				assert.equal(await planPage.evaluate(() => getComputedStyle(document.querySelector('[data-path="steps"] .plan-rail .user-comments')).display), "none", "Card-less rails keep their thread block hidden.");
+				// Margin-note invariants in a congested rail (everything anchors at
+				// line 4): items never float above their text and collisions push
+				// down instead of overlapping. Exact alignment is pinned separately
+				// on an uncongested fixture below.
+				assert.equal(await planPage.evaluate(() => {
+					const note = document.querySelector('[data-path="goals-b"] .plan-rail .agent-note[data-anchor-start]');
+					const card = document.querySelector('[data-path="goals-b"] .plan-rail .thread-card');
+					const block = document.querySelector('[data-path="goals-b"] [data-md-line="4"]');
+					return note.getBoundingClientRect().top >= block.getBoundingClientRect().top - 1
+						&& card.getBoundingClientRect().top >= note.getBoundingClientRect().bottom;
+				}), true, "Rail items never float above their anchor and never overlap.");
 				assert.deepEqual(
 					[planPosts[0].file, planPosts[0].side, planPosts[0].newStart, planPosts[0].newEnd, planPosts[0].highlight],
 					["goals-b", "new", 4, 4, "fast"],
@@ -2256,6 +2265,52 @@ try {
 				await planPage.close();
 			} finally {
 				await planServer.close();
+			}
+
+			// Margin-note exact alignment on an uncongested rail: a comment on a
+			// mid-document block sits beside that block, not at the rail top; a
+			// second comment just below collides and pushes down.
+			{
+				const railReview = buildPlanReview({ title: "Rail Plan", markdown: planMarkdown });
+				const railServer = await createCodeReviewServer(railReview, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+				const railPage = await browser.newPage();
+				try {
+					await railPage.setViewport({ width: 1200, height: 800 });
+					await railPage.goto(railServer.url, { waitUntil: "domcontentloaded" });
+					await railPage.waitForFunction(() => document.body.dataset.reviewKind === "plan", { polling: 100 });
+					const post = async (line, text) => {
+						await railPage.evaluate((targetLine) => {
+							const block = document.querySelector('[data-path="steps"] [data-md-line="' + targetLine + '"]');
+							const range = document.createRange();
+							range.selectNodeContents(block);
+							const selection = window.getSelection();
+							selection.removeAllRanges();
+							selection.addRange(range);
+							block.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+						}, line);
+						await railPage.waitForFunction(() => document.querySelector('[data-path="steps"] [data-selection-composer]')?.hidden === false, { polling: 100 });
+						await railPage.type('[data-path="steps"] [data-selection-feedback]', text);
+						await railPage.$eval('[data-path="steps"] [data-selection-add]', (button) => button.click());
+					};
+					await post(8, "On the first step.");
+					await railPage.waitForFunction(() => document.querySelectorAll(".thread-card").length === 1, { polling: 100 });
+					assert.equal(await railPage.evaluate(() => {
+						const card = document.querySelector('[data-path="steps"] .plan-rail .thread-card');
+						const block = document.querySelector('[data-path="steps"] [data-md-line="8"]');
+						return Math.abs(card.getBoundingClientRect().top - block.getBoundingClientRect().top) <= 2;
+					}), true, "An uncontested comment aligns exactly beside its anchored block.");
+					await post(9, "On the second step.");
+					await railPage.waitForFunction(() => document.querySelectorAll(".thread-card").length === 2, { polling: 100 });
+					assert.equal(await railPage.evaluate(() => {
+						const cards = [...document.querySelectorAll('[data-path="steps"] .plan-rail .thread-card')];
+						const first = cards.find((card) => card.dataset.anchorStart === "8");
+						const second = cards.find((card) => card.dataset.anchorStart === "9");
+						return cards.indexOf(first) < cards.indexOf(second) && second.getBoundingClientRect().top >= first.getBoundingClientRect().bottom;
+					}), true, "A colliding neighbor keeps anchor order and pushes below, never overlapping.");
+					await railPage.close();
+				} finally {
+					await railServer.close();
+				}
 			}
 
 			// Per-file drift marks: the staleness event lights amber dots on exactly

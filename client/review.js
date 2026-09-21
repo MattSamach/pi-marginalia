@@ -124,6 +124,7 @@
     applyDriftMarks();
     syncDraftDot();
     document.querySelectorAll('[data-viewed-toggle]').forEach((box) => { box.disabled = isSuperseded(); });
+    layoutPlanRails();
     if (phaseBanner && phaseBannerText && resumeButton && gotoCurrent) {
       if (isSuperseded()) {
         phaseBanner.hidden = false;
@@ -304,6 +305,12 @@
       viewToggle.textContent = focused ? 'Whole document' : 'Focus section';
       viewToggle.title = focused ? 'Show the whole document' : 'Show one section at a time';
       showFile(activeIndex);
+      layoutPlanRails();
+    });
+    let railResizeTimer;
+    window.addEventListener('resize', () => {
+      clearTimeout(railResizeTimer);
+      railResizeTimer = setTimeout(layoutPlanRails, 150);
     });
   }
   // Navigation never asks about drafts: an open draft survives every panel
@@ -361,8 +368,10 @@
     if (!draft) return;
     highlights.delete(draft.highlightId);
     renderHighlights();
-    const composer = sectionForPath(draft.file)?.querySelector('[data-selection-composer]');
+    const draftSection = sectionForPath(draft.file);
+    const composer = draftSection?.querySelector('[data-selection-composer]');
     if (composer) composer.hidden = true;
+    if (planMode) layoutPlanRail(draftSection);
     draft = undefined;
     removeDraft('selection');
     syncDraftDot();
@@ -399,11 +408,46 @@
     // Land on the draft's file so the restored composer is visible; an
     // explicit deep link in the hash wins the navigation instead.
     if (!/(?:^#|[#&])(?:thread|loc)=/.test(window.location.hash || '')) showFile(Number(section.dataset.reviewFile));
+    if (planMode && parsed.newStart !== undefined) {
+      composer.dataset.anchorStart = String(parsed.newStart);
+      layoutPlanRail(section);
+    }
     syncDraftDot();
   };
   // Plan documents anchor on rendered markdown blocks instead of diff rows;
   // each block carries its absolute source-line range.
   const planBlockAt = (section, line) => [...section.querySelectorAll('[data-md-line]')].find((block) => Number(block.dataset.mdLine) <= line && line <= Number(block.dataset.mdEnd));
+  // Margin-note alignment: each rail item sits beside the block its anchor
+  // names, pushed down just enough to avoid the item above it. Anchorless
+  // items (the summary) keep their flow position.
+  const layoutPlanRail = (section) => {
+    if (!planMode || !section) return;
+    const rail = section.querySelector('.plan-rail');
+    if (!rail || rail.getClientRects().length === 0) return;
+    const railTop = rail.getBoundingClientRect().top;
+    let cursor = 0;
+    let first = true;
+    for (const item of rail.children) {
+      if (item.hidden) {
+        item.style.marginTop = '';
+        continue;
+      }
+      const lineValue = Number(item.dataset.anchorStart ?? item.querySelector('[data-anchor-start]')?.dataset.anchorStart);
+      const floor = first ? 0 : cursor + 10;
+      let top = floor;
+      if (Number.isFinite(lineValue) && lineValue > 0) {
+        const block = planBlockAt(section, lineValue);
+        if (block) top = Math.max(floor, block.getBoundingClientRect().top - railTop);
+      }
+      item.style.marginTop = Math.round(top - cursor) + 'px';
+      cursor = top + item.offsetHeight;
+      first = false;
+    }
+  };
+  const layoutPlanRails = () => {
+    if (!planMode) return;
+    document.querySelectorAll('[data-review-file]').forEach((section) => layoutPlanRail(section));
+  };
   const closestBlock = (node) => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('[data-md-line]');
   const selectedBlocks = (range) => {
     const startBlock = closestBlock(range.startContainer);
@@ -490,6 +534,10 @@
     }
     const composer = selected.section.querySelector('[data-selection-composer]');
     composer.hidden = false;
+    if (planMode && draft.newStart !== undefined) {
+      composer.dataset.anchorStart = String(draft.newStart);
+      layoutPlanRail(selected.section);
+    }
     composer.querySelector('[data-selection-quote]').textContent = highlight;
     const textarea = composer.querySelector('[data-selection-feedback]');
     textarea.value = '';
@@ -664,6 +712,7 @@
     }
     if (currentThreadId === threadId) currentThreadId = undefined;
     updateAggregates();
+    layoutPlanRails();
   };
   // Queued (undelivered) reviewer messages stay editable until Pi sees them.
   const openTurnEditor = (entry, thread, turn, value, focus) => {
@@ -761,6 +810,7 @@
       if (card) card.remove();
       const origin = [...(sectionForPath(thread.file)?.querySelectorAll('[data-commentary-composer]') ?? [])].find((element) => element.dataset.commentaryComposer === thread.commentaryId);
       if (origin) origin.hidden = false;
+      layoutPlanRail(sectionForPath(thread.file));
       return;
     }
     const previousReply = card?.querySelector('[data-thread-reply]');
@@ -775,7 +825,16 @@
       card = document.createElement('article');
       card.className = 'thread-card';
       card.dataset.threadCard = thread.id;
-      host.append(card);
+      const anchorLine = thread.newStart ?? thread.startLine;
+      if (planMode && thread.source === 'selection' && !thread.carried && anchorLine !== undefined) {
+        // Rail cards sit in anchor order so the margin layout can align each
+        // one beside its text; the composer stays last.
+        card.dataset.anchorStart = String(anchorLine);
+        const successor = [...host.children].find((sibling) => sibling !== card && (sibling.matches('[data-selection-composer]') || (sibling.matches('[data-thread-card]') && Number(sibling.dataset.anchorStart) > anchorLine)));
+        host.insertBefore(card, successor ?? null);
+      } else {
+        host.append(card);
+      }
     }
     const awaiting = isAwaiting(thread);
     card.classList.toggle('awaiting', awaiting);
@@ -1016,6 +1075,7 @@
     threads.set(thread.id, thread);
     renderThread(thread);
     updateAggregates();
+    if (planMode) layoutPlanRail(sectionForPath(thread.file));
   };
   const flashTarget = (element) => {
     if (!element) return;
@@ -1545,6 +1605,7 @@
     });
     updateAggregates();
     restoreDrafts();
+    layoutPlanRails();
     applyDeepLink();
   });
   events.addEventListener('thread', (event) => {

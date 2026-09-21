@@ -1134,6 +1134,23 @@
       target = [...(section?.querySelectorAll('.agent-note') ?? [])].find((note) => note.dataset.commentaryId === thread.commentaryId);
     }
     flashTarget(target);
+    // Navigation lands the CODE on the thread's lines, not just the card: the
+    // impacted area scrolls to the top band and flashes, exactly like an
+    // anchor-label click.
+    const section = sectionForPath(thread.file);
+    if (section) {
+      const anchor = thread.carried && thread.carried.startLine !== undefined ? thread.carried : thread;
+      const side = anchor.side;
+      const start = anchor.startLine ?? (side === 'old' ? anchor.oldStart : anchor.newStart ?? anchor.oldStart);
+      const end = anchor.endLine ?? (side === 'old' ? anchor.oldEnd : anchor.newEnd ?? anchor.oldEnd) ?? start;
+      if (start !== undefined) {
+        const lines = anchorTargets(section, side, start, end);
+        if (lines.length) {
+          lines[0].scrollIntoView({ behavior: 'smooth', block: 'start' });
+          flashAnchorTargets(lines);
+        }
+      }
+    }
   };
 
   const stepHunk = (direction) => {

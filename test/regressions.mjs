@@ -1474,6 +1474,8 @@ try {
 			await page.keyboard.press("n");
 			await page.waitForFunction(() => document.querySelector('[data-review-file="0"]')?.hidden === false);
 			assert.ok(await page.$('.agent-note.thread-flash[data-commentary-id="new-file"]'), "n must reach unresolved Pi notes when no thread awaits.");
+			await page.waitForFunction(() => document.querySelectorAll('tr.anchor-flash').length > 0, { polling: 100 });
+			assert.equal(await page.evaluate(() => document.querySelectorAll('tr.anchor-flash').length), 2, "Thread navigation lands the code on the anchored lines and flashes them.");
 			await page.keyboard.press("n");
 			assert.ok(await page.$('.agent-note.thread-flash[data-commentary-id="second-note"]'), "n must cycle through the remaining unresolved notes.");
 			assert.equal(await page.$('.agent-note.thread-flash[data-commentary-id="new-file"]'), null, "Only the current navigation target should be highlighted.");

@@ -231,8 +231,9 @@
     else window.scrollTo({ top: 0, behavior: 'instant' });
   };
   // The tie between a note and its text reads in both directions: hovering a
-  // note tints the blocks it anchors, hovering a block outlines its notes.
-  if (planMode) {
+  // note tints the lines it anchors (blocks in plan mode, diff rows in code
+  // mode); hovering a plan block outlines the notes that reference it.
+  {
     let hoverMarked = [];
     const clearHoverMarks = () => {
       hoverMarked.forEach((element) => element.classList.remove('note-target', 'note-hover'));
@@ -241,14 +242,11 @@
     const rangesOverlap = (aStart, aEnd, bStart, bEnd) => aEnd >= bStart && aStart <= bEnd;
     document.addEventListener('mouseover', (event) => {
       if (!(event.target instanceof Element)) return;
-      const note = event.target.closest('.agent-note[data-anchor-start]');
-      const block = note ? undefined : event.target.closest('.plan-doc [data-md-line]');
+      const note = event.target.closest('.agent-note[data-anchor-start], .carried-thread[data-anchor-start]');
+      const block = note || !planMode ? undefined : event.target.closest('.plan-doc [data-md-line]');
       clearHoverMarks();
       if (note) {
-        const section = note.closest('[data-review-file]');
-        const start = Number(note.dataset.anchorStart);
-        const end = Number(note.dataset.anchorEnd || note.dataset.anchorStart);
-        [...section.querySelectorAll('[data-md-line]')].filter((candidate) => rangesOverlap(Number(candidate.dataset.mdLine), Number(candidate.dataset.mdEnd), start, end)).forEach((candidate) => {
+        noteAnchorTargets(note).forEach((candidate) => {
           candidate.classList.add('note-target');
           hoverMarked.push(candidate);
         });
@@ -696,6 +694,20 @@
       } finally {
         delete add.dataset.busy;
       }
+    });
+  });
+
+  // Theme picker: persists across sessions; the pre-paint head script applies
+  // the saved choice before first render.
+  document.querySelectorAll('[data-theme-picker], [data-scheme-picker]').forEach((select) => {
+    const key = select.hasAttribute('data-theme-picker') ? 'theme' : 'scheme';
+    select.value = document.documentElement.dataset[key] || (key === 'theme' ? 'slate' : 'auto');
+    if (!select.value) select.value = key === 'theme' ? 'slate' : 'auto';
+    select.addEventListener('change', () => {
+      document.documentElement.dataset[key] = select.value;
+      try {
+        localStorage.setItem('picr-' + key, select.value);
+      } catch (ignored) { /* private mode: theme lives for this page only */ }
     });
   });
 
@@ -1257,23 +1269,45 @@
   }
 
   // Anchored commentary jump ---------------------------------------------------
+  // The lines a note's anchor names: rendered blocks in plan mode, diff rows
+  // in code mode (side-aware).
+  const anchorTargets = (section, side, start, end) => {
+    if (planMode) return [...section.querySelectorAll('[data-md-line]')].filter((block) => Number(block.dataset.mdEnd) >= start && Number(block.dataset.mdLine) <= end);
+    const key = side === 'old' ? ['oldLine'] : side === 'new' ? ['newLine'] : ['oldLine', 'newLine'];
+    return [...section.querySelectorAll('tr.diff-line')].filter((row) => key.some((name) => {
+      const value = Number(row.dataset[name]);
+      return Number.isInteger(value) && value >= start && value <= end;
+    }));
+  };
+  const noteAnchorTargets = (note) => {
+    const section = note.closest('[data-review-file]');
+    if (!section || note.dataset.anchorStart === undefined) return [];
+    const start = Number(note.dataset.anchorStart);
+    const end = Number(note.dataset.anchorEnd || note.dataset.anchorStart);
+    return anchorTargets(section, note.dataset.anchorSide, start, end);
+  };
+  const flashAnchorTargets = (targets) => {
+    document.querySelectorAll('.anchor-flash').forEach((element) => element.classList.remove('anchor-flash'));
+    targets.forEach((element) => {
+      void element.offsetWidth;
+      element.classList.add('anchor-flash');
+      element.addEventListener('animationend', () => element.classList.remove('anchor-flash'), { once: true });
+    });
+  };
   document.querySelectorAll('.agent-note-anchor:not(:disabled)').forEach((button) => {
     button.addEventListener('click', () => {
       const note = button.closest('.agent-note, .carried-thread');
-      const section = note.closest('[data-review-file]');
-      const side = note.dataset.anchorSide;
-      const line = note.dataset.anchorStart;
+      const targets = noteAnchorTargets(note);
+      if (!targets.length) return;
       if (planMode) {
-        const target = planBlockAt(section, Number(line));
-        if (!target) return;
         clearHunkCursor();
-        hunkCursor = target;
-        target.classList.add('nav-cursor');
-        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        return;
+        hunkCursor = targets[0];
+        targets[0].classList.add('nav-cursor');
       }
-      const selector = side === 'old' ? `[data-old-line="${line}"]` : side === 'new' ? `[data-new-line="${line}"]` : `[data-old-line="${line}"], [data-new-line="${line}"]`;
-      section.querySelector(selector)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // Land the lines near the top (scroll-margin supplies the padding), and
+      // flash them so the eye finds the anchor immediately.
+      targets[0].scrollIntoView({ behavior: 'smooth', block: 'start' });
+      flashAnchorTargets(targets);
     });
   });
 

@@ -1436,6 +1436,19 @@ try {
 			assert.notEqual(darkTheme.highlight, lightTheme.highlight, "The selection mark changes with the scheme.");
 			assert.notEqual(darkTheme.background, lightTheme.background, "The page background follows the OS scheme.");
 			await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "light" }]);
+			// Slate is the default palette; the picker swaps live, forces a scheme,
+			// and persists across reloads via the pre-paint head script.
+			const rootAccent = () => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim());
+			assert.equal(await rootAccent(), "#a04e24", "Slate is the default theme.");
+			await page.$eval("[data-theme-picker]", (select) => { select.value = "manuscript"; select.dispatchEvent(new Event("change")); });
+			assert.equal(await rootAccent(), "#8a4f2d", "The theme picker swaps palettes live.");
+			await page.$eval("[data-scheme-picker]", (select) => { select.value = "dark"; select.dispatchEvent(new Event("change")); });
+			assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgb(25, 21, 18)", "Forced dark beats the light OS scheme.");
+			await page.reload({ waitUntil: "domcontentloaded" });
+			assert.equal(await page.evaluate(() => document.documentElement.dataset.theme + "/" + document.documentElement.dataset.scheme), "manuscript/dark", "The choice persists across reloads before first paint.");
+			await page.evaluate(() => { localStorage.removeItem("picr-theme"); localStorage.removeItem("picr-scheme"); });
+			await page.reload({ waitUntil: "domcontentloaded" });
+			assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "slate", "Clearing the stored choice restores the default.");
 			assert.equal(await page.$eval('details.reference-files', (details) => details.open), false, "Reference files should start collapsed.");
 			await page.waitForFunction(() => document.querySelector('[data-thread-tally]')?.hidden === false);
 			assert.match(await page.$eval('[data-thread-tally]', (section) => section.textContent), /2 open.*2 awaiting you.*0 awaiting Pi.*0 resolved/, "Seeded notes count uniformly from the start.");
@@ -1443,6 +1456,10 @@ try {
 			assert.match(await page.$eval('[data-inbox]', (strip) => strip.textContent), /^2 awaiting you/);
 			await page.keyboard.press("]");
 			await page.waitForFunction(() => document.querySelector('[data-review-file="0"]')?.hidden === false);
+			await page.$eval('[data-review-file="0"] .agent-note-anchor:not(:disabled)', (button) => button.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+			assert.equal(await page.evaluate(() => document.querySelectorAll('[data-review-file="0"] tr.note-target').length), 2, "Hovering a note tints exactly its anchored rows.");
+			await page.$eval('[data-review-file="0"] .agent-note-anchor:not(:disabled)', (button) => button.click());
+			assert.equal(await page.evaluate(() => document.querySelectorAll('[data-review-file="0"] tr.anchor-flash').length), 2, "Clicking a note anchor flashes its lines.");
 			await page.keyboard.press("j");
 			assert.ok(await page.$('[data-review-file="0"] tr.nav-cursor[data-kind="hunk"]'), "j must ring the first hunk of the file ] opened.");
 			await page.keyboard.press("o");
@@ -2210,6 +2227,10 @@ try {
 				assert.equal(await planPage.evaluate(() => document.querySelectorAll(".note-target").length === 0 && document.querySelector('.agent-note[data-commentary-id="g1"]').classList.contains("note-hover")), true, "Hovering a block outlines the notes that reference it.");
 				await planPage.evaluate(() => document.querySelector('.agent-note[data-anchor-start] .agent-note-anchor').click());
 				await planPage.waitForFunction(() => document.querySelector('[data-md-line="4"].nav-cursor'), { polling: 100 });
+				await planPage.waitForFunction(() => {
+					const top = document.querySelector('[data-md-line="4"]').getBoundingClientRect().top;
+					return top >= 30 && top <= 170;
+				}, { polling: 100 });
 				await planPage.keyboard.press("Escape");
 				await planPage.keyboard.press("j");
 				assert.equal(await planPage.evaluate(() => document.querySelector(".nav-cursor")?.dataset.mdLine !== undefined), true, "j walks rendered blocks in plan mode.");

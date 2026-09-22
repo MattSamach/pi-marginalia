@@ -1,5 +1,5 @@
 ---
-name: guided-code-review
+name: marginalia-code-review
 description: Open a Pi-led browser review of the current uncommitted Git changes. Use when the user asks to review, walk through, or explain the agent's current code changes interactively.
 ---
 

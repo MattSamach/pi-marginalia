@@ -1,4 +1,4 @@
-# pi-code-review
+# Marginalia (`pi-marginalia`)
 
 A Pi package for agent-guided browser reviews of local Git changes. Pi chooses a logical file order, explains each file and selected line ranges, and then converses with you through live comment threads: each comment you post is delivered to Pi immediately, and Pi's answers stream back into the exact thread in your browser.
 
@@ -14,24 +14,24 @@ Reload an existing Pi session with `/reload` after installation.
 
 ## Use
 
-Ask Pi to walk you through its current changes. The bundled `guided-code-review` skill reviews one logical commit unit at a time with an extremely concise pre-PR overview, an ordered manifest, file summaries, and optional anchored commentary. After explicit approval and commit permission, Pi commits that reviewed unit before continuing to the next already-authorized implementation unit.
+Ask Pi to walk you through its current changes. The bundled `marginalia-code-review` skill reviews one logical commit unit at a time with an extremely concise pre-PR overview, an ordered manifest, file summaries, and optional anchored commentary. After explicit approval and commit permission, Pi commits that reviewed unit before continuing to the next already-authorized implementation unit.
 
 For a review without agent commentary:
 
 ```text
-/review-browser
-/review-browser --help
+/margin-code
+/margin-code --help
 ```
 
 To review a rendered markdown document without asking Pi to author a manifest — Pi's latest response, or any markdown file on your machine:
 
 ```text
-/plan-browser
-/plan-browser docs/design.md
-/plan-browser ~/notes/proposal.md
+/margin-doc
+/margin-doc docs/design.md
+/margin-doc ~/notes/proposal.md
 ```
 
-Bare `/plan-browser` opens Pi's latest response as a continuous rendered document; with a path it opens that file. Either way you get the full plan-review surface — select text to comment, threads arrive in the session live, Pi answers with `reply_review_thread`, and approval sends a terminal note.
+Bare `/margin-doc` opens Pi's latest response as a continuous rendered document; with a path it opens that file. Either way you get the full plan-review surface — select text to comment, threads arrive in the session live, Pi answers with `reply_review_thread`, and approval sends a terminal note.
 
 The snapshot contains staged and unstaged changes against `HEAD`, plus untracked files as all-addition diffs. Files omitted from Pi's manifest are appended, so commentary cannot hide changes. Pi may classify binaries and deterministic generated artifacts as `reviewMode: "reference"`; they remain inspectable under a collapsed **Reference files** sidebar group and remain part of the snapshot and commit.
 

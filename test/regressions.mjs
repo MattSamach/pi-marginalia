@@ -2499,7 +2499,7 @@ try {
 
 	await writeFile(join(fixture, "untracked.txt"), "changed after snapshot\n");
 	assert.notEqual((await collectReviewSnapshot(fixture)).id, snapshot.id, "Changed frozen content must change the snapshot fingerprint.");
-	console.log("pi-code-review regression checks passed.");
+	console.log("marginalia regression checks passed.");
 } finally {
 	await rm(fixture, { recursive: true, force: true });
 	if (contextRepo) await rm(contextRepo, { recursive: true, force: true });

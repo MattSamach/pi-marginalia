@@ -424,16 +424,16 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("review-browser", {
+	pi.registerCommand("margin-code", {
 		description: "Open a static browser review of staged, unstaged, and untracked changes against HEAD (--help for usage)",
 		handler: async (args, ctx) => {
 			const normalized = args.trim();
 			if (normalized === "--help" || normalized === "-h") {
-				ctx.ui.notify("Usage: /review-browser\n\nOpens one frozen unified-diff snapshot of all staged, unstaged, and untracked changes against HEAD. For Pi-authored ordering and commentary, ask Pi to use open_code_review.", "info");
+				ctx.ui.notify("Usage: /margin-code\n\nOpens one frozen unified-diff snapshot of all staged, unstaged, and untracked changes against HEAD. For Pi-authored ordering and commentary, ask Pi to use open_code_review.", "info");
 				return;
 			}
 			if (normalized) {
-				ctx.ui.notify("Unknown arguments. Usage: /review-browser [--help]", "warning");
+				ctx.ui.notify("Unknown arguments. Usage: /margin-code [--help]", "warning");
 				return;
 			}
 			try {
@@ -445,12 +445,12 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("plan-browser", {
-		description: "Open a browser document review of Pi's latest response, or of any markdown file (/plan-browser [path])",
+	pi.registerCommand("margin-doc", {
+		description: "Open a browser document review of Pi's latest response, or of any markdown file (/margin-doc [path])",
 		handler: async (args, ctx) => {
 			const normalized = args.trim();
 			if (normalized === "--help" || normalized === "-h") {
-				ctx.ui.notify("Usage: /plan-browser [path]\n\nBare: reviews Pi's latest response as a rendered document.\nWith a path: reviews that markdown file.\nComments you post arrive in this session as plan-review threads; Pi answers with reply_review_thread.", "info");
+				ctx.ui.notify("Usage: /margin-doc [path]\n\nBare: reviews Pi's latest response as a rendered document.\nWith a path: reviews that markdown file.\nComments you post arrive in this session as plan-review threads; Pi answers with reply_review_thread.", "info");
 				return;
 			}
 			try {

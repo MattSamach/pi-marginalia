@@ -1,4 +1,4 @@
-// End-to-end check of the /plan-browser command: drives a real pi process in
+// End-to-end check of the /margin-doc command: drives a real pi process in
 // RPC mode with only this extension loaded, invokes the command against a
 // markdown file on disk, and verifies the served document review. The bare
 // (latest-response) variant is exercised for its graceful empty-branch path;
@@ -11,12 +11,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 if (process.platform === "win32") {
-	console.log("plan-browser RPC check is skipped on Windows.");
+	console.log("margin-doc RPC check is skipped on Windows.");
 	process.exit(0);
 }
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const root = await mkdtemp(join(tmpdir(), "pi-code-review-plan-browser-"));
+const root = await mkdtemp(join(tmpdir(), "pi-marginalia-margin-doc-"));
 const bin = join(root, "bin");
 const openLog = join(root, "open.log");
 await mkdir(bin);
@@ -35,7 +35,7 @@ const child = spawn(join(repo, "node_modules", ".bin", "pi"), [
 	"--extension", join(repo, "index.ts"),
 ], {
 	cwd: root,
-	env: { ...process.env, CMUX_WORKSPACE_ID: "plan-browser-test", CMUX_BUNDLED_CLI_PATH: join(bin, "cmux"), PCR_OPEN_LOG: openLog },
+	env: { ...process.env, CMUX_WORKSPACE_ID: "margin-doc-test", CMUX_BUNDLED_CLI_PATH: join(bin, "cmux"), PCR_OPEN_LOG: openLog },
 	stdio: ["pipe", "pipe", "pipe"],
 });
 
@@ -93,7 +93,7 @@ const waitFor = async (predicate, label, timeoutMs = 15_000) => {
 
 try {
 	// Bare invocation with no assistant messages degrades gracefully.
-	await command("/plan-browser");
+	await command("/margin-doc");
 	const emptyNotice = await waitFor(
 		async () => notifications.find((event) => event.message?.includes("No assistant markdown found")),
 		"empty-branch notice",
@@ -101,7 +101,7 @@ try {
 	assert.equal(emptyNotice.notifyType, "warning");
 
 	// File invocation serves the document review.
-	await command("/plan-browser doc.md");
+	await command("/margin-doc doc.md");
 	const urls = await waitFor(async () => {
 		const lines = (await readFile(openLog, "utf8")).trim().split("\n").filter(Boolean);
 		return lines.length >= 1 ? lines : undefined;
@@ -123,13 +123,13 @@ try {
 	assert.match(html, /<li data-md-line="4" data-md-end="5">first goal wrapped goal tail<\/li>/, "Wrapped list items stay in their list end to end.");
 
 	// A missing file reports rather than crashing the session.
-	await command("/plan-browser nope-does-not-exist.md");
+	await command("/margin-doc nope-does-not-exist.md");
 	await waitFor(
 		async () => notifications.find((event) => event.notifyType === "error" && event.message?.includes("nope-does-not-exist.md")),
 		"missing-file error notice",
 	);
 
-	console.log("plan-browser RPC flow passed.");
+	console.log("margin-doc RPC flow passed.");
 } finally {
 	child.kill();
 	await rm(root, { recursive: true, force: true });

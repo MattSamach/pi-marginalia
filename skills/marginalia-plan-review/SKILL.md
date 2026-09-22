@@ -1,5 +1,5 @@
 ---
-name: guided-plan-review
+name: marginalia-plan-review
 description: Open a Pi-led browser review of a markdown plan or design document, iterated in rounds until the reviewer approves. Use when the user wants to plan interactively, review a proposal, or converge on a design before (or instead of) implementation.
 ---
 

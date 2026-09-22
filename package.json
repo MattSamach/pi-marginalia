@@ -1,5 +1,5 @@
 {
-  "name": "pi-code-review",
+  "name": "pi-marginalia",
   "version": "0.1.0",
   "description": "Static, agent-guided browser reviews for Pi git changes",
   "type": "module",
@@ -11,7 +11,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node ./test/regressions.mjs && node ./test/plan-browser-rpc.mjs",
+    "test": "node ./test/regressions.mjs && node ./test/margin-doc-rpc.mjs",
     "check": "npm run typecheck && npm test"
   },
   "peerDependencies": {

@@ -140,7 +140,10 @@ export function formatReviewPassXml(review, threads, summary, stale, note, round
 			}
 		} else {
 			lines.push(`  <open-thread ${threadAttributes(thread)}${anchorAttributes(thread)} last-author="${attr(last?.author ?? "user")}">`);
-			if (last) lines.push(`    <last-message${last.seq === undefined ? "" : ` turn="${last.seq}"`}>${cdata(last.body)}</last-message>`);
+			// Never echo Pi's own words back to Pi: when the newest turn is Pi's
+			// (carried resolutions, answered threads), the attributes already
+			// carry the whole signal and the body is pure repetition.
+			if (last && last.author !== "pi") lines.push(`    <last-message${last.seq === undefined ? "" : ` turn="${last.seq}"`}>${cdata(last.body)}</last-message>`);
 		}
 		lines.push("  </open-thread>");
 	}

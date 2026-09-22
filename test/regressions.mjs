@@ -227,6 +227,18 @@ try {
 	assert.match(passXml, /<note><!\[CDATA\[Note \]\]\]\]><!\[CDATA\[> here\]\]><\/note>/, "Finish notes must be serialized safely.");
 	assert.match(passXml, /<open-thread thread="[a-f0-9]{8}-[a-f0-9]{6}-t1" kind="commentary" status="open" file="untracked.txt" commentary-id="new-file" delivered-user-turns="\d+" side="new" start-line="1" end-line="2" last-author="user">/, "Pass blocks are self-contained: the note's anchor rides along.");
 	assert.match(passXml, /<last-message turn="\d+">/, "Last-message blocks carry the turn number for the audit ledger.");
+	{
+		// A thread Pi answered last: attributes carry the whole signal; the body
+		// would be Pi's own words echoed back — never serialized.
+		const echoStore = createThreadStore(ordered);
+		const echoThread = echoStore.postUserTurn({ source: "overview", body: "Reviewer asks." }).thread;
+		echoStore.postPiReply(echoThread.id, "Pi's own resolution prose.", false);
+		const echoPass = formatReviewPassXml(ordered, echoStore.list(), echoStore.summary(), false, undefined);
+		const echoBlock = echoPass.split("<open-thread ").find((block) => block.includes(`thread="${echoThread.id}"`));
+		assert.match(echoBlock, /last-author="pi"/);
+		assert.doesNotMatch(echoBlock, /<last-message/, "Pi's own newest turn is never echoed back in the pass digest.");
+		assert.doesNotMatch(echoPass, /resolution prose/, "No copy of Pi's reply body survives anywhere in the digest.");
+	}
 	assert.doesNotMatch(passXml, /Why this exists/, "Pass summaries carry only the last message of each open thread.");
 	assert.doesNotMatch(passXml, /commentary-id="second-note"/, "Untouched notes are never echoed back to Pi.");
 

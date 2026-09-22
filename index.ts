@@ -73,7 +73,7 @@ const openPlanReviewSchema = Type.Object({
 	threadResponses: Type.Optional(Type.Array(Type.Object({
 		respondsTo: Type.String({ minLength: 1, maxLength: 200, description: "Open thread id from the previous round's plan-review-pass message." }),
 		resolution: Type.String({ pattern: "^(addressed|declined|needs-discussion)$" }),
-		body: Type.String({ minLength: 1, maxLength: 20_000, description: "Resolution commentary shown at the top of the carried thread." }),
+		body: Type.String({ minLength: 1, maxLength: 20_000, description: "Resolution commentary shown at the top of the carried thread. It renders in the same narrow rail as thread replies — lead with the answer and keep it under ~80 words; the anchor, not the prose, carries the proof." }),
 		file: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Section of the new plan (heading text or slug) where the reviewer should verify the response. Omit only when the anchor is truly gone." })),
 		startLine: Type.Optional(Type.Integer({ minimum: 1, description: "Absolute source line in the NEW plan markdown." })),
 		endLine: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -90,7 +90,7 @@ const openCodeReviewSchema = Type.Object({
 	threadResponses: Type.Optional(Type.Array(Type.Object({
 		respondsTo: Type.String({ minLength: 1, maxLength: 200, description: "Open thread id from the previous round's code-review-pass message." }),
 		resolution: Type.String({ pattern: "^(addressed|declined|needs-discussion)$", description: "Whether the concern was addressed in this round, declined with rationale, or needs further discussion." }),
-		body: Type.String({ minLength: 1, maxLength: 20_000, description: "Resolution commentary shown at the top of the carried thread." }),
+		body: Type.String({ minLength: 1, maxLength: 20_000, description: "Resolution commentary shown at the top of the carried thread. It renders in the same narrow rail as thread replies — lead with the answer and keep it under ~80 words; the anchor, not the prose, carries the proof." }),
 		file: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000, description: "File in this round where the reviewer should verify the response. Omit only when the anchor is truly gone." })),
 		side: Type.Optional(Type.String({ pattern: "^(old|new|both)$" })),
 		startLine: Type.Optional(Type.Integer({ minimum: 1 })),

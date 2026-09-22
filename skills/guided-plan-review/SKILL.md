@@ -32,6 +32,7 @@ Use `open_plan_review` to hand the reviewer a rendered plan they can annotate. T
 ## Next rounds
 
 - `threadResponses` is required when the previous round has open threads whose reviewer content you received: exactly one `{respondsTo, resolution, body}` per thread, anchored with `file` (heading text or slug of the **new** plan) and `startLine`/`endLine` in the **new** markdown. Omit `file` only when the concern's home is truly gone from the plan.
+- Response bodies obey the same narrow-rail rule as thread replies: lead with the answer, under ~80 words. These bodies are re-sent every round a thread stays open, so verbosity compounds.
 - Threads whose content never reached you (queued or pending drafts) carry automatically as held threads — do not respond to them. A held thread's anchor is written in its origin round's coordinates (`anchor-from-round`); trust its `<highlight>` text over the line numbers.
 - The new round's sidebar marks sections whose content changed since the previous round; unchanged sections carry no mark. Superseded rounds stay readable in the round archive.
 - An unchanged document reopens the current round instead of advancing; answer its threads in place.

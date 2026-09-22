@@ -61,7 +61,7 @@ const planCommentarySchema = Type.Object({
 });
 const planSectionSchema = Type.Object({
 	heading: Type.String({ minLength: 1, maxLength: 500, description: "Exact heading text of a plan section (case-insensitive match)." }),
-	summary: Type.Optional(Type.String({ maxLength: 2_000, description: "Section-level context: why this section is shaped this way, what to scrutinize." })),
+	summary: Type.Optional(Type.String({ maxLength: 2_000, description: "Orientation only — why this section is shaped the way it is. Renders as a non-replyable summary card; anything that invites a reviewer response belongs in commentary (ideally line-anchored) instead, and must not be duplicated here." })),
 	commentary: Type.Optional(Type.Array(planCommentarySchema, { maxItems: 20 })),
 });
 const openPlanReviewSchema = Type.Object({

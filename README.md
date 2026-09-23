@@ -59,7 +59,17 @@ Everything that needs your attention is one uniform queue: every Pi commentary n
 
 While Pi is busy, posts queue and are delivered together the moment Pi settles, so a slow turn never blocks you; Pi then answers each queued thread in one pass.
 
-### Review rounds
+### Appearance
+
+Four themes (Slate default, Manuscript, Iris, Classic) with Auto/Light/Dark schemes — pick in the `?` overlay; the choice persists per browser origin. For a machine-wide default that survives fresh origins, create `~/.pi/agent/marginalia.json`:
+
+```json
+{ "theme": "manuscript", "scheme": "dark" }
+```
+
+Read at each review open (no restart needed); the in-browser picker still wins where set.
+
+## Review rounds
 
 A review session is an ordered sequence of immutable, fingerprinted rounds. Sending a round opens a **quiet window** behind a *“Pi is revising — round N+1 pending”* banner while Pi applies your feedback as one batch: reading, navigation, and composing all stay open, but everything you write queues for the next round — nothing reaches Pi mid-revision, and resolving and re-sending wait. The composer buttons say so (“Queue for next round”). When Pi reopens the review with `previousRoundId`, the revised changes arrive as the next round and your open tab advances to it automatically. Prior rounds stay reachable read-only through the topbar round switcher — threads included — and mutations against them are rejected on the server, not just hidden. If a new round never arrives (Pi crashed or was interrupted), the banner's **Resume reviewing this round** unlocks the current round; if Pi reopens with an unchanged snapshot, the current round unlocks instead of adding a hollow round.
 

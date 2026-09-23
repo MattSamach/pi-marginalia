@@ -477,6 +477,16 @@ try {
 	failDeliver = false;
 	assert.equal(flakyQueue.flush(true), 1, "The kept batch delivers on the next settle.");
 	const html = renderReviewHtml(ordered, "safe-nonce");
+	{
+		// Appearance defaults from config ship as the html baseline; garbage
+		// falls back to the built-ins; the pre-paint script still lets a
+		// reviewer's stored picker choice win.
+		const themed = renderReviewHtml(ordered, "safe-nonce", undefined, { carried: [], archive: [], appearance: { theme: "manuscript", scheme: "dark" } });
+		assert.match(themed, /<html lang="en" data-theme="manuscript" data-scheme="dark">/, "Config appearance becomes the served baseline.");
+		const garbage = renderReviewHtml(ordered, "safe-nonce", undefined, { carried: [], archive: [], appearance: { theme: "neon<script>", scheme: "blinding" } });
+		assert.match(garbage, /<html lang="en" data-theme="slate" data-scheme="auto">/, "Invalid config values fall back to the built-in defaults.");
+		assert.match(html, /<html lang="en" data-theme="slate" data-scheme="auto">/, "No config keeps the shipped defaults.");
+	}
 	assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/, "Manifest text must be escaped.");
 	assert.match(html, /Review this first &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 	assert.match(html, /data-review-overview/, "Agent-guided reviews should begin with an overview page.");

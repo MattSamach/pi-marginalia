@@ -170,6 +170,17 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	const queue = createReviewMessageQueue((messages: string[]) => pi.sendUserMessage(messages.join("\n\n")));
 
 	type ReviewRound = { number: number; review: { id: string; root: string } };
+	// Optional appearance defaults from ~/.pi/agent/marginalia.json ({"theme","scheme"}).
+	// Read per session open so edits apply to the next review without a restart;
+	// invalid or missing values fall back to the built-in defaults, and a
+	// reviewer's in-browser picker choice still wins over both.
+	const loadAppearance = async (): Promise<{ theme?: string; scheme?: string } | undefined> => {
+		try {
+			const parsed = JSON.parse(await readFile(resolve(homedir(), ".pi/agent/marginalia.json"), "utf8"));
+			if (parsed && typeof parsed === "object") return { theme: parsed.theme, scheme: parsed.scheme };
+		} catch {}
+		return undefined;
+	};
 	const openSession = async (ctx: ExtensionContext, review: { kind?: string; id: string; root: string; title: string; files: { path: string }[] }, previousRoundId: string | undefined, threadResponses: unknown, serverExtras: Record<string, unknown>) => {
 		const noun = review.kind === "plan" ? "Plan" : "Review";
 		if (previousRoundId) {
@@ -188,7 +199,9 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			servers.delete(stale);
 			await stale.close();
 		}
+		const appearance = await loadAppearance();
 		const server = await createCodeReviewServer(review, {
+			appearance,
 			onThreadPost: async (round: ReviewRound, thread: ReviewThread, turns: ReviewThreadTurn[]) => {
 				const queued = queue.post(formatThreadMessageXml(round.review, thread, turns, round.number), ctx.isIdle());
 				// The message is accepted once queue.post returns; a notify failure must

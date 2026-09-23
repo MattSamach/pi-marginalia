@@ -260,7 +260,7 @@ export async function createCodeReviewServer(review, options) {
 			changedSections = round.review.files.filter((file) => before.get(file.path) !== file.contentSha256).map((file) => file.path);
 		}
 		res.writeHead(200, htmlHeaders(nonce));
-		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive, viewed: [...round.viewed], changedSections }));
+		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive, viewed: [...round.viewed], changedSections, appearance: options.appearance }));
 	};
 
 	const server = createServer(async (req, res) => {

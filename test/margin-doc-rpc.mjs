@@ -24,6 +24,15 @@ await writeFile(join(bin, "cmux"), '#!/bin/sh\nprintf "%s\\n" "$3" >> "$PCR_OPEN
 await chmod(join(bin, "cmux"), 0o755);
 await writeFile(openLog, "");
 await writeFile(join(root, "doc.md"), "Intro before any heading.\n\n## Goals\n1. first goal\n   wrapped goal tail\n2. second goal\n\n## Steps\n- do the thing\n");
+const codeRepo = join(root, "code-repo");
+await mkdir(join(codeRepo, "nested"), { recursive: true });
+const sh = (command) => new Promise((resolvePromise, rejectPromise) => {
+	const proc = spawn("/bin/sh", ["-c", command], { cwd: codeRepo });
+	proc.on("exit", (code) => (code === 0 ? resolvePromise() : rejectPromise(new Error(`${command} -> ${code}`))));
+});
+await writeFile(join(codeRepo, "app.txt"), "one\n");
+await sh("git init -q && git -c user.email=t@t -c user.name=t add -A && git -c user.email=t@t -c user.name=t commit -qm base");
+await writeFile(join(codeRepo, "app.txt"), "one\ntwo\n");
 
 const child = spawn(join(repo, "node_modules", ".bin", "pi"), [
 	"--mode", "rpc",
@@ -127,6 +136,28 @@ try {
 	await waitFor(
 		async () => notifications.find((event) => event.notifyType === "error" && event.message?.includes("nope-does-not-exist.md")),
 		"missing-file error notice",
+	);
+
+	// /margin-code with a path reviews a repository the session is not in —
+	// including from a nested subdirectory of it.
+	await command("/margin-code " + join(codeRepo, "nested"));
+	const codeOpened = await waitFor(
+		async () => notifications.find((event) => event.message?.startsWith("Opened static review")),
+		"static review notice",
+	);
+	assert.match(codeOpened.message, /1 files in /, "The snapshot finds the dirty file from the nested path.");
+	const codeUrls = (await readFile(openLog, "utf8")).trim().split("\n").filter(Boolean);
+	const codeEntry = await fetch(codeUrls[codeUrls.length - 1], { redirect: "manual" });
+	const codeCookie = (codeEntry.headers.get("set-cookie") ?? "").split(";", 1)[0];
+	const codeHtml = await (await fetch(new URL(codeUrls[codeUrls.length - 1]).origin, { headers: { cookie: codeCookie } })).text();
+	assert.doesNotMatch(codeHtml, /<body[^>]*data-review-kind="plan"/, "The path form opens a code-mode session.");
+	assert.match(codeHtml, /app\.txt/, "The reviewed repo's changed file is served.");
+
+	// A path outside any repository reports politely.
+	await command("/margin-code " + bin);
+	await waitFor(
+		async () => notifications.find((event) => event.notifyType === "error" && event.message?.includes("requires a Git repository")),
+		"non-repo error notice",
 	);
 
 	console.log("margin-doc RPC flow passed.");

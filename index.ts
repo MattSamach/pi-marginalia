@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { basename, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint, createPinnedBlobContextReader, currentSnapshotId, currentSnapshotProbe } from "./shared/git-review.js";
@@ -240,8 +240,8 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		}
 		return { review, server, round: 1, identical: false };
 	};
-	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal) => {
-		const snapshot = await collectReviewSnapshot(ctx.cwd, { signal });
+	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal, root?: string) => {
+		const snapshot = await collectReviewSnapshot(root ?? ctx.cwd, { signal });
 		const review = applyReviewManifest(snapshot, manifest);
 		const previousRoundId = "previousRoundId" in manifest ? manifest.previousRoundId : undefined;
 		if (!previousRoundId && "threadResponses" in manifest && manifest.threadResponses !== undefined) {
@@ -438,20 +438,26 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("margin-code", {
-		description: "Open a static browser review of staged, unstaged, and untracked changes against HEAD (--help for usage)",
+		description: "Open a static browser review of a repo's staged, unstaged, and untracked changes against HEAD (/margin-code [repo-path])",
 		handler: async (args, ctx) => {
 			const normalized = args.trim();
 			if (normalized === "--help" || normalized === "-h") {
-				ctx.ui.notify("Usage: /margin-code\n\nOpens one frozen unified-diff snapshot of all staged, unstaged, and untracked changes against HEAD. For Pi-authored ordering and commentary, ask Pi to use open_code_review.", "info");
+				ctx.ui.notify("Usage: /margin-code [repo-path]\n\nOpens one frozen unified-diff snapshot of all staged, unstaged, and untracked changes against HEAD.\nBare: reviews the repository at the session's working directory.\nWith a path: reviews the Git repository at (or containing) that directory.\nFor Pi-authored ordering and commentary, ask Pi to use open_code_review.", "info");
 				return;
 			}
+			let root: string | undefined;
 			if (normalized) {
-				ctx.ui.notify("Unknown arguments. Usage: /margin-code [--help]", "warning");
-				return;
+				const expanded = normalized === "~" || normalized.startsWith("~/") ? homedir() + normalized.slice(1) : normalized;
+				root = isAbsolute(expanded) ? expanded : resolve(ctx.cwd, expanded);
+				const probe = await stat(root).catch(() => undefined);
+				if (!probe?.isDirectory()) {
+					ctx.ui.notify(`${root} is not a directory.`, "error");
+					return;
+				}
 			}
 			try {
-				const { review } = await openReview(ctx, { files: [] });
-				ctx.ui.notify(`Opened static review ${review.id.slice(0, 12)} (${review.files.length} files).`, "info");
+				const { review } = await openReview(ctx, { files: [] }, undefined, root);
+				ctx.ui.notify(`Opened static review ${review.id.slice(0, 12)} (${review.files.length} files${root ? ` in ${root}` : ""}).`, "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}

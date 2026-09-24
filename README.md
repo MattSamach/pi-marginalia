@@ -20,6 +20,7 @@ For a review without agent commentary:
 
 ```text
 /margin-code
+/margin-code /path/to/other/repo
 /margin-code --help
 ```
 

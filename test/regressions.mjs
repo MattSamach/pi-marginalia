@@ -137,7 +137,7 @@ try {
 	);
 	assert.throws(
 		() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", commentary: [{ id: "partially-visible", body: "bad", side: "new", startLine: 1, endLine: 9999 }] }] }),
-		/does not anchor to a visible complete new range/,
+		/does not anchor to a visible complete new range in [^ ]+ \(visible new lines: [\d, -]+\)/,
 		"Both commentary range boundaries must remain visible after rendering caps.",
 	);
 
@@ -476,6 +476,19 @@ try {
 	assert.equal(flakyQueue.size(), 1, "A failed flush must keep the batch queued.");
 	failDeliver = false;
 	assert.equal(flakyQueue.flush(true), 1, "The kept batch delivers on the next settle.");
+	{
+		// Every invalid anchor is reported in ONE rejection, each with the
+		// ranges that are visible — one corrected resubmission fixes them all.
+		let aggregated;
+		try {
+			applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", commentary: [
+				{ id: "bad-one", body: "x", side: "new", startLine: 900, endLine: 901 },
+				{ id: "bad-two", body: "y", side: "new", startLine: 500, endLine: 500 },
+			] }] });
+		} catch (error) { aggregated = error.message; }
+		assert.ok(aggregated.includes("bad-one") && aggregated.includes("bad-two"), "All invalid anchors surface in a single rejection.");
+		assert.match(aggregated, /visible new lines: [\d, -]+/, "The rejection names the ranges that can be anchored.");
+	}
 	const html = renderReviewHtml(ordered, "safe-nonce");
 	{
 		// Appearance defaults from config ship as the html baseline; garbage

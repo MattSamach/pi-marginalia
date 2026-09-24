@@ -1,3 +1,4 @@
+import { visibleRangeHint } from "./git-review.js";
 import { randomBytes } from "node:crypto";
 
 export const THREAD_LIMITS = Object.freeze({
@@ -110,7 +111,7 @@ export function buildCarriedThreads(responses, previousThreads, nextReview, from
 				}
 				const boundaryIsVisible = (targetLine) => file.lines.some((line) => (side !== "new" && line.oldLine === targetLine) || (side !== "old" && line.newLine === targetLine));
 				if (!boundaryIsVisible(response.startLine) || !boundaryIsVisible(endLine)) {
-					throw new Error(`Thread response ${origin.id} does not anchor to a visible complete ${side} range in ${response.file}.`);
+					throw new Error(`Thread response ${origin.id} does not anchor to a visible complete ${side} range in ${response.file} (${visibleRangeHint(file, side)}).`);
 				}
 				placement = "anchored";
 				anchor.side = side;

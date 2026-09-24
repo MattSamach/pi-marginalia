@@ -570,21 +570,48 @@ export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIM
 		cappedByPath.set(file.path, rendered);
 	}
 	const capped = ordered.map((file) => cappedByPath.get(file.path));
+	// Anchor failures are collected, not thrown one at a time: every invalid
+	// anchor in the manifest is reported together, with the ranges that ARE
+	// visible, so one corrected resubmission can fix them all.
+	const anchorFailures = [];
 	for (const file of capped) {
 		for (const entry of file.commentary) {
 			if (entry.startLine === undefined) continue;
-			if (file.omitted) throw new Error(`Commentary ${entry.id} does not anchor to a visible ${entry.side} line in ${file.path}.`);
+			if (file.omitted) {
+				anchorFailures.push(`Commentary ${entry.id} does not anchor to a visible ${entry.side} line in ${file.path} (its diff was omitted by the size cap; drop startLine to attach it to the file).`);
+				continue;
+			}
 			const boundaryIsVisible = (targetLine) => file.lines.some((line) => {
 				const oldMatches = entry.side !== "new" && line.oldLine === targetLine;
 				const newMatches = entry.side !== "old" && line.newLine === targetLine;
 				return oldMatches || newMatches;
 			});
 			if (!boundaryIsVisible(entry.startLine) || !boundaryIsVisible(entry.endLine)) {
-				throw new Error(`Commentary ${entry.id} does not anchor to a visible complete ${entry.side} range in ${file.path}.`);
+				anchorFailures.push(`Commentary ${entry.id} does not anchor to a visible complete ${entry.side} range in ${file.path} (${visibleRangeHint(file, entry.side)}).`);
 			}
 		}
 	}
+	if (anchorFailures.length) throw new Error(anchorFailures.join("\n"));
 	const title = manifest.title === undefined ? "Code review" : assertString(manifest.title, "Review title");
 	const proposedCommitMessage = manifest.proposedCommitMessage === undefined ? undefined : assertString(manifest.proposedCommitMessage, "Proposed commit message");
 	return { ...snapshot, title, overview, proposedCommitMessage, files: capped, renderedBytes: totalBytes, renderedLines: totalLines };
+}
+
+// Human/agent-readable summary of which line numbers a rendered diff can
+// anchor: contiguous visible runs per coordinate space relevant to the side.
+export function visibleRangeHint(file, side) {
+	const runs = (key) => {
+		const numbers = [...new Set(file.lines.map((line) => line[key]).filter((value) => Number.isInteger(value)))].sort((a, b) => a - b);
+		const ranges = [];
+		for (const value of numbers) {
+			const last = ranges[ranges.length - 1];
+			if (last && value <= last[1] + 1) last[1] = value;
+			else ranges.push([value, value]);
+		}
+		return ranges.map(([start, end]) => (start === end ? String(start) : `${start}-${end}`)).join(", ");
+	};
+	const parts = [];
+	if (side !== "old") parts.push(`visible new lines: ${runs("newLine") || "none"}`);
+	if (side !== "new") parts.push(`visible old lines: ${runs("oldLine") || "none"}`);
+	return parts.join("; ");
 }

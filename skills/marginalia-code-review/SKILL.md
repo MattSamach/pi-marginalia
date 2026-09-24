@@ -5,7 +5,7 @@ description: Open a Pi-led browser review of the current uncommitted Git changes
 
 # Guided code review
 
-Use `open_code_review` to present the current changes in the order that makes them fastest to understand.
+Use `open_code_review` to present the current changes in the order that makes them fastest to understand. By default it reviews the session working directory’s repository; pass `repoPath` to review a different repository (any directory inside it works). Every round of one session must use the same repository.
 
 ## Commit-sized review units
 

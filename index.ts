@@ -85,6 +85,7 @@ const openCodeReviewSchema = Type.Object({
 	title: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
 	proposedCommitMessage: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000, description: "Proposed commit message prefilled on the reviewer's Approve screen; the reviewer may edit it before approving. Omitted next rounds keep the previous proposal." })),
 	overview: reviewOverviewSchema,
+	repoPath: Type.Optional(Type.String({ minLength: 1, maxLength: 4_096, description: "Directory of (or inside) the Git repository to review. Defaults to the session working directory. Rounds of one session must all use the same repository." })),
 	files: Type.Array(reviewFileSchema, { maxItems: 500, description: "Ordered changed files. Any changed files omitted here are appended automatically." }),
 	previousRoundId: Type.Optional(Type.String({ minLength: 8, maxLength: 200, description: "Snapshot id of the current round of an open review session (the snapshot attribute of the code-review-pass message). Opens the revised changes as the next round in the same browser session instead of a fresh review." })),
 	threadResponses: Type.Optional(Type.Array(Type.Object({
@@ -240,8 +241,16 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		}
 		return { review, server, round: 1, identical: false };
 	};
+	const resolveRepoArg = async (ctx: ExtensionContext, value: string): Promise<string> => {
+		const expanded = value === "~" || value.startsWith("~/") ? homedir() + value.slice(1) : value;
+		const root = isAbsolute(expanded) ? expanded : resolve(ctx.cwd, expanded);
+		const probe = await stat(root).catch(() => undefined);
+		if (!probe?.isDirectory()) throw new Error(`${root} is not a directory.`);
+		return root;
+	};
 	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal, root?: string) => {
-		const snapshot = await collectReviewSnapshot(root ?? ctx.cwd, { signal });
+		const repoPath = "repoPath" in manifest && typeof manifest.repoPath === "string" ? await resolveRepoArg(ctx, manifest.repoPath) : undefined;
+		const snapshot = await collectReviewSnapshot(root ?? repoPath ?? ctx.cwd, { signal });
 		const review = applyReviewManifest(snapshot, manifest);
 		const previousRoundId = "previousRoundId" in manifest ? manifest.previousRoundId : undefined;
 		if (!previousRoundId && "threadResponses" in manifest && manifest.threadResponses !== undefined) {
@@ -447,11 +456,10 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			}
 			let root: string | undefined;
 			if (normalized) {
-				const expanded = normalized === "~" || normalized.startsWith("~/") ? homedir() + normalized.slice(1) : normalized;
-				root = isAbsolute(expanded) ? expanded : resolve(ctx.cwd, expanded);
-				const probe = await stat(root).catch(() => undefined);
-				if (!probe?.isDirectory()) {
-					ctx.ui.notify(`${root} is not a directory.`, "error");
+				try {
+					root = await resolveRepoArg(ctx, normalized);
+				} catch (error) {
+					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 					return;
 				}
 			}

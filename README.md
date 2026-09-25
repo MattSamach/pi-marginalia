@@ -2,6 +2,10 @@
 
 A Pi package for agent-guided browser reviews — of local Git changes, and of rendered markdown plans and documents. Pi chooses a logical file order, explains each file and selected line ranges, and then converses with you through live comment threads: each comment you post is delivered to Pi immediately, and Pi's answers stream back into the exact thread in your browser. Reviews iterate in rounds until you approve.
 
+![Agent-guided code review: ordered diff, anchored Pi commentary, live comment threads](docs/code-review.png)
+
+![Plan review: a continuous rendered document with margin-aligned commentary and threads](docs/plan-review.png)
+
 ## Install
 
 ```bash

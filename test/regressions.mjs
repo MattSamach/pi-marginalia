@@ -281,7 +281,7 @@ try {
 	assert.equal(capStore.setResolved(capThread.id, true).status, "resolved", "Resolution remains the exit for over-cap carried threads.");
 	const carriedRecords = buildCarriedThreads(validPair, carrySource.list(), ordered, 1);
 	assert.deepEqual(carriedRecords.map((record) => record.id), [carryTopic.id, carrySelection.id], "Carried threads keep their round-of-origin ids.");
-	assert.equal(carriedRecords[0].carried.placement, "outdated");
+	assert.equal(carriedRecords[0].carried.placement, "overview", "A file-less response to an overview thread carries it home, not to the outdated group.");
 	assert.equal(carriedRecords[1].carried.placement, "anchored");
 	assert.equal(carriedRecords[1].piProposedResolve, true, "Addressed responses arrive as resolution proposals.");
 	assert.equal(carriedRecords[1].highlight, "A marker", "The origin highlight travels with the carried thread.");
@@ -296,10 +296,24 @@ try {
 	const carryPassXml = formatReviewPassXml(ordered, carryStore.list(), carryStore.summary(), false, undefined, 2);
 	assert.match(carryPassXml, /carried-from-round="1" resolution="addressed"/, "Pass summaries must identify carried threads and their resolutions.");
 	const carryHtml = renderReviewHtml(ordered, "carry-nonce", { round: 2, currentRound: 2, phase: "reviewing" }, { carried: carryStore.list().filter((thread) => thread.carried), archive: [{ round: 1, resolved: [{ id: "abc-t9", source: "selection", file: "untracked.txt", highlight: "A marker" }] }] });
+	{
+		const feedbackSection = /<section class="overview-feedback">[\s\S]*?<\/section>/.exec(carryHtml)[0];
+		assert.ok(feedbackSection.includes(`data-carried-thread="${carryTopic.id}"`), "A carried overview thread renders in the overview's General feedback section.");
+		assert.doesNotMatch(carryHtml, /data-outdated-threads/, "No thread with a live home lands in the outdated group.");
+	}
 	assert.match(carryHtml, new RegExp(`data-carried-thread="${carriedRecords[1].id}"[^>]*data-anchor-side="new" data-anchor-start="1"`), "Anchored carried shells must expose their jump anchor.");
 	assert.match(carryHtml, new RegExp(`href="/round/1#thread=${carriedRecords[1].id}"`), "Carried shells must deep-link to their origin round.");
-	assert.match(carryHtml, /Outdated threads/, "Anchor-less carried threads land on the overview.");
-	assert.match(carryHtml, /outdated — anchored to round 1/);
+	{
+		// A file-less response to a FILE-anchored thread is genuinely outdated —
+		// its home is gone; only those land in the outdated group.
+		const outdatedSource = createThreadStore(ordered);
+		const lostThread = outdatedSource.postUserTurn({ source: "selection", file: "untracked.txt", side: "new", newStart: 1, newEnd: 1, highlight: "x", body: "Where did this go?" }).thread;
+		const lostRecords = buildCarriedThreads([{ respondsTo: lostThread.id, resolution: "declined", body: "That file was removed." }], outdatedSource.list(), ordered, 1);
+		assert.equal(lostRecords[0].carried.placement, "outdated");
+		const lostHtml = renderReviewHtml(ordered, "lost-nonce", { round: 2, currentRound: 2, phase: "reviewing" }, { carried: lostRecords, archive: [] });
+		assert.match(lostHtml, /Outdated threads/, "Truly homeless carried threads land in the overview's outdated group.");
+		assert.match(lostHtml, /outdated — anchored to round 1/);
+	}
 	assert.match(carryHtml, /Resolved in earlier rounds \(1\)/, "Prior-round resolutions collect in the overview archive.");
 	assert.match(carryHtml, /href="\/round\/1#thread=abc-t9"/);
 
@@ -1691,7 +1705,21 @@ try {
 			assert.equal(await page.evaluate(() => document.body.classList.contains("locked")), false, "The new round opens unlocked.");
 			await page.waitForFunction(() => document.querySelectorAll('[data-carried-thread]').length === 3);
 			assert.equal(await page.$$eval('[data-review-file="0"] .carried-threads [data-carried-thread]', (shells) => shells.length), 2, "File-designated responses land in that file's commentary column.");
-			assert.equal(await page.$$eval('[data-outdated-threads] [data-carried-thread]', (shells) => shells.length), 1, "Anchor-less responses land in the overview's outdated strip.");
+			assert.equal(await page.$$eval('.overview-feedback [data-carried-thread]', (shells) => shells.length), 1, "A responded overview thread carries home to General feedback.");
+			assert.equal(await page.$('[data-outdated-threads]'), null, "Nothing with a live home renders as outdated.");
+			{
+				// The reported trap: an overview thread carried to a FILE anchor must
+				// be reachable by n-navigation at the file, not hunted for on the
+				// overview page where it no longer lives.
+				let found = false;
+				for (let hop = 0; hop < 6 && !found; hop++) {
+					await page.click('[data-inbox]');
+					found = await page.evaluate((id) => Boolean(document.querySelector(`[data-carried-thread="${id}"] .thread-flash, [data-carried-thread="${id}"].thread-flash, [data-thread-card="${id}"].thread-flash`)), overviewThreadIds[0]);
+				}
+				assert.ok(found, "Thread navigation reaches the carried overview thread.");
+				assert.equal(await page.$eval('[data-review-file="0"]', (section) => section.hidden), false, "Navigation lands on the file that now hosts it.");
+				assert.ok(await page.$(`[data-carried-host="${overviewThreadIds[0]}"] [data-thread-resolve]`), "The carried copy is resolvable where navigation landed.");
+			}
 			await page.waitForFunction(() => document.querySelector('[data-inbox]')?.textContent.startsWith("5 awaiting you"), { timeout: 5_000 });
 			await page.click('[data-file-nav="0"]');
 			await page.waitForFunction((id) => document.querySelector(`[data-carried-host="${id}"] [data-thread-card="${id}"]`), {}, commentaryThreadId);

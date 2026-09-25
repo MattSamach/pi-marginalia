@@ -94,7 +94,7 @@ export function buildCarriedThreads(responses, previousThreads, nextReview, from
 		seen.add(origin.id);
 		if (!THREAD_RESOLUTIONS.includes(response.resolution)) throw new Error(`Thread response ${origin.id} needs a resolution of addressed, declined, or needs-discussion.`);
 		if (!validText(response.body, limits)) throw new Error(`Thread response ${origin.id} needs a non-empty bounded body.`);
-		let placement = "outdated";
+		let placement = origin.source === "overview" && response.file === undefined ? "overview" : "outdated";
 		const anchor = {};
 		if (response.file !== undefined) {
 			const file = files.get(response.file);

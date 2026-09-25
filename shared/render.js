@@ -48,6 +48,7 @@ function renderOverview(review, extras) {
 	if (!review.overview) return "";
 	const overview = review.overview;
 	const outdatedThreads = extras.carried.filter((thread) => thread.carried.placement === "outdated");
+	const overviewThreads = extras.carried.filter((thread) => thread.carried.placement === "overview");
 	const outdatedSection = outdatedThreads.length ? `<section class="outdated-threads" data-outdated-threads><h2>Outdated threads</h2>${outdatedThreads.map(renderCarriedShell).join("\n")}</section>` : "";
 	const bullets = (items) => `<ul>${items.map((item) => `<li>${text(item)}</li>`).join("")}</ul>`;
 	return `<section class="review-overview active" data-review-overview>
@@ -60,7 +61,7 @@ function renderOverview(review, extras) {
     ${overview.risks ? `<section><h2>Risks / limitations</h2><ul><li>${text(overview.risks)}</li></ul></section>` : ""}
     <section class="thread-tally" data-thread-tally hidden></section>
     ${outdatedSection}
-    <section class="overview-feedback"><h2>General feedback</h2><div data-overview-thread></div><div data-overview-composer><textarea data-overview-feedback maxlength="20000" placeholder="Discuss the change set with Pi"></textarea><div class="composer-actions"><button type="button" data-overview-post title="Post (⌘⏎ live · ⇧⌘⏎ quiet)" disabled>Post to Pi</button></div></div></section>
+    <section class="overview-feedback"><h2>General feedback</h2>${overviewThreads.map(renderCarriedShell).join("\n")}<div data-overview-thread></div><div data-overview-composer><textarea data-overview-feedback maxlength="20000" placeholder="Discuss the change set with Pi"></textarea><div class="composer-actions"><button type="button" data-overview-post title="Post (⌘⏎ live · ⇧⌘⏎ quiet)" disabled>Post to Pi</button></div></div></section>
     ${renderArchive(extras.archive)}
   </main>
 </section>`;

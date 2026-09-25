@@ -193,7 +193,7 @@
   const isAwaiting = (thread) => thread.status === 'open' && thread.turns.length > 0 && thread.turns[thread.turns.length - 1].author === 'pi';
   const sectionForPath = (path) => fileSections.find((section) => section.dataset.path === path);
   const sectionIndexOf = (thread) => {
-    if (thread.source === 'overview' || !thread.file) return -1;
+    if (!thread.file) return -1;
     const section = sectionForPath(thread.file);
     return section ? Number(section.dataset.reviewFile) : fileSections.length;
   };
@@ -1036,7 +1036,7 @@
     const perFile = new Map();
     let overviewCount = 0;
     for (const thread of awaiting) {
-      if (thread.source === 'overview' || !thread.file) overviewCount++;
+      if (!thread.file) overviewCount++;
       else perFile.set(thread.file, (perFile.get(thread.file) ?? 0) + 1);
     }
     navButtons.forEach((button) => {
@@ -1123,12 +1123,12 @@
   const revealThread = (thread) => {
     currentThreadId = thread.id;
     rememberThreadLocation(thread.id);
-    if (thread.source === 'overview' || !thread.file) showOverview();
+    if (!thread.file) showOverview();
     else {
       const index = sectionIndexOf(thread);
       if (index >= 0 && index < fileSections.length) showFile(index);
     }
-    let target = document.querySelector('[data-thread-card="' + thread.id + '"]');
+    let target = document.querySelector('[data-thread-card="' + thread.id + '"]') || document.querySelector('[data-carried-thread="' + thread.id + '"]');
     if (!target && thread.source === 'commentary') {
       const section = sectionForPath(thread.file);
       target = [...(section?.querySelectorAll('.agent-note') ?? [])].find((note) => note.dataset.commentaryId === thread.commentaryId);

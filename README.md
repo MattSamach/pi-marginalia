@@ -1,13 +1,14 @@
 # Marginalia (`pi-marginalia`)
 
-A Pi package for agent-guided browser reviews of local Git changes. Pi chooses a logical file order, explains each file and selected line ranges, and then converses with you through live comment threads: each comment you post is delivered to Pi immediately, and Pi's answers stream back into the exact thread in your browser.
+A Pi package for agent-guided browser reviews — of local Git changes, and of rendered markdown plans and documents. Pi chooses a logical file order, explains each file and selected line ranges, and then converses with you through live comment threads: each comment you post is delivered to Pi immediately, and Pi's answers stream back into the exact thread in your browser. Reviews iterate in rounds until you approve.
 
-## Install locally
+## Install
 
 ```bash
-cd /Volumes/git/pi-code-review
+git clone https://github.com/MattSamach/pi-marginalia
+cd pi-marginalia
 npm install
-pi install /Volumes/git/pi-code-review
+pi install .
 ```
 
 Reload an existing Pi session with `/reload` after installation.

@@ -3,14 +3,34 @@
   "version": "0.1.0",
   "description": "Agent-guided browser reviews of Git changes and markdown plans for Pi, with live comment threads and iterative rounds",
   "type": "module",
-  "keywords": ["pi-package", "code-review", "plan-review", "git-diff", "markdown"],
+  "keywords": [
+    "pi-package",
+    "code-review",
+    "plan-review",
+    "git-diff",
+    "markdown"
+  ],
   "author": "Matt Samach",
-  "repository": { "type": "git", "url": "https://github.com/MattSamach/pi-marginalia" },
-  "files": ["index.ts", "client", "shared", "skills", "README.md", "LICENSE"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MattSamach/pi-marginalia"
+  },
+  "files": [
+    "index.ts",
+    "client",
+    "shared",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
   "license": "MIT",
   "pi": {
-    "extensions": ["./index.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -27,5 +47,8 @@
     "puppeteer-core": "^25.9.0",
     "typebox": "^1.0.64",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "mermaid": "^11.17.2"
   }
 }

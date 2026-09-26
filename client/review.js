@@ -239,18 +239,21 @@
   {
     let hoverMarked = [];
     const clearHoverMarks = () => {
-      hoverMarked.forEach((element) => element.classList.remove('note-target', 'note-hover'));
+      hoverMarked.forEach((element) => {
+        element.classList.remove('note-target', 'note-hover');
+        if (!draft || draft.elementTarget !== element) element.classList.remove('el-target');
+      });
       hoverMarked = [];
     };
     const rangesOverlap = (aStart, aEnd, bStart, bEnd) => aEnd >= bStart && aStart <= bEnd;
     document.addEventListener('mouseover', (event) => {
       if (!(event.target instanceof Element)) return;
-      const note = event.target.closest('.agent-note[data-anchor-start], .carried-thread[data-anchor-start]');
+      const note = event.target.closest('.agent-note[data-anchor-start], .carried-thread[data-anchor-start], .agent-note[data-anchor-element], .carried-thread[data-anchor-element]');
       const block = note || !planMode ? undefined : event.target.closest('.plan-doc [data-md-line]');
       clearHoverMarks();
       if (note) {
         noteAnchorTargets(note).forEach((candidate) => {
-          candidate.classList.add('note-target');
+          candidate.classList.add(candidate.closest('svg') ? 'el-target' : 'note-target');
           hoverMarked.push(candidate);
         });
       } else if (block) {
@@ -267,6 +270,176 @@
       }
     });
   }
+  // Diagrams ------------------------------------------------------------------
+  // Mermaid fences render client-side from the escaped source pre. Elements
+  // gain data-el identities (node:x / edge:a->b) so clicks open the selection
+  // composer refined to the element; zoom is ctrl/cmd-wheel plus buttons.
+  const diagramElementIn = (section, reference) => section && section.querySelector('.diagram-canvas [data-el="' + (window.CSS && CSS.escape ? CSS.escape(reference) : reference) + '"]');
+  const annotateDiagram = (svgRoot, parsed) => {
+    svgRoot.querySelectorAll('g.node[id]').forEach((node) => {
+      const match = /(?:^|-)([A-Za-z0-9_]+)-\d+$/.exec(node.id) || /(?:^|-)([A-Za-z0-9_]+)$/.exec(node.id);
+      // Only elements the shared parser found are clickable: annotation and
+      // server-side validation agree by construction.
+      if (match && parsed.nodes.has(match[1])) node.dataset.el = 'node:' + match[1];
+    });
+    // Edge ids are L_<from>_<to>_<n> with a render prefix; ids may themselves
+    // contain underscores, so cuts resolve against the parsed edge set first,
+    // then the node set.
+    svgRoot.querySelectorAll('path[id]').forEach((edge) => {
+      const match = /(?:^|-)L_(.+)_(\d+)$/.exec(edge.id);
+      if (!match) return;
+      const middle = match[1];
+      let fallback;
+      for (let cut = middle.indexOf('_'); cut !== -1; cut = middle.indexOf('_', cut + 1)) {
+        const from = middle.slice(0, cut);
+        const to = middle.slice(cut + 1);
+        if (parsed.edges.has(from + '->' + to)) {
+          edge.dataset.el = 'edge:' + from + '->' + to;
+          return;
+        }
+        if (!fallback && parsed.nodes.has(from) && parsed.nodes.has(to)) fallback = 'edge:' + from + '->' + to;
+      }
+      if (fallback) edge.dataset.el = fallback;
+    });
+  };
+  let diagramPanConsumedClick = false;
+  const setupDiagrams = async () => {
+    const figures = [...document.querySelectorAll('[data-diagram]')];
+    if (!figures.length) return;
+    if (!window.mermaid) {
+      figures.forEach((figure) => {
+        figure.querySelector('.diagram-error').textContent = 'Diagram renderer unavailable.';
+        figure.querySelector('.diagram-error').hidden = false;
+        figure.querySelector('.diagram-source').hidden = false;
+      });
+      return;
+    }
+    window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral', fontFamily: 'system-ui, sans-serif' });
+    for (const [index, figure] of figures.entries()) {
+      const source = figure.querySelector('.diagram-source').textContent;
+      const canvas = figure.querySelector('[data-diagram-canvas]');
+      try {
+        const { svg } = await window.mermaid.render('picr-mmd-' + index + '-' + figure.dataset.mdLine, source);
+        const inner = document.createElement('div');
+        inner.className = 'diagram-inner';
+        inner.innerHTML = svg;
+        canvas.replaceChildren(inner);
+        const svgRoot = inner.querySelector('svg');
+        if (svgRoot) {
+          svgRoot.removeAttribute('style');
+          if (typeof parseMermaidElements === 'function') annotateDiagram(svgRoot, parseMermaidElements(source));
+        }
+        const view = { scale: 1, x: 0, y: 0 };
+        const apply = () => { inner.style.transform = 'translate(' + view.x + 'px,' + view.y + 'px) scale(' + view.scale + ')'; };
+        const zoomBy = (factor) => { view.scale = Math.min(4, Math.max(0.5, view.scale * factor)); if (view.scale === 1) { view.x = 0; view.y = 0; } apply(); };
+        const controls = document.createElement('div');
+        controls.className = 'diagram-zoom';
+        [['+', () => zoomBy(1.25)], ['\u2212', () => zoomBy(0.8)], ['\u2922', () => { view.scale = 1; view.x = 0; view.y = 0; apply(); }]].forEach(([label, action]) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = label;
+          button.title = label === '+' ? 'Zoom in (or ctrl+wheel)' : label === '\u2212' ? 'Zoom out' : 'Reset view';
+          button.addEventListener('click', action);
+          controls.append(button);
+        });
+        figure.append(controls);
+        canvas.addEventListener('wheel', (event) => {
+          if (!event.ctrlKey && !event.metaKey) return;
+          event.preventDefault();
+          zoomBy(event.deltaY < 0 ? 1.15 : 0.87);
+        }, { passive: false });
+        canvas.addEventListener('dblclick', (event) => {
+          if (event.target.closest('[data-el]')) return;
+          view.scale = 1; view.x = 0; view.y = 0; apply();
+        });
+        // Capture starts only after real movement: capturing on pointerdown
+        // would retarget the click and kill element commenting while zoomed.
+        let pan;
+        canvas.addEventListener('pointerdown', (event) => {
+          if (view.scale === 1 || event.button !== 0) return;
+          pan = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX - view.x, y: event.clientY - view.y, moved: false };
+        });
+        canvas.addEventListener('pointermove', (event) => {
+          if (!pan) return;
+          if (!pan.moved && Math.hypot(event.clientX - pan.startX, event.clientY - pan.startY) < 4) return;
+          if (!pan.moved) {
+            pan.moved = true;
+            canvas.setPointerCapture(pan.pointerId);
+          }
+          view.x = event.clientX - pan.x;
+          view.y = event.clientY - pan.y;
+          apply();
+        });
+        canvas.addEventListener('pointerup', () => {
+          diagramPanConsumedClick = pan !== undefined && pan.moved;
+          pan = undefined;
+        });
+      } catch (error) {
+        figure.querySelector('.diagram-error').textContent = 'Diagram failed to render: ' + (error && error.message ? String(error.message).split('\n')[0] : 'unknown error');
+        figure.querySelector('.diagram-error').hidden = false;
+        figure.querySelector('.diagram-source').hidden = false;
+        // Mermaid leaves its failed scratch element behind; drop it.
+        document.querySelectorAll('[id^="dpicr-mmd-"]').forEach((scratch) => scratch.remove());
+      }
+    }
+    // Restored element drafts predate the async renders: mark them now.
+    if (draft && draft.element && !draft.elementTarget) {
+      const marked = diagramElementIn(sectionForPath(draft.file), draft.element);
+      if (marked) {
+        marked.classList.add('el-target');
+        draft.elementTarget = marked;
+      }
+    }
+    reviewRoot.addEventListener('click', (event) => {
+      if (diagramPanConsumedClick) {
+        diagramPanConsumedClick = false;
+        return;
+      }
+      if (!(event.target instanceof Element)) return;
+      const element = event.target.closest('.diagram-canvas [data-el]');
+      if (!element || isLocked()) return;
+      openElementComposer(element);
+    });
+  };
+  const openElementComposer = (element) => {
+    const figure = element.closest('[data-diagram]');
+    const section = element.closest('[data-review-file]');
+    if (!figure || !section) return;
+    if (draft) {
+      if (!window.confirm('Discard the unfinished comment?')) return;
+      cancelDraft();
+    }
+    const reference = element.dataset.el;
+    const label = reference.startsWith('node:')
+      ? (element.querySelector('.nodeLabel, .label')?.textContent || reference.slice(5)).trim()
+      : reference.slice(5).replace('->', ' \u2192 ');
+    document.querySelectorAll('.diagram-canvas .el-target').forEach((marked) => marked.classList.remove('el-target'));
+    element.classList.add('el-target');
+    draft = {
+      file: section.dataset.path,
+      side: 'new',
+      newStart: Number(figure.dataset.mdLine),
+      newEnd: Number(figure.dataset.mdEnd || figure.dataset.mdLine),
+      highlight: (reference.startsWith('node:') ? '\u2b21 ' : '\u2192 ') + label,
+      element: reference,
+      elementTarget: element,
+    };
+    const composer = section.querySelector('[data-selection-composer]');
+    composer.hidden = false;
+    composer.dataset.anchorStart = String(draft.newStart);
+    layoutPlanRail(section);
+    composer.querySelector('[data-selection-quote]').textContent = draft.highlight;
+    const textarea = composer.querySelector('[data-selection-feedback]');
+    textarea.value = '';
+    composer.querySelector('[data-selection-add]').disabled = true;
+    window.getSelection()?.removeAllRanges();
+    textarea.focus();
+    saveSelectionDraft('');
+    syncDraftDot();
+    setStatus('Comment on ' + draft.highlight + '.');
+  };
+  if (planMode) setupDiagrams();
+
   // Reading-position tracking for the whole-document plan view: the sidebar
   // follows the section under the top of the viewport.
   if (planMode) {
@@ -367,6 +540,7 @@
   };
   const cancelDraft = () => {
     if (!draft) return;
+    if (draft.elementTarget) draft.elementTarget.classList.remove('el-target');
     highlights.delete(draft.highlightId);
     renderHighlights();
     const draftSection = sectionForPath(draft.file);
@@ -380,7 +554,7 @@
   };
   const saveSelectionDraft = (text) => {
     if (!draft) return;
-    saveDraft('selection', JSON.stringify({ file: draft.file, side: draft.side, oldStart: draft.oldStart, oldEnd: draft.oldEnd, newStart: draft.newStart, newEnd: draft.newEnd, highlight: draft.highlight, text: text ?? '' }));
+    saveDraft('selection', JSON.stringify({ file: draft.file, side: draft.side, oldStart: draft.oldStart, oldEnd: draft.oldEnd, newStart: draft.newStart, newEnd: draft.newEnd, highlight: draft.highlight, element: draft.element, text: text ?? '' }));
   };
   // Rebuild a reloaded selection draft: composer, quote, anchor, and text —
   // without the visual text highlight, which needs a live selection range.
@@ -400,7 +574,14 @@
       removeDraft('selection');
       return;
     }
-    draft = { highlightId: undefined, file: parsed.file, side: parsed.side, oldStart: parsed.oldStart, oldEnd: parsed.oldEnd, newStart: parsed.newStart, newEnd: parsed.newEnd, highlight: parsed.highlight };
+    draft = { highlightId: undefined, file: parsed.file, side: parsed.side, oldStart: parsed.oldStart, oldEnd: parsed.oldEnd, newStart: parsed.newStart, newEnd: parsed.newEnd, highlight: parsed.highlight, element: parsed.element };
+    if (parsed.element) {
+      const marked = diagramElementIn(section, parsed.element);
+      if (marked) {
+        marked.classList.add('el-target');
+        draft.elementTarget = marked;
+      }
+    }
     composer.hidden = false;
     composer.querySelector('[data-selection-quote]').textContent = parsed.highlight;
     const textarea = composer.querySelector('[data-selection-feedback]');
@@ -679,10 +860,12 @@
           side: draft.side,
           ...(draft.oldStart === undefined ? {} : { oldStart: draft.oldStart, oldEnd: draft.oldEnd }),
           ...(draft.newStart === undefined ? {} : { newStart: draft.newStart, newEnd: draft.newEnd }),
+          ...(draft.element === undefined ? {} : { element: draft.element }),
           highlight: draft.highlight,
           body: textarea.value.trim(),
         });
-        threadHighlights.set(result.thread.id, draft.highlightId);
+        if (draft.highlightId !== undefined) threadHighlights.set(result.thread.id, draft.highlightId);
+        if (draft.elementTarget) draft.elementTarget.classList.remove('el-target');
         draft = undefined;
         removeDraft('selection');
         syncDraftDot();
@@ -882,6 +1065,13 @@
     actions.append(resolve);
     header.append(status, actions);
     card.append(header);
+    const chipRef = (thread.carried && thread.carried.element) || thread.element;
+    if (chipRef) {
+      const chip = document.createElement('span');
+      chip.className = 'element-chip';
+      chip.textContent = chipRef.replace(/^node:/, '\u2b21 ').replace(/^edge:(.+)->(.+)$/, '$1 \u2192 $2');
+      status.after(chip);
+    }
     if (thread.highlight) {
       const quote = document.createElement('div');
       quote.className = 'user-comment-quote';
@@ -1139,6 +1329,13 @@
     // anchor-label click.
     const section = sectionForPath(thread.file);
     if (section) {
+      const elementRef = (thread.carried && thread.carried.element) || thread.element;
+      const diagramTarget = elementRef === undefined ? undefined : diagramElementIn(section, elementRef);
+      if (diagramTarget) {
+        diagramTarget.closest('[data-diagram]').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        flashAnchorTargets([diagramTarget]);
+        return;
+      }
       const anchor = thread.carried && thread.carried.startLine !== undefined ? thread.carried : thread;
       const side = anchor.side;
       const start = anchor.startLine ?? (side === 'old' ? anchor.oldStart : anchor.newStart ?? anchor.oldStart);
@@ -1307,14 +1504,29 @@
   };
   const noteAnchorTargets = (note) => {
     const section = note.closest('[data-review-file]');
-    if (!section || note.dataset.anchorStart === undefined) return [];
-    const start = Number(note.dataset.anchorStart);
-    const end = Number(note.dataset.anchorEnd || note.dataset.anchorStart);
-    return anchorTargets(section, note.dataset.anchorSide, start, end);
+    if (!section) return [];
+    const targets = [];
+    if (note.dataset.anchorElement !== undefined) {
+      const element = diagramElementIn(section, note.dataset.anchorElement);
+      if (element) targets.push(element);
+    }
+    if (note.dataset.anchorStart !== undefined) {
+      const start = Number(note.dataset.anchorStart);
+      const end = Number(note.dataset.anchorEnd || note.dataset.anchorStart);
+      targets.push(...anchorTargets(section, note.dataset.anchorSide, start, end));
+    }
+    return targets;
   };
   const flashAnchorTargets = (targets) => {
     document.querySelectorAll('.anchor-flash').forEach((element) => element.classList.remove('anchor-flash'));
+    document.querySelectorAll('.el-flash').forEach((element) => element.classList.remove('el-flash'));
     targets.forEach((element) => {
+      if (element.closest('svg')) {
+        void element.getBoundingClientRect();
+        element.classList.add('el-flash');
+        element.addEventListener('animationend', () => element.classList.remove('el-flash'), { once: true });
+        return;
+      }
       void element.offsetWidth;
       element.classList.add('anchor-flash');
       element.addEventListener('animationend', () => element.classList.remove('anchor-flash'), { once: true });
@@ -1325,14 +1537,15 @@
       const note = button.closest('.agent-note, .carried-thread');
       const targets = noteAnchorTargets(note);
       if (!targets.length) return;
-      if (planMode) {
+      const svgTarget = Boolean(targets[0].closest('svg'));
+      if (planMode && !svgTarget) {
         clearHunkCursor();
         hunkCursor = targets[0];
         targets[0].classList.add('nav-cursor');
       }
       // Land the lines near the top (scroll-margin supplies the padding), and
       // flash them so the eye finds the anchor immediately.
-      targets[0].scrollIntoView({ behavior: 'smooth', block: 'start' });
+      (svgTarget ? targets[0].closest('[data-diagram]') : targets[0]).scrollIntoView({ behavior: 'smooth', block: 'start' });
       flashAnchorTargets(targets);
     });
   });

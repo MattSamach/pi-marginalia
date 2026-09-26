@@ -75,6 +75,7 @@ export function renderMarkdown(source, options) {
 	let listStack = [];
 	let fence;
 	let fenceStart = 0;
+	let fenceLang = "";
 	const flushParagraph = (endLine) => {
 		if (paragraph.length) html.push("<p" + blockAttrs(paragraphStart, endLine) + ">" + paragraph.join("<br>") + "</p>");
 		paragraph = [];
@@ -89,16 +90,25 @@ export function renderMarkdown(source, options) {
 		const lineNumber = index + 1;
 		if (fence) {
 			if (/^\s*```/.test(line)) {
-				html.push("<pre" + blockAttrs(fenceStart, lineNumber) + "><code>" + fence.join("\n") + "</code></pre>");
+				if (fenceLang === "mermaid") {
+					// Diagrams render client-side; the escaped source travels in a
+					// hidden pre (textContent unescapes it) and doubles as the
+					// visible fallback when rendering fails.
+					html.push("<figure class=\"diagram-block\" data-diagram" + blockAttrs(fenceStart, lineNumber) + "><div class=\"diagram-error\" hidden></div><pre class=\"diagram-source\" hidden><code>" + fence.join("\n") + "</code></pre><div class=\"diagram-canvas\" data-diagram-canvas></div></figure>");
+				} else {
+					html.push("<pre" + blockAttrs(fenceStart, lineNumber) + "><code>" + fence.join("\n") + "</code></pre>");
+				}
 				fence = undefined;
 			} else fence.push(line);
 			continue;
 		}
-		if (/^\s*```/.test(line)) {
+		const fenceOpen = /^\s*```\s*([A-Za-z0-9_-]*)/.exec(line);
+		if (fenceOpen) {
 			flushParagraph(lineNumber - 1);
 			flushList();
 			fence = [];
 			fenceStart = lineNumber;
+			fenceLang = fenceOpen[1].toLowerCase();
 			continue;
 		}
 		// Thematic break — checked before lists so "- - -" is a rule, not an item.

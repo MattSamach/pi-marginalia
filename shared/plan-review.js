@@ -5,6 +5,7 @@
 // unchanged; only rendering swaps the diff table for the rendered document.
 
 import { createHash } from "node:crypto";
+import { elementExists, elementHint, splitElementRef } from "./diagram.js";
 
 export const PLAN_LIMITS = {
 	maxPlanBytes: 1024 * 1024,
@@ -64,7 +65,7 @@ export function sectionizePlan(markdown, title) {
 	return { lines, sections };
 }
 
-function normalizeCommentary(entries, section, limits, usedIds) {
+function normalizeCommentary(entries, section, limits, usedIds, sectionMarkdown) {
 	if (entries === undefined) return [];
 	if (!Array.isArray(entries) || entries.length > limits.maxCommentaryPerSection) fail(`Section "${section.title}" commentary must be an array of at most ${limits.maxCommentaryPerSection} notes.`);
 	return entries.map((entry, index) => {
@@ -82,6 +83,11 @@ function normalizeCommentary(entries, section, limits, usedIds) {
 			}
 			anchor = { startLine: start, endLine: end };
 		} else if (entry.endLine !== undefined) fail(`Commentary note "${id}" sets endLine without startLine.`);
+		if (entry.element !== undefined) {
+			if (!splitElementRef(entry.element)) fail(`Commentary note "${id}" has an invalid element reference; use "node:id" or "edge:from->to".`);
+			if (!elementExists(entry.element, sectionMarkdown)) fail(`Commentary note "${id}" anchors to element ${entry.element}, which no diagram in "${section.title}" defines (${elementHint(sectionMarkdown)}).`);
+			anchor = { ...anchor, element: entry.element };
+		}
 		return { id, body: entry.body.trim(), side: "new", ...anchor, order: index };
 	});
 }
@@ -129,7 +135,7 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 		if (entry.summary !== undefined && (typeof entry.summary !== "string" || entry.summary.length > limits.maxSummary)) fail(`Section "${entry.heading}" summary must be a string under ${limits.maxSummary} characters.`);
 		extras.set(section.slug, {
 			summary: typeof entry.summary === "string" && entry.summary.trim() ? entry.summary.trim() : undefined,
-			commentary: normalizeCommentary(entry.commentary, section, limits, usedIds),
+			commentary: normalizeCommentary(entry.commentary, section, limits, usedIds, lines.slice(section.startLine - 1, section.endLine).join("\n")),
 		});
 	}
 

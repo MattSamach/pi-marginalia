@@ -58,6 +58,7 @@ const planCommentarySchema = Type.Object({
 	body: Type.String({ minLength: 1, maxLength: 20_000, description: "Pi's note on this part of the plan — rationale, tradeoff, open question." }),
 	startLine: Type.Optional(Type.Integer({ minimum: 1, description: "Absolute 1-based source line in the plan markdown this note anchors to; must fall inside its section." })),
 	endLine: Type.Optional(Type.Integer({ minimum: 1 })),
+	element: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Diagram element this note anchors to: \"node:<id>\" or \"edge:<from>-><to>\" from a mermaid fence in the same section. May accompany or replace a line anchor." })),
 });
 const planSectionSchema = Type.Object({
 	heading: Type.String({ minLength: 1, maxLength: 500, description: "Exact heading text of a plan section (case-insensitive match)." }),
@@ -77,6 +78,7 @@ const openPlanReviewSchema = Type.Object({
 		file: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Section of the new plan (heading text or slug) where the reviewer should verify the response. Omit only when the anchor is truly gone." })),
 		startLine: Type.Optional(Type.Integer({ minimum: 1, description: "Absolute source line in the NEW plan markdown." })),
 		endLine: Type.Optional(Type.Integer({ minimum: 1 })),
+		element: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Diagram element in the NEW plan the response re-anchors to (\"node:<id>\" or \"edge:<from>-><to>\"); requires file." })),
 	}), { maxItems: 400, description: "Required with previousRoundId when the previous round has open threads: exactly one response per open thread." })),
 });
 type OpenPlanReviewInput = Static<typeof openPlanReviewSchema>;

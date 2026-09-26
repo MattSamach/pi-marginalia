@@ -1236,6 +1236,48 @@ try {
 	assert.throws(() => buildPlanReview({ title: "x", markdown: planMarkdown, sections: [{ heading: "Steps" }, { heading: "steps" }] }), /more than once/);
 	assert.throws(() => buildPlanReview({ title: "x", markdown: "## Same\na\n## Same\nb", sections: [{ heading: "Same" }] }), /reference it by its slug/, "Duplicate heading text is ambiguous as a reference.");
 	assert.equal(buildPlanReview({ title: "x", markdown: "## Same\na\n## Same\nb", sections: [{ heading: "same-2", summary: "второй" }] }).files[1].summary, "второй", "Slugs stay exact references even for duplicate headings.");
+	const planHtmlNoDiagram = renderReviewHtml(plan, "plain-nonce");
+	{
+		// Diagram element identity: parsing, anchors, carries, and wire format.
+		const { parseMermaidElements, collectDiagramElements, elementExists } = await import("../shared/diagram.js");
+		const arch = parseMermaidElements(["flowchart LR", "  ui[Web] --> api(Gateway)", "  api -- auth --> idp{IdP}", "  api --> db[(Store)]", "  api --> q[[Queue]]", "  q --> w1[Worker] & w2[Worker 2]"].join("\n"));
+		assert.deepEqual([...arch.nodes].sort(), ["api", "db", "idp", "q", "ui", "w1", "w2"], "Every node id is enumerable from the source.");
+		assert.ok(arch.edges.has("ui->api") && arch.edges.has("api->idp") && arch.edges.has("q->w2"), "Labeled edges and fan-outs resolve to endpoint pairs.");
+		const diagramMd = ["## Arch", "", "```mermaid", "flowchart LR", "  ui[Web] --> api(Gateway)", "  api --> db[(Store)]", "```", "prose"].join("\n");
+		assert.equal(elementExists("node:api", diagramMd), true);
+		assert.equal(elementExists("edge:ui->api", diagramMd), true);
+		assert.equal(elementExists("node:ghost", diagramMd), false);
+		assert.equal(collectDiagramElements("no fences here").nodes.size, 0);
+		const tricky = parseMermaidElements(["flowchart LR", "  api[API (v2)] --> db[(Store)]", "  a:::hot --> b", "  lonely", "  x -->|see > this| y"].join("\n"));
+		assert.deepEqual([...tricky.nodes].sort(), ["a", "api", "b", "db", "lonely", "x", "y"], "Label words, ::: classes, and bare statements never pollute the node set.");
+		assert.ok(tricky.edges.has("a->b") && tricky.edges.has("x->y"), "Class shorthand and piped labels do not corrupt edge endpoints.");
+		const { extractMermaidSources } = await import("../shared/diagram.js");
+		assert.equal(extractMermaidSources("```mermaid extra\nflowchart LR\n  a --> b\n```").length, 1, "Info strings after the language are accepted, matching the renderer.");
+		assert.equal(extractMermaidSources("```text\n```mermaid\n```\nflowchart\n").length, 0, "Fences inside other fences follow the renderer's close-on-any-fence rule.");
+		// Markdown: mermaid fences become diagram figures; other fences stay pre.
+		const figureHtml = renderMarkdown(diagramMd, { sourceLines: true });
+		assert.match(figureHtml, /<figure class="diagram-block" data-diagram data-md-line="3" data-md-end="7">/, "Mermaid fences emit diagram figures with source-line anchors.");
+		assert.match(figureHtml, /<pre class="diagram-source" hidden><code>flowchart LR/, "The escaped source travels hidden inside the figure.");
+		assert.doesNotMatch(renderMarkdown("```js\ncode\n```"), /data-diagram/, "Non-mermaid fences render as plain code blocks.");
+		// Plan commentary may refine anchors with elements; bad refs get hints.
+		const archPlan = buildPlanReview({ title: "D", markdown: diagramMd, sections: [{ heading: "Arch", commentary: [{ id: "n1", body: "the gateway", element: "node:api" }] }] });
+		assert.equal(archPlan.files[0].commentary[0].element, "node:api");
+		assert.throws(() => buildPlanReview({ title: "D", markdown: diagramMd, sections: [{ heading: "Arch", commentary: [{ id: "n1", body: "x", element: "node:ghost" }] }] }), /nodes: ui, api, db/, "Element rejections name what the diagrams define.");
+		assert.match(renderReviewHtml(archPlan, "d-nonce"), /data-anchor-element="node:api"/, "Element-anchored notes expose their element to the client.");
+		assert.match(renderReviewHtml(archPlan, "d-nonce"), /__pi_code_review_mermaid__/, "Plans with diagrams load the vendored renderer.");
+		assert.doesNotMatch(planHtmlNoDiagram, /__pi_code_review_mermaid__/, "Plans without diagrams skip the renderer entirely.");
+		// Selection threads: element refines the fence-line anchor; wire carries it.
+		const archStore = createThreadStore(archPlan);
+		const archThread = archStore.postUserTurn({ source: "selection", file: "arch", side: "new", newStart: 3, newEnd: 7, highlight: "⬡ Gateway", element: "node:api", body: "Why a single gateway?" });
+		assert.equal(archThread.thread.element, "node:api", "Element anchors persist on the thread.");
+		assert.equal(archStore.postUserTurn({ source: "selection", file: "arch", side: "new", newStart: 3, newEnd: 7, highlight: "x", element: "node:ghost", body: "y" }).error, "invalid", "Unknown elements reject the post.");
+		assert.match(formatReviewPassXml(archPlan, archStore.list(), archStore.summary(), false, undefined, 1), /element="node:api"/, "The pass digest names the element anchor.");
+		// Carried responses re-anchor elements against the NEW round's diagrams.
+		const nextArch = buildPlanReview({ title: "D", markdown: diagramMd.replace("api --> db", "api --> cache[(Cache)]\n  cache --> db"), sections: [] });
+		const carriedArch = buildCarriedThreads([{ respondsTo: archThread.thread.id, resolution: "addressed", body: "Split behind a cache.", file: "arch", element: "node:cache" }], archStore.list(), nextArch, 1);
+		assert.equal(carriedArch[0].carried.element, "node:cache", "Responses may re-anchor to a new element.");
+		assert.throws(() => buildCarriedThreads([{ respondsTo: archThread.thread.id, resolution: "addressed", body: "b", file: "arch", element: "node:ghost" }], archStore.list(), nextArch, 1), /which no diagram in arch defines \(nodes: /, "Bad carried elements get the hint treatment.");
+	}
 	const planStore = createThreadStore(plan);
 	const planSelection = planStore.postUserTurn({ source: "selection", file: "goals-b", side: "new", newStart: 4, newEnd: 5, highlight: "- fast\n- safe", body: "Tighten these goals." });
 	assert.equal(planSelection.thread.status, "open", "Plan selections anchor on absolute source lines.");
@@ -2358,6 +2400,63 @@ try {
 				await planPage.close();
 			} finally {
 				await planServer.close();
+			}
+
+			// Diagram review end to end: the vendored renderer serves, mermaid
+			// fences render to SVG with element identities, a node click opens the
+			// composer refined to the element, the wire names it, Pi's note anchors
+			// flash it, a broken fence degrades to its source, and a round advance
+			// re-anchors the carried thread's element in the new snapshot.
+			const diagramPlanMd = ["## Topology", "", "```mermaid", "flowchart LR", "  ui[Web] --> api(Gateway)", "  api --> db[(Store)]", "```", "", "Prose after.", "", "## Broken", "", "```mermaid", "flowchart LR", "  a[--> ::: nonsense", "```"].join("\n");
+			const diagramPlan = buildPlanReview({ title: "Diagram demo", markdown: diagramPlanMd, sections: [{ heading: "Topology", commentary: [{ id: "gw", body: "The single gateway.", element: "node:api" }] }] });
+			const diagramPosts = [];
+			const diagramServer = await createCodeReviewServer(diagramPlan, {
+				onThreadPost: async (_round, thread) => { diagramPosts.push(thread); },
+				onFinishPass: async () => ({ stale: false }),
+				onApprove: async () => {},
+			});
+			try {
+				const dPage = await browser.newPage();
+				await dPage.setViewport({ width: 1280, height: 900 });
+				await dPage.goto(diagramServer.url, { waitUntil: "domcontentloaded" });
+				await dPage.waitForFunction(() => document.querySelector('.diagram-canvas svg [data-el="node:api"]'), { polling: 100, timeout: 15_000 });
+				assert.equal(await dPage.$eval('[data-review-file="0"] .diagram-source', (pre) => pre.hidden), true, "A rendered diagram hides its source fallback.");
+				assert.ok(await dPage.$('.diagram-canvas svg [data-el="edge:ui->api"]'), "Edges carry element identities too.");
+				// The broken fence degrades: banner + visible source, page intact.
+				await dPage.waitForFunction(() => document.querySelector('[data-review-file="1"] .diagram-error')?.hidden === false, { polling: 100 });
+				assert.equal(await dPage.$eval('[data-review-file="1"] .diagram-source', (pre) => pre.hidden), false, "A failed diagram shows its fenced source.");
+				// Pi's element-anchored note flashes the node on click.
+				await dPage.$eval('[data-anchor-element="node:api"] .agent-note-anchor', (button) => button.click());
+				await dPage.waitForFunction(() => document.querySelector('[data-el="node:api"]').classList.contains("el-flash"), { polling: 50 });
+				// Zoom in first: element clicks must survive a zoomed canvas (the
+				// audit's P1 — pointer capture used to retarget the click).
+				await dPage.$eval('[data-review-file="0"] .diagram-zoom button', (button) => button.click());
+				await dPage.waitForFunction(() => (document.querySelector('[data-review-file="0"] .diagram-inner')?.style.transform ?? "").includes("scale(1.25)"), { polling: 50 });
+				// Click the db node: the composer opens refined to the element.
+				await dPage.$eval('[data-el="node:db"]', (node) => node.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+				await dPage.waitForFunction(() => document.querySelector('[data-review-file="0"] [data-selection-composer]')?.hidden === false, { polling: 100 });
+				assert.match(await dPage.$eval('[data-review-file="0"] [data-selection-quote]', (quote) => quote.textContent), /Store/, "The composer quotes the element's label.");
+				await dPage.type('[data-review-file="0"] [data-selection-feedback]', "Postgres or something else?");
+				await dPage.$eval('[data-review-file="0"] [data-selection-add]', (button) => button.click());
+				await dPage.waitForFunction(() => document.querySelector('.thread-card'), { polling: 100 });
+				assert.equal(diagramPosts[0].element, "node:db", "The posted thread carries its element to Pi.");
+				assert.match(await dPage.$eval('.thread-card .element-chip', (chip) => chip.textContent), /db/, "Thread cards wear their element chip.");
+				// Round 2: the response re-anchors the element; the carried shell
+				// jump lands on the new round's node.
+				const nextDiagramPlan = buildPlanReview({ title: "Diagram demo", markdown: diagramPlanMd.replace("db[(Store)]", "pg[(Postgres)]"), sections: [] });
+				const dThreadId = diagramPosts[0].id;
+				const staleElement = diagramServer.addRound(nextDiagramPlan, diagramPlan.id, [{ respondsTo: dThreadId, resolution: "addressed", body: "Postgres, named.", file: "topology", element: "node:db" }]);
+				assert.equal(staleElement.error, "invalid-responses", "A carried element must exist in the new round.");
+				assert.match(staleElement.message, /no diagram in topology defines \(nodes: ui, api, pg/, "The rejection lists the new round's elements.");
+				assert.equal(diagramServer.addRound(nextDiagramPlan, diagramPlan.id, [{ respondsTo: dThreadId, resolution: "addressed", body: "Postgres, named.", file: "topology", element: "node:pg" }]).round, 2);
+				await dPage.waitForFunction(() => document.body.dataset.round === "2", { polling: 100 });
+				await dPage.waitForFunction(() => document.querySelector('.diagram-canvas svg [data-el="node:pg"]'), { polling: 100 });
+				await dPage.$eval('[data-carried-thread] .agent-note-anchor', (button) => button.click());
+				await dPage.waitForFunction(() => document.querySelector('[data-el="node:pg"]').classList.contains("el-flash"), { polling: 50 });
+				assert.match(await dPage.$eval('[data-carried-thread] .agent-note-anchor', (button) => button.textContent), /pg/, "The carried shell names the re-anchored element.");
+				await dPage.close();
+			} finally {
+				await diagramServer.close();
 			}
 
 			// Margin-note exact alignment on an uncongested rail: a comment on a

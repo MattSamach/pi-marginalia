@@ -12,10 +12,14 @@ function attr(value) {
 
 function anchorAttributes(thread) {
 	// Carried threads anchor where Pi re-declared them in the current snapshot.
-	if (thread.carried !== undefined && thread.carried.startLine !== undefined) {
-		return ` side="${attr(thread.carried.side)}" start-line="${thread.carried.startLine}" end-line="${thread.carried.endLine}"`;
+	if (thread.carried !== undefined && (thread.carried.startLine !== undefined || thread.carried.element !== undefined)) {
+		const parts = [];
+		if (thread.carried.element !== undefined) parts.push(`element="${attr(thread.carried.element)}"`);
+		if (thread.carried.startLine !== undefined) parts.push(`side="${attr(thread.carried.side)}"`, `start-line="${thread.carried.startLine}"`, `end-line="${thread.carried.endLine}"`);
+		return ` ${parts.join(" ")}`;
 	}
 	const values = [];
+	if (thread.element !== undefined) values.push(`element="${attr(thread.element)}"`);
 	if (thread.side !== undefined) values.push(`side="${attr(thread.side)}"`);
 	if (thread.startLine !== undefined) values.push(`start-line="${thread.startLine}"`, `end-line="${thread.endLine}"`);
 	if (thread.oldStart !== undefined) values.push(`old-start="${thread.oldStart}"`, `old-end="${thread.oldEnd}"`);

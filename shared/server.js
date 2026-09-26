@@ -12,6 +12,7 @@ const VIEWED_PATH = "/__pi_code_review_viewed__";
 const AMEND_PATH = "/__pi_code_review_amend__";
 const SEND_PATH = "/__pi_code_review_send__";
 const EVENTS_PATH = "/__pi_code_review_events__";
+const MERMAID_PATH = "/__pi_code_review_mermaid__.js";
 const CONTEXT_PATH = "/__pi_code_review_context__";
 const APPROVE_PATH = "/__pi_code_review_approve__";
 const SSE_HEARTBEAT_MS = 25_000;
@@ -263,6 +264,7 @@ export async function createCodeReviewServer(review, options) {
 		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive, viewed: [...round.viewed], changedSections, appearance: options.appearance }));
 	};
 
+	let mermaidSource;
 	const server = createServer(async (req, res) => {
 		try {
 			const requestUrl = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
@@ -289,6 +291,23 @@ export async function createCodeReviewServer(review, options) {
 			}
 			if (req.method === "GET" && requestUrl.pathname === "/") {
 				renderRound(current(), res);
+				return;
+			}
+			if (req.method === "GET" && requestUrl.pathname === MERMAID_PATH) {
+				// Vendored renderer: served from the installed mermaid package so
+				// the page never reaches a CDN. Cached after the first read.
+				try {
+					if (mermaidSource === undefined) {
+						const { createRequire } = await import("node:module");
+						const { readFile } = await import("node:fs/promises");
+						const resolved = createRequire(import.meta.url).resolve("mermaid/dist/mermaid.min.js");
+						mermaidSource = await readFile(resolved);
+					}
+					res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "private, max-age=3600" });
+					res.end(mermaidSource);
+				} catch {
+					writeText(res, 404, "The mermaid renderer is not installed.");
+				}
 				return;
 			}
 			const roundPage = req.method === "GET" ? /^\/round\/(\d{1,4})$/.exec(requestUrl.pathname) : undefined;

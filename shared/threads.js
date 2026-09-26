@@ -1,4 +1,5 @@
 import { visibleRangeHint } from "./git-review.js";
+import { elementExists, elementHint, splitElementRef } from "./diagram.js";
 import { randomBytes } from "node:crypto";
 
 export const THREAD_LIMITS = Object.freeze({
@@ -48,6 +49,7 @@ export function buildHeldThreads(previousThreads, nextReview, fromRound) {
 				...(file === undefined ? {} : { file: thread.file }),
 				turns: thread.turns.map((turn) => ({ ...turn })),
 			};
+			if (thread.element !== undefined && anchorable && typeof file.markdown === "string" && elementExists(thread.element, file.markdown)) held.element = thread.element;
 			const lineVisible = (key, start, end) => [start, end].every((boundary) => file.lines.some((line) => line[key] === boundary));
 			if (anchorable && (thread.oldStart !== undefined || thread.newStart !== undefined)) {
 				const oldOk = thread.oldStart === undefined || lineVisible("oldLine", thread.oldStart, thread.oldEnd);
@@ -120,16 +122,24 @@ export function buildCarriedThreads(responses, previousThreads, nextReview, from
 			} else if (response.endLine !== undefined || response.side !== undefined) {
 				throw new Error(`Thread response ${origin.id} cannot set side or endLine without startLine.`);
 			}
-		} else if (response.startLine !== undefined || response.endLine !== undefined || response.side !== undefined) {
-			throw new Error(`Thread response ${origin.id} cannot set an anchor range without a file.`);
+			if (response.element !== undefined) {
+				if (!splitElementRef(response.element)) throw new Error(`Thread response ${origin.id} has an invalid element reference; use "node:id" or "edge:from->to".`);
+				if (typeof file.markdown !== "string" || !elementExists(response.element, file.markdown)) {
+					throw new Error(`Thread response ${origin.id} anchors to element ${response.element}, which no diagram in ${response.file} defines (${typeof file.markdown === "string" ? elementHint(file.markdown) : "not a document section"}).`);
+				}
+				anchor.element = response.element;
+			}
+		} else if (response.startLine !== undefined || response.endLine !== undefined || response.side !== undefined || response.element !== undefined) {
+			throw new Error(`Thread response ${origin.id} cannot set an anchor range or element without a file.`);
 		}
 		return {
 			id: origin.id,
 			source: origin.source,
 			...(origin.highlight === undefined ? {} : { highlight: origin.highlight }),
 			...(anchor.file === undefined ? {} : { file: anchor.file }),
+			...(anchor.element === undefined ? {} : { element: anchor.element }),
 			piProposedResolve: response.resolution === "addressed",
-			carried: { fromRound, resolution: response.resolution, placement, ...(anchor.side === undefined ? {} : { side: anchor.side, startLine: anchor.startLine, endLine: anchor.endLine }) },
+			carried: { fromRound, resolution: response.resolution, placement, ...(anchor.side === undefined ? {} : { side: anchor.side, startLine: anchor.startLine, endLine: anchor.endLine }), ...(anchor.element === undefined ? {} : { element: anchor.element }) },
 			turns: [...origin.turns.map((turn) => ({ ...turn })), { author: "pi", body: response.body.trim(), ts: Date.now(), resolution: response.resolution }],
 		};
 	});
@@ -248,8 +258,10 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		const visible = (key, start, end) => start === undefined || [start, end].every((boundary) => file.lines.some((line) => line[key] === boundary));
 		if (!visible("oldLine", item.oldStart, item.oldEnd) || !visible("newLine", item.newStart, item.newEnd)) return undefined;
 		if (!validText(item.highlight, limits)) return undefined;
+		if (item.element !== undefined && (!splitElementRef(item.element) || typeof file.markdown !== "string" || !elementExists(item.element, file.markdown))) return undefined;
 		return {
 			file: item.file,
+			...(item.element === undefined ? {} : { element: item.element }),
 			side: item.side,
 			...(item.oldStart === undefined ? {} : { oldStart: item.oldStart, oldEnd: item.oldEnd }),
 			...(item.newStart === undefined ? {} : { newStart: item.newStart, newEnd: item.newEnd }),

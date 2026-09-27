@@ -2746,6 +2746,57 @@ try {
 				}
 			}
 
+			// The document's layout is independent of the rails: a section whose
+			// conversation outgrows its text never moves the document below it —
+			// its cards continue into the next section's rail space instead.
+			{
+				const docMarkdown = ["## Alpha", "", "Alpha point one.", "", "Alpha point two.", "", "Alpha point three.", "", "## Omega", "", ...Array.from({ length: 12 }, (_, index) => `Omega paragraph ${index + 1}.`)].join("\n");
+				const docReview = buildPlanReview({ title: "Doc Plan", markdown: docMarkdown });
+				const docServer = await createCodeReviewServer(docReview, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+				const docPage = await browser.newPage();
+				try {
+					await docPage.setViewport({ width: 1200, height: 800 });
+					await docPage.goto(docServer.url, { waitUntil: "domcontentloaded" });
+					await docPage.waitForFunction(() => document.body.dataset.reviewKind === "plan", { polling: 100 });
+					// Measured relative to the document itself: sticky-chrome growth
+					// (status text wrapping the topbar) is not a document move.
+					const omegaTop = () => docPage.evaluate(() => document.querySelector('[data-path="omega"] .plan-doc').getBoundingClientRect().top - document.querySelector('[data-path="alpha"] .plan-doc').getBoundingClientRect().top);
+					const before = await omegaTop();
+					for (let index = 0; index < 3; index++) {
+						await docPage.evaluate((line) => {
+							const block = document.querySelector('[data-path="alpha"] [data-md-line="' + line + '"]');
+							const range = document.createRange();
+							range.selectNodeContents(block);
+							const selection = window.getSelection();
+							selection.removeAllRanges();
+							selection.addRange(range);
+							block.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+						}, [3, 5, 7][index]);
+						await docPage.waitForFunction(() => document.querySelector('[data-path="alpha"] [data-selection-composer]')?.hidden === false, { polling: 100 });
+						await docPage.type('[data-path="alpha"] [data-selection-composer] textarea', ("A long comment line to grow this card well past its section. ").repeat(4) + index);
+						await docPage.keyboard.down("Meta");
+						await docPage.keyboard.down("Shift");
+						await docPage.keyboard.press("Enter");
+						await docPage.keyboard.up("Shift");
+						await docPage.keyboard.up("Meta");
+						await docPage.waitForFunction((count) => document.querySelectorAll('[data-path="alpha"] .thread-card').length === count, { polling: 100 }, index + 1);
+					}
+					await docPage.waitForFunction(() => [...document.querySelectorAll('[data-path="alpha"] .thread-card')].every((card) => card.style.top !== ""), { polling: 100 });
+					assert.equal(Math.abs(await omegaTop() - before) <= 2, true, "Rail conversation never moves the document: the next section's text stays put.");
+					const packed = await docPage.evaluate(() => {
+						const alphaDoc = document.querySelector('[data-path="alpha"] .plan-doc').getBoundingClientRect();
+						const boxes = [...document.querySelectorAll('[data-path="alpha"] .thread-card')].map((card) => card.getBoundingClientRect()).sort((a, b) => a.top - b.top);
+						const overlaps = boxes.some((box, i) => i > 0 && box.top < boxes[i - 1].bottom + 11);
+						return { deepest: Math.max(...boxes.map((box) => box.bottom)), alphaBottom: alphaDoc.bottom, overlaps };
+					});
+					assert.equal(packed.overlaps, false, "Cross-section packing keeps the 12px minimum gap.");
+					assert.equal(packed.deepest > packed.alphaBottom, true, "A busy section's cards continue past its own document text into the next rail's space.");
+				} finally {
+					await docPage.close();
+					await docServer.close();
+				}
+			}
+
 			// Rail polish: composers idle behind a Reply… affordance, cards file in
 			// anchor order, the Reply button reads primary even disabled, and
 			// resolved threads compact to one row — every height change announced.

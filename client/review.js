@@ -673,91 +673,111 @@
   };
   const railResizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(() => scheduleRailLayout()) : undefined;
   const observedRailItems = new WeakSet();
-  const layoutRail = (section) => {
-    const rail = section.querySelector('.commentary-column');
-    if (!rail || rail.getClientRects().length === 0) return;
-    const items = [...rail.querySelectorAll(RAIL_ITEM_SELECTOR)].filter((element) => railItemOf(element) === element && !element.hidden && element.getClientRects().length > 0);
-    if (!items.length) {
-      rail.classList.remove('rail-aligned');
-      rail.style.minHeight = '';
-      return;
-    }
-    // Absolute positioning engages before measuring so the in-flow furniture
-    // (headings, summaries) reports its extent without the cards.
-    rail.classList.add('rail-aligned');
-    for (const item of items) {
-      item.classList.add('rail-card');
-      if (railResizeObserver && !observedRailItems.has(item)) {
-        observedRailItems.add(item);
-        railResizeObserver.observe(item);
-      }
-    }
-    // Reads all happen before the writes: the pass costs at most two reflows
-    // however many cards there are.
-    const baseY = rail.getBoundingClientRect().top + rail.clientTop;
-    let floor = 0;
-    for (const child of rail.children) {
-      if (child.classList.contains('rail-card')) continue;
-      const box = child.getBoundingClientRect();
-      if (box.height > 0) floor = Math.max(floor, box.bottom - baseY);
-    }
-    const stackTop = floor > 0 ? floor + RAIL_GAP : 0;
-    const entries = items.map((item, order) => ({ item, order, height: item.offsetHeight, anchor: railAnchorY(section, item) }));
-    // Anchorless cards stack first; anchored ones follow their anchors, DOM
-    // order breaking ties so equal anchors keep their reading order.
-    entries.sort((left, right) => {
-      if ((left.anchor === undefined) !== (right.anchor === undefined)) return left.anchor === undefined ? -1 : 1;
-      return (left.anchor ?? 0) - (right.anchor ?? 0) || left.order - right.order;
-    });
-    let cursor = stackTop;
-    const tops = entries.map((entry) => {
-      const top = entry.anchor === undefined ? cursor : Math.max(cursor, entry.anchor - baseY);
-      cursor = top + entry.height + RAIL_GAP;
-      return top;
-    });
-    const priorityIndex = priorityRailItem && priorityRailItem.isConnected && !priorityRailItem.hidden ? entries.findIndex((entry) => entry.item === priorityRailItem) : -1;
-    const exact = priorityIndex >= 0 && entries[priorityIndex].anchor !== undefined ? Math.max(stackTop, entries[priorityIndex].anchor - baseY) : undefined;
-    if (exact !== undefined && tops[priorityIndex] > exact + 0.5) {
-      // The priority card sits exactly at its anchor: predecessors yield
-      // upward as far as the top stack allows, a forward sweep restores the
-      // minimum gap (moving the priority card only when there is genuinely
-      // no room), and successors re-approach their own anchors.
-      tops[priorityIndex] = exact;
-      for (let index = priorityIndex - 1; index >= 0; index--) {
-        tops[index] = Math.max(stackTop, Math.min(tops[index], tops[index + 1] - RAIL_GAP - entries[index].height));
-      }
-      for (let index = 1; index <= priorityIndex; index++) {
-        tops[index] = Math.max(tops[index], tops[index - 1] + entries[index - 1].height + RAIL_GAP);
-      }
-      let after = tops[priorityIndex] + entries[priorityIndex].height + RAIL_GAP;
-      for (let index = priorityIndex + 1; index < entries.length; index++) {
-        tops[index] = entries[index].anchor === undefined ? after : Math.max(after, entries[index].anchor - baseY);
-        after = tops[index] + entries[index].height + RAIL_GAP;
-      }
-    }
-    let bottom = floor;
-    entries.forEach((entry, index) => {
-      entry.item.style.top = Math.round(tops[index]) + 'px';
-      bottom = Math.max(bottom, tops[index] + entry.height);
-    });
-    // The rail grows to hold the lowest card so the section keeps room for it.
-    const chrome = rail.offsetHeight - rail.clientHeight + (parseFloat(getComputedStyle(rail).paddingBottom) || 0);
-    rail.style.minHeight = Math.ceil(bottom + chrome) + 'px';
-  };
+  // One document-wide pass. The document's layout must never depend on the
+  // rails: rails contribute only their in-flow furniture (headings, summary
+  // boxes) to section height, while every card across every visible section
+  // is packed on one shared plane in viewport coordinates. A busy section's
+  // conversation continues down into the next section's rail space instead of
+  // stretching the document, and only the last rail may grow the page.
   const layoutRails = () => {
-    document.querySelectorAll('[data-review-file]').forEach((section) => {
-      try {
-        layoutRail(section);
-      } catch {
-        // A failed pass must never strand invisible or overlapping cards:
-        // this rail drops back to plain stacked flow.
-        const rail = section.querySelector('.commentary-column');
-        if (rail) {
-          rail.classList.remove('rail-aligned');
-          rail.style.minHeight = '';
+    const rails = [];
+    for (const section of document.querySelectorAll('[data-review-file]')) {
+      const rail = section.querySelector('.commentary-column');
+      if (!rail || rail.getClientRects().length === 0) continue;
+      const items = [...rail.querySelectorAll(RAIL_ITEM_SELECTOR)].filter((element) => railItemOf(element) === element && !element.hidden && element.getClientRects().length > 0);
+      rails.push({ section, rail, items });
+    }
+    if (!rails.length) return;
+    try {
+      // Writes first: aligned mode engages before measuring so the in-flow
+      // furniture reports its extent without the cards.
+      for (const entry of rails) {
+        entry.rail.style.minHeight = '';
+        entry.rail.classList.toggle('rail-aligned', entry.items.length > 0);
+        for (const item of entry.items) {
+          item.classList.add('rail-card');
+          if (railResizeObserver && !observedRailItems.has(item)) {
+            observedRailItems.add(item);
+            railResizeObserver.observe(item);
+          }
         }
       }
-    });
+      // Reads next, all in viewport coordinates so cross-rail positions
+      // compare directly. Furniture becomes reserved bands cards must clear.
+      const bands = [];
+      const entries = [];
+      let lastBase = 0;
+      for (const { section, rail, items } of rails) {
+        const base = rail.getBoundingClientRect().top + rail.clientTop;
+        lastBase = base;
+        if (!items.length) continue;
+        let floor = base;
+        for (const child of rail.children) {
+          if (child.classList.contains('rail-card')) continue;
+          const box = child.getBoundingClientRect();
+          if (box.height > 0) floor = Math.max(floor, box.bottom);
+        }
+        if (floor > base) bands.push({ start: base, end: floor });
+        for (const item of items) {
+          entries.push({ item, base, stackY: floor > base ? floor + RAIL_GAP : base, order: entries.length, height: item.offsetHeight, anchor: railAnchorY(section, item) });
+        }
+      }
+      if (!entries.length) return;
+      // Anchorless cards hold their own section's top; anchored ones follow
+      // their anchors. On equal positions anchorless leads, then DOM order.
+      for (const entry of entries) entry.target = entry.anchor === undefined ? entry.stackY : entry.anchor;
+      entries.sort((left, right) => (left.target - right.target) || ((left.anchor === undefined) === (right.anchor === undefined) ? left.order - right.order : left.anchor === undefined ? -1 : 1));
+      const clearBands = (top, height) => {
+        for (const band of bands) if (top < band.end + RAIL_GAP && top + height > band.start - RAIL_GAP) top = band.end + RAIL_GAP;
+        return top;
+      };
+      let cursor = -Infinity;
+      const tops = entries.map((entry) => {
+        const top = clearBands(Math.max(cursor, entry.target), entry.height);
+        cursor = top + entry.height + RAIL_GAP;
+        return top;
+      });
+      const priorityIndex = priorityRailItem && priorityRailItem.isConnected && !priorityRailItem.hidden ? entries.findIndex((entry) => entry.item === priorityRailItem) : -1;
+      const exact = priorityIndex >= 0 && entries[priorityIndex].anchor !== undefined ? Math.max(entries[priorityIndex].stackY, entries[priorityIndex].anchor) : undefined;
+      if (exact !== undefined && tops[priorityIndex] > exact + 0.5) {
+        // The priority card sits exactly at its anchor: predecessors yield
+        // upward as far as the topmost stack allows, a forward sweep restores
+        // the minimum gap (moving the priority card only when there is
+        // genuinely no room), and successors re-approach their own anchors.
+        const stackFloor = Math.min(...entries.map((entry) => entry.stackY));
+        tops[priorityIndex] = exact;
+        for (let index = priorityIndex - 1; index >= 0; index--) {
+          tops[index] = Math.max(stackFloor, Math.min(tops[index], tops[index + 1] - RAIL_GAP - entries[index].height));
+        }
+        for (let index = 1; index <= priorityIndex; index++) {
+          tops[index] = Math.max(tops[index], tops[index - 1] + entries[index - 1].height + RAIL_GAP);
+        }
+        let after = tops[priorityIndex] + entries[priorityIndex].height + RAIL_GAP;
+        for (let index = priorityIndex + 1; index < entries.length; index++) {
+          tops[index] = clearBands(entries[index].anchor === undefined ? after : Math.max(after, entries[index].anchor), entries[index].height);
+          after = tops[index] + entries[index].height + RAIL_GAP;
+        }
+      }
+      // Writes last: tops translate into each card's own rail, so the pass
+      // costs a bounded number of reflows however many cards there are.
+      let bottom = -Infinity;
+      entries.forEach((entry, index) => {
+        entry.item.style.top = Math.round(tops[index] - entry.base) + 'px';
+        bottom = Math.max(bottom, tops[index] + entry.height);
+      });
+      // Cards that outrun the document extend the page at the bottom — via
+      // the last rail only — never between sections.
+      if (bottom > lastBase) {
+        rails[rails.length - 1].rail.style.minHeight = Math.ceil(bottom - lastBase) + 'px';
+      }
+    } catch {
+      // A failed pass must never strand invisible or overlapping cards:
+      // every rail drops back to plain stacked flow.
+      for (const { rail } of rails) {
+        rail.classList.remove('rail-aligned');
+        rail.style.minHeight = '';
+      }
+    }
   };
   // Every layout trigger coalesces into one pass per animation frame.
   let railLayoutPending = false;

@@ -34,6 +34,7 @@ Fenced ```mermaid blocks render as live diagrams the reviewer can click: a node 
 - Reviewer threads on elements arrive with an `element` attribute; reply as usual.
 - In `threadResponses`, re-declare `element` (with `file`) when the discussion's element still exists in the new round — renames need the NEW id. Rejections list every element the section's diagrams define.
 - Revising a diagram: change the source in the markdown; never rename ids gratuitously — each rename orphans its threads.
+- On round advance the reviewer sees a diff overlay: new ids and relabeled nodes glow, new edges glow as themselves, and removed elements are listed in the rail with an origin-round link. Renames read as remove + add — one more reason ids are the contract.
 
 ## Reading reviewer threads
 

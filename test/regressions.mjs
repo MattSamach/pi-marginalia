@@ -1270,6 +1270,17 @@ try {
 		assert.throws(() => buildDiagramReview({ title: "x", diagrams: [{ name: "User Flow", source: "flowchart" }, { name: "User-Flow", source: "flowchart" }] }), /same section slug/, "Slug-base collisions are rejected so reorders cannot swap carried threads.");
 		assert.equal(diagramReview.files.length, 2, "One section per diagram, exactly.");
 		assert.throws(() => buildDiagramReview({ title: "x", diagrams: [{ name: "a", source: "flowchart LR\n  m --> n", commentary: [{ id: "c", body: "x", element: "node:zzz" }] }] }), /nodes: m, n/, "Element rejections keep their hints through the shell.");
+		const { computeElementDiff } = await import("../shared/diagram.js");
+		const diffPrev = "```mermaid\nflowchart LR\n  ui[Web] --> api(Gateway)\n  api --> db[(Store)]\n```";
+		const diffNext = "```mermaid\nflowchart LR\n  ui[Web client] --> api(Gateway)\n  api --> pg[(Postgres)]\n```";
+		const elementDiff = computeElementDiff(diffPrev, diffNext);
+		assert.deepEqual(elementDiff.changed.sort(), ["edge:api->pg", "node:pg", "node:ui"], "New ids, relabeled nodes, and new edges glow; unchanged edges stay dark even when an endpoint relabels.");
+		assert.deepEqual(elementDiff.removed.sort(), ["edge:api->db", "node:db"], "Removed ids surface for the rail list.");
+		assert.ok(!elementDiff.changed.includes("node:api"), "D8: the gateway does not glow because its neighbor was renamed.");
+		assert.equal(computeElementDiff(diffPrev, diffPrev).changed.length + computeElementDiff(diffPrev, diffPrev).removed.length, 0, "Identical sources diff to nothing.");
+		assert.equal(computeElementDiff("```mermaid\nflowchart LR\n  a -->|api[1]| b\n  api[Service] --> b\n```", "```mermaid\nflowchart LR\n  a -->|api[2]| b\n  api[Service] --> b\n```").changed.length, 0, "Edge-label prose that name-drops a node never glows it.");
+		assert.deepEqual(computeElementDiff("```mermaid\nflowchart LR\n  x[One] --> y\n  x[Two] --> z\n```", "```mermaid\nflowchart LR\n  x[One] --> y\n  x[Three] --> z\n```").changed, ["node:x"], "Label signatures follow mermaid last-definition-wins.");
+		assert.deepEqual(computeElementDiff("```mermaid\nstateDiagram-v2\n  Idle --> Done\n  Idle : waits\n```", "```mermaid\nstateDiagram-v2\n  Idle --> Done\n  Idle : sleeps\n```").changed, ["node:Idle"], "State colon relabels glow their state.");
 		// Markdown: mermaid fences become diagram figures; other fences stay pre.
 		const figureHtml = renderMarkdown(diagramMd, { sourceLines: true });
 		assert.match(figureHtml, /<figure class="diagram-block" data-diagram data-md-line="3" data-md-end="7">/, "Mermaid fences emit diagram figures with source-line anchors.");
@@ -2467,6 +2478,13 @@ try {
 				assert.equal(diagramServer.addRound(nextDiagramPlan, diagramPlan.id, [{ respondsTo: dThreadId, resolution: "addressed", body: "Postgres, named.", file: "topology", element: "node:pg" }]).round, 2);
 				await dPage.waitForFunction(() => document.body.dataset.round === "2", { polling: 100 });
 				await dPage.waitForFunction(() => document.querySelector('.diagram-canvas svg [data-el="node:pg"]'), { polling: 100 });
+				// B2: the round diff glows the renamed node and its new edge, leaves
+				// unchanged neighbors dark, and lists the removed element in the rail.
+				await dPage.waitForFunction(() => document.querySelector('[data-el="node:pg"]')?.classList.contains("el-changed"), { polling: 100 });
+				assert.equal(await dPage.$eval('[data-el="edge:api->pg"]', (edge) => edge.classList.contains("el-changed")), true, "New edges glow as themselves.");
+				assert.equal(await dPage.$eval('[data-el="node:api"]', (node) => node.classList.contains("el-changed")), false, "A node never glows because its neighbor changed.");
+				assert.match(await dPage.$eval('[data-removed-elements]', (card) => card.textContent), /db/, "The rail names what was removed this round.");
+				assert.match(await dPage.$eval('[data-removed-elements] a', (link) => link.getAttribute("href")), /\/round\/1/, "Removed elements link to their origin round.");
 				await dPage.$eval('[data-carried-thread] .agent-note-anchor', (button) => button.click());
 				await dPage.waitForFunction(() => document.querySelector('[data-el="node:pg"]').classList.contains("el-flash"), { polling: 50 });
 				assert.match(await dPage.$eval('[data-carried-thread] .agent-note-anchor', (button) => button.textContent), /pg/, "The carried shell names the re-anchored element.");

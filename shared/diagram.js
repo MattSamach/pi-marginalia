@@ -40,10 +40,13 @@ const IDENT = /[A-Za-z0-9_]+/;
 export function parseMermaidElements(source) {
 	const nodes = new Set();
 	const edges = new Set();
+	// id -> raw shape token ("[Store]", "((Hub))"). Not a clean label: only a
+	// comparable signature, so a label edit is detectable across rounds.
+	const labels = new Map();
 	const lines = String(source ?? "").split(/\r?\n/);
 	const header = lines.find((line) => line.trim())?.trim().toLowerCase() ?? "";
 	const kind = /^(flowchart|graph)\b/.test(header) ? "flowchart" : /^statediagram/.test(header) ? "state" : "other";
-	if (kind === "other") return { kind, nodes, edges };
+	if (kind === "other") return { kind, nodes, edges, labels };
 	for (let raw of lines.slice(1)) {
 		let line = raw.replace(/%%.*$/, "").trim();
 		if (!line || /^(classDef|class|style|linkStyle|click|direction|subgraph|end\b)/.test(line)) {
@@ -51,10 +54,25 @@ export function parseMermaidElements(source) {
 			// reference nodes that must already be defined elsewhere.
 			continue;
 		}
+		// Pipe labels are edge prose; strip them before signature capture so
+		// "a -->|api[1]| b" can never mint a signature for node api. Later
+		// definitions overwrite earlier ones, matching mermaid's last-wins.
+		const piped = line.replace(/\|[^|]*\|/g, "|");
+		for (const match of piped.matchAll(new RegExp(`(${IDENT.source})\\s*([\\[({>][^\\])}]*[\\])}]+)`, "g"))) {
+			labels.set(match[1], match[2]);
+		}
+		// State-diagram relabels use colon syntax (s1 : description).
+		if (kind === "state") {
+			const colonLabel = new RegExp(`^(${IDENT.source})\\s*:\\s*(.+)$`).exec(piped);
+			if (colonLabel) {
+				nodes.add(colonLabel[1]);
+				labels.set(colonLabel[1], `:${colonLabel[2]}`);
+			}
+		}
 		// Label bodies and ::: class shorthand are prose/annotations, never ids:
 		// strip both before any scan so "api[API (v2)]" and "a:::hot" read as
 		// just their identifiers.
-		line = line.replace(/\|[^|]*\|/g, "|").replace(/\[[^\]]*\]/g, "[]").replace(/\(+[^()]*\)+/g, "()").replace(/\{[^}]*\}/g, "{}").replace(/:::[A-Za-z0-9_,]+/g, "");
+		line = piped.replace(/\[[^\]]*\]/g, "[]").replace(/\(+[^()]*\)+/g, "()").replace(/\{[^}]*\}/g, "{}").replace(/:::[A-Za-z0-9_,]+/g, "");
 		// A statement that is just an identifier renders as a bare node.
 		if (new RegExp(`^${IDENT.source}$`).test(line)) {
 			nodes.add(line);
@@ -85,7 +103,40 @@ export function parseMermaidElements(source) {
 			}
 		}
 	}
-	return { kind, nodes, edges };
+	return { kind, nodes, edges, labels };
+}
+
+/**
+ * Diff the diagram elements of two markdown segments into round-over-round
+ * review metadata: refs that should glow (new ids, or nodes whose label
+ * signature changed) and refs that are gone. Nodes glow only for their own
+ * changes; topology changes surface as the edges themselves.
+ */
+export function computeElementDiff(previousMarkdown, nextMarkdown) {
+	const collect = (markdown) => {
+		const nodes = new Set();
+		const edges = new Set();
+		const labels = new Map();
+		for (const source of extractMermaidSources(markdown)) {
+			const parsed = parseMermaidElements(source);
+			for (const node of parsed.nodes) nodes.add(node);
+			for (const edge of parsed.edges) edges.add(edge);
+			for (const [id, label] of parsed.labels) if (!labels.has(id)) labels.set(id, label);
+		}
+		return { nodes, edges, labels };
+	};
+	const previous = collect(previousMarkdown);
+	const next = collect(nextMarkdown);
+	const changed = [];
+	const removed = [];
+	for (const node of next.nodes) {
+		if (!previous.nodes.has(node)) changed.push(`node:${node}`);
+		else if (previous.labels.get(node) !== next.labels.get(node)) changed.push(`node:${node}`);
+	}
+	for (const edge of next.edges) if (!previous.edges.has(edge)) changed.push(`edge:${edge}`);
+	for (const node of previous.nodes) if (!next.nodes.has(node)) removed.push(`node:${node}`);
+	for (const edge of previous.edges) if (!next.edges.has(edge)) removed.push(`edge:${edge}`);
+	return { changed, removed };
 }
 
 /** Union of elements across every mermaid fence in a markdown segment. */

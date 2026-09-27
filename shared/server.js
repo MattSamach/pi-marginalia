@@ -13,6 +13,7 @@ const AMEND_PATH = "/__pi_code_review_amend__";
 const SEND_PATH = "/__pi_code_review_send__";
 const EVENTS_PATH = "/__pi_code_review_events__";
 const MERMAID_PATH = "/__pi_code_review_mermaid__.js";
+import { computeElementDiff } from "./diagram.js";
 const CONTEXT_PATH = "/__pi_code_review_context__";
 const APPROVE_PATH = "/__pi_code_review_approve__";
 const SSE_HEARTBEAT_MS = 25_000;
@@ -255,13 +256,24 @@ export async function createCodeReviewServer(review, options) {
 		// Plan rounds mark which sections actually changed since the round they
 		// superseded — the reviewer's convergence scan without a diff view.
 		let changedSections;
+		let elementDiff;
 		if (round.review.kind === "plan" && round.number > 1) {
 			const previous = rounds.find((candidate) => candidate.number === round.number - 1);
 			const before = new Map(previous.review.files.map((file) => [file.path, file.contentSha256]));
 			changedSections = round.review.files.filter((file) => before.get(file.path) !== file.contentSha256).map((file) => file.path);
+			// Element-level diff per section: what glows (new ids, relabeled
+			// nodes, new edges) and what the rail reports as removed.
+			const beforeMarkdown = new Map(previous.review.files.map((file) => [file.path, file.markdown ?? ""]));
+			for (const file of round.review.files) {
+				const diff = computeElementDiff(beforeMarkdown.get(file.path) ?? "", file.markdown ?? "");
+				if (diff.changed.length || diff.removed.length) {
+					elementDiff = elementDiff ?? {};
+					elementDiff[file.path] = { ...diff, fromRound: round.number - 1 };
+				}
+			}
 		}
 		res.writeHead(200, htmlHeaders(nonce));
-		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive, viewed: [...round.viewed], changedSections, appearance: options.appearance }));
+		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive, viewed: [...round.viewed], changedSections, elementDiff, appearance: options.appearance }));
 	};
 
 	let mermaidSource;

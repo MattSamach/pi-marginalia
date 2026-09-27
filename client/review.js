@@ -330,6 +330,13 @@
         if (svgRoot) {
           svgRoot.removeAttribute('style');
           if (typeof parseMermaidElements === 'function') annotateDiagram(svgRoot, parseMermaidElements(source));
+          // Round diff: elements the server marked changed glow persistently.
+          const changedRefs = figure.closest('[data-review-file]')?.dataset.changedElements;
+          if (changedRefs) {
+            for (const reference of changedRefs.split(' ')) {
+              svgRoot.querySelectorAll('[data-el="' + (window.CSS && CSS.escape ? CSS.escape(reference) : reference) + '"]').forEach((element) => element.classList.add('el-changed'));
+            }
+          }
         }
         const view = { scale: 1, x: 0, y: 0 };
         const apply = () => { inner.style.transform = 'translate(' + view.x + 'px,' + view.y + 'px) scale(' + view.scale + ')'; };

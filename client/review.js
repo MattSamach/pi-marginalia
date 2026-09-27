@@ -1281,6 +1281,12 @@
     // Resolved threads read as one compact row (anchor chip, first message
     // truncated, resolved tick) with the full history behind a click on that
     // row. detail is the card itself while the thread stays open.
+    // The enclosing agent-note (when the thread lives under one) collapses
+    // with the thread: its body clamps to one line while the row is compact.
+    const noteHost = card.closest('.agent-note');
+    const syncNoteClamp = () => {
+      noteHost?.classList.toggle('resolved-collapsed', thread.status === 'resolved' && card.dataset.resolvedOpen !== '1');
+    };
     let detail = card;
     if (thread.status === 'resolved') {
       detail = document.createElement('div');
@@ -1315,12 +1321,14 @@
         if (open) delete card.dataset.resolvedOpen;
         else card.dataset.resolvedOpen = '1';
         detail.hidden = open;
+        syncNoteClamp();
         cardsResized(card);
       });
       card.append(summaryRow, detail);
     } else {
       delete card.dataset.resolvedOpen;
     }
+    syncNoteClamp();
     const header = document.createElement('div');
     header.className = 'thread-card-header';
     const status = document.createElement('span');

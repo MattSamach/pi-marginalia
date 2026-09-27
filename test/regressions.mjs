@@ -1783,8 +1783,11 @@ try {
 			await page.waitForFunction(() => document.querySelector('[data-commentary-thread="second-note"] .thread-card.resolved'));
 			assert.equal(browserPosts.length, 3, "Resolving a note must not message Pi.");
 			assert.equal(await page.$eval('[data-inbox]', (strip) => strip.hidden), true, "Resolving the last unread note clears the inbox.");
-			// The resolved card is compact; its Reopen control lives behind the toggle.
+			// The resolved card is compact; its Reopen control lives behind the toggle,
+			// and the enclosing note clamps its own body while compact.
+			assert.equal(await page.$eval('[data-commentary-thread="second-note"]', (host) => host.closest(".agent-note")?.classList.contains("resolved-collapsed") ?? false), true, "A resolved commentary thread clamps its note body to one line.");
 			await page.click('[data-commentary-thread="second-note"] [data-resolved-toggle]');
+			assert.equal(await page.$eval('[data-commentary-thread="second-note"]', (host) => host.closest(".agent-note")?.classList.contains("resolved-collapsed") ?? false), false, "Expanding the resolved row unclamps the note body.");
 			await page.click('[data-commentary-thread="second-note"] [data-thread-resolve]');
 			await page.waitForFunction(() => !document.querySelector('[data-commentary-thread="second-note"] .thread-card'));
 			assert.equal(await page.$eval('[data-commentary-composer="second-note"]', (composer) => composer.hidden === false && composer.classList.contains("collapsed")), true, "Reopening an untouched note removes its card and restores the composer collapsed.");

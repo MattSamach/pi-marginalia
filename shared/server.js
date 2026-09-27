@@ -207,8 +207,13 @@ export async function createCodeReviewServer(review, options) {
 	// nothing is stranded — they flow through the next delivery or the pass.
 	const deliverToPi = async (round, result) => {
 		try {
-			await options.onThreadPost(round, result.thread, result.deliveredTurns);
-			return { thread: result.thread, failed: false };
+			const outcome = await options.onThreadPost(round, result.thread, result.deliveredTurns);
+			// The status line follows the handoff: queued means the extension holds
+			// the message until Pi settles (sent); otherwise it is already in Pi's
+			// context with a turn in progress (working).
+			const stamped = round.store.setReplyState(result.thread.id, outcome?.queued === true ? "sent" : "working");
+			if (stamped) broadcastThread(round, stamped);
+			return { thread: stamped ?? result.thread, failed: false };
 		} catch {
 			// An approval that landed while this delivery was in flight closed the
 			// session; nothing will re-deliver, so the terminal store stays frozen.
@@ -380,6 +385,13 @@ export async function createCodeReviewServer(review, options) {
 			if (req.method === "GET" && requestUrl.pathname === EVENTS_PATH) {
 				const requested = Number(requestUrl.searchParams.get("round") ?? current().number);
 				const round = rounds.find((candidate) => candidate.number === requested) ?? current();
+				// Reconnect honesty: with no turn in progress, a thread still marked
+				// working is really seen — its delivery outlived a runtime whose settle
+				// sweep never ran. Repair persistently before composing init so a later
+				// unrelated turn cannot flip the state back to working.
+				if (typeof options.isTurnActive === "function" && !options.isTurnActive()) {
+					for (const repaired of round.store.sweepReplyState("working", "seen")) broadcastThread(round, repaired);
+				}
 				res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "text/event-stream", Connection: "keep-alive" });
 				res.write(`event: init\ndata: ${JSON.stringify({ round: round.number, currentRound: current().number, phase, stale, driftPaths, threads: round.store.list(), summary: round.store.summary(), viewedFiles: [...round.viewed] })}\n\n`);
 				sseClients.add(res);
@@ -599,7 +611,13 @@ export async function createCodeReviewServer(review, options) {
 				}
 				// A new round may have opened while the handoff awaited; never lock it retroactively.
 				const superseded = current() !== round;
-				for (const delivered of round.store.markAllDelivered(capturedPending)) broadcastThread(round, delivered);
+				// Threads the pass just delivered pick up the pass's own delivery state:
+				// a queued pass rides the extension queue (sent); an immediate one is in
+				// Pi's context with a turn incoming (working).
+				const passState = result?.queued === true ? "sent" : "working";
+				for (const delivered of round.store.markAllDelivered(capturedPending)) {
+					broadcastThread(round, round.store.setReplyState(delivered.id, passState) ?? delivered);
+				}
 				if (!superseded) {
 					phase = "revising";
 					broadcastPhase();
@@ -699,6 +717,19 @@ export async function createCodeReviewServer(review, options) {
 		threads: () => current().store.list(),
 		threadSummary: () => current().store.summary(),
 		viewedFiles: () => [...current().viewed],
+		// Pi's turn ended: delivered reviewer messages still waiting on a reply
+		// were seen, not answered. Every round sweeps so nothing strands working.
+		markTurnEnd() {
+			for (const round of rounds) {
+				for (const thread of round.store.sweepReplyState("working", "seen")) broadcastThread(round, thread);
+			}
+		},
+		// The extension's queue flushed into Pi's context: sent threads are working.
+		markQueueDelivered() {
+			for (const round of rounds) {
+				for (const thread of round.store.sweepReplyState("sent", "working")) broadcastThread(round, thread);
+			}
+		},
 		postPiReply(threadId, body, resolves) {
 			// A closed session names the true reason; a bare failure would read as a
 			// turn-limit guess and send Pi down the wrong recovery path.

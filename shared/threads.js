@@ -331,6 +331,8 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		if (!thread || !validText(body, limits)) return undefined;
 		const result = appendTurn(thread, "pi", body.trim(), Date.now());
 		if (result.error) return undefined;
+		// The reply itself is the reviewer's indicator; drop the status line.
+		delete thread.replyState;
 		if (resolves === true && thread.status === "open") thread.piProposedResolve = true;
 		return publicThread(thread);
 	}
@@ -441,8 +443,34 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 			if (turn.author === "user" && targets.has(turn.seq)) turn.delivered = false;
 		}
 		thread.live = prevLive === true;
+		// The returned messages are pending again; there is no delivery to track.
+		delete thread.replyState;
 		return publicThread(thread);
 	}
 
-	return { postUserTurn, postPiReply, setResolved, getThread, list, summary, markAllDelivered, deliverPending, requeue, amendQueuedTurn };
+	/**
+	 * Reply-state of the thread's latest delivered reviewer message: "sent"
+	 * (handed off but still queued for Pi), "working" (in Pi's context with a
+	 * turn in progress), or "seen" (Pi's turn ended without a reply here). A Pi
+	 * reply clears the state — the reply itself is the reviewer's indicator.
+	 */
+	function setReplyState(threadId, state) {
+		const thread = threads.get(threadId);
+		if (!thread) return undefined;
+		thread.replyState = state;
+		return publicThread(thread);
+	}
+
+	/** Move every thread in one reply-state to another; returns the changed threads. */
+	function sweepReplyState(from, to) {
+		const changed = [];
+		for (const thread of threads.values()) {
+			if (thread.replyState !== from) continue;
+			thread.replyState = to;
+			changed.push(publicThread(thread));
+		}
+		return changed;
+	}
+
+	return { postUserTurn, postPiReply, setResolved, getThread, list, summary, markAllDelivered, deliverPending, requeue, amendQueuedTurn, setReplyState, sweepReplyState };
 }

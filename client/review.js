@@ -124,7 +124,7 @@
     applyDriftMarks();
     syncDraftDot();
     document.querySelectorAll('[data-viewed-toggle]').forEach((box) => { box.disabled = isSuperseded(); });
-    layoutPlanRails();
+    scheduleRailLayout();
     if (phaseBanner && phaseBannerText && resumeButton && gotoCurrent) {
       if (isSuperseded()) {
         phaseBanner.hidden = false;
@@ -229,9 +229,9 @@
     navButtons.forEach((item) => item.classList.toggle('active', Number(item.dataset.fileNav) === index));
     if (planMode && !planFocus()) document.querySelector('[data-review-file="' + index + '"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     else window.scrollTo({ top: 0, behavior: 'instant' });
-    // A section shown after being display-hidden (focus view) skipped every
-    // layout that ran while it had no boxes; refresh its rail now.
-    if (planMode) layoutPlanRail(document.querySelector('[data-review-file="' + index + '"]'));
+    // A section shown after being display-hidden skipped every layout that
+    // ran while it had no boxes; refresh its rail now.
+    scheduleRailLayout();
   };
   // The tie between a note and its text reads in both directions: hovering a
   // note tints the lines it anchors (blocks in plan mode, diff rows in code
@@ -339,6 +339,9 @@
         inner.className = 'diagram-inner';
         inner.innerHTML = svg;
         canvas.replaceChildren(inner);
+        // The rendered diagram replaces the source pre and changes the
+        // section's height; reseat the margin rail against the new anchors.
+        scheduleRailLayout();
         figure.classList.remove('diagram-scheme-light', 'diagram-scheme-dark');
         figure.classList.add(effectiveDark() ? 'diagram-scheme-dark' : 'diagram-scheme-light');
         const svgRoot = inner.querySelector('svg');
@@ -409,6 +412,7 @@
         figure.querySelector('.diagram-error').textContent = 'Diagram failed to render: ' + (error && error.message ? String(error.message).split('\n')[0] : 'unknown error');
         figure.querySelector('.diagram-error').hidden = false;
         figure.querySelector('.diagram-source').hidden = false;
+        scheduleRailLayout();
         // Mermaid leaves its failed scratch element behind; drop it.
         document.querySelectorAll('[id^="dpicr-mmd-"]').forEach((scratch) => scratch.remove());
       }
@@ -460,8 +464,8 @@
     };
     const composer = section.querySelector('[data-selection-composer]');
     composer.hidden = false;
-    composer.dataset.anchorStart = String(draft.newStart);
-    layoutPlanRail(section);
+    stampComposerAnchor(composer, draft);
+    scheduleRailLayout();
     composer.querySelector('[data-selection-quote]').textContent = draft.highlight;
     const textarea = composer.querySelector('[data-selection-feedback]');
     textarea.value = '';
@@ -513,12 +517,7 @@
       viewToggle.textContent = focused ? 'Whole document' : 'Focus section';
       viewToggle.title = focused ? 'Show the whole document' : 'Show one section at a time';
       showFile(activeIndex);
-      layoutPlanRails();
-    });
-    let railResizeTimer;
-    window.addEventListener('resize', () => {
-      clearTimeout(railResizeTimer);
-      railResizeTimer = setTimeout(layoutPlanRails, 150);
+      scheduleRailLayout();
     });
   }
   // Navigation never asks about drafts: an open draft survives every panel
@@ -580,7 +579,7 @@
     const draftSection = sectionForPath(draft.file);
     const composer = draftSection?.querySelector('[data-selection-composer]');
     if (composer) composer.hidden = true;
-    if (planMode) layoutPlanRail(draftSection);
+    scheduleRailLayout();
     draft = undefined;
     removeDraft('selection');
     syncDraftDot();
@@ -624,45 +623,176 @@
     // Land on the draft's file so the restored composer is visible; an
     // explicit deep link in the hash wins the navigation instead.
     if (!/(?:^#|[#&])(?:thread|loc)=/.test(window.location.hash || '')) showFile(Number(section.dataset.reviewFile));
-    if (planMode && parsed.newStart !== undefined) {
-      composer.dataset.anchorStart = String(parsed.newStart);
-      layoutPlanRail(section);
-    }
+    stampComposerAnchor(composer, draft);
+    scheduleRailLayout();
     syncDraftDot();
   };
   // Plan documents anchor on rendered markdown blocks instead of diff rows;
   // each block carries its absolute source-line range.
   const planBlockAt = (section, line) => [...section.querySelectorAll('[data-md-line]')].find((block) => Number(block.dataset.mdLine) <= line && line <= Number(block.dataset.mdEnd));
-  // Margin-note alignment: each rail item sits beside the block its anchor
-  // names, pushed down just enough to avoid the item above it. Anchorless
-  // items (the summary) keep their flow position.
-  const layoutPlanRail = (section) => {
-    if (!planMode || !section) return;
-    const rail = section.querySelector('.plan-rail');
-    if (!rail || rail.getClientRects().length === 0) return;
-    const railTop = rail.getBoundingClientRect().top;
-    let cursor = 0;
-    let first = true;
-    for (const item of rail.children) {
-      if (item.hidden) {
-        item.style.marginTop = '';
-        continue;
-      }
-      const lineValue = Number(item.dataset.anchorStart ?? item.querySelector('[data-anchor-start]')?.dataset.anchorStart);
-      const floor = first ? 0 : cursor + 10;
-      let top = floor;
-      if (Number.isFinite(lineValue) && lineValue > 0) {
-        const block = planBlockAt(section, lineValue);
-        if (block) top = Math.max(floor, block.getBoundingClientRect().top - railTop);
-      }
-      item.style.marginTop = Math.round(top - cursor) + 'px';
-      cursor = top + item.offsetHeight;
-      first = false;
-    }
+  // Rail alignment: every card with a resolvable anchor sits beside the
+  // content it annotates, GitHub-review style, in code mode and plan mode
+  // alike. The pass positions cards absolutely inside the relative rail —
+  // visual order can then follow the anchors while DOM order stays put for
+  // the keyboard and screen readers, and removing one class drops everything
+  // back to plain stacked flow. Cards compete for space in anchor order with
+  // a minimum gap; anchorless cards (and cards whose anchors no longer
+  // resolve) stack at the top of the rail before the anchored ones.
+  const RAIL_GAP = 12;
+  const RAIL_ITEM_SELECTOR = '.agent-note, .carried-thread, .thread-card, .selection-composer';
+  // The outermost rail box around an element: commentary reply cards render
+  // inside their note, so the nearest selector match may be nested.
+  const railItemOf = (element) => {
+    let item = element.closest(RAIL_ITEM_SELECTOR);
+    for (let outer = item && item.parentElement?.closest(RAIL_ITEM_SELECTOR); outer; outer = item.parentElement?.closest(RAIL_ITEM_SELECTOR)) item = outer;
+    return item ?? undefined;
   };
-  const layoutPlanRails = () => {
-    if (!planMode) return;
-    document.querySelectorAll('[data-review-file]').forEach((section) => layoutPlanRail(section));
+  // The card being interacted with — a focused composer or reply box, a
+  // click, or the target of thread navigation — wins exact alignment; its
+  // neighbors yield up or down around it.
+  let priorityRailItem;
+  const setPriorityRailItem = (element) => {
+    if (!(element instanceof Element)) return;
+    const item = railItemOf(element);
+    if (!item || item === priorityRailItem || !item.closest('.commentary-column')) return;
+    priorityRailItem = item;
+    scheduleRailLayout();
+  };
+  // Where an item's anchor sits, in viewport coordinates; undefined keeps the
+  // item in the top stack (outdated and omitted anchors resolve to nothing).
+  const railAnchorY = (section, item) => {
+    if (item.dataset.anchorElement !== undefined) {
+      const element = diagramElementIn(section, item.dataset.anchorElement);
+      if (element) return element.getBoundingClientRect().top;
+    }
+    const start = Number(item.dataset.anchorStart);
+    if (!Number.isFinite(start) || start <= 0) return undefined;
+    const end = Number(item.dataset.anchorEnd || item.dataset.anchorStart);
+    const targets = anchorTargets(section, item.dataset.anchorSide, start, end);
+    return targets.length ? targets[0].getBoundingClientRect().top : undefined;
+  };
+  const railResizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(() => scheduleRailLayout()) : undefined;
+  const observedRailItems = new WeakSet();
+  const layoutRail = (section) => {
+    const rail = section.querySelector('.commentary-column');
+    if (!rail || rail.getClientRects().length === 0) return;
+    const items = [...rail.querySelectorAll(RAIL_ITEM_SELECTOR)].filter((element) => railItemOf(element) === element && !element.hidden && element.getClientRects().length > 0);
+    if (!items.length) {
+      rail.classList.remove('rail-aligned');
+      rail.style.minHeight = '';
+      return;
+    }
+    // Absolute positioning engages before measuring so the in-flow furniture
+    // (headings, summaries) reports its extent without the cards.
+    rail.classList.add('rail-aligned');
+    for (const item of items) {
+      item.classList.add('rail-card');
+      if (railResizeObserver && !observedRailItems.has(item)) {
+        observedRailItems.add(item);
+        railResizeObserver.observe(item);
+      }
+    }
+    // Reads all happen before the writes: the pass costs at most two reflows
+    // however many cards there are.
+    const baseY = rail.getBoundingClientRect().top + rail.clientTop;
+    let floor = 0;
+    for (const child of rail.children) {
+      if (child.classList.contains('rail-card')) continue;
+      const box = child.getBoundingClientRect();
+      if (box.height > 0) floor = Math.max(floor, box.bottom - baseY);
+    }
+    const stackTop = floor > 0 ? floor + RAIL_GAP : 0;
+    const entries = items.map((item, order) => ({ item, order, height: item.offsetHeight, anchor: railAnchorY(section, item) }));
+    // Anchorless cards stack first; anchored ones follow their anchors, DOM
+    // order breaking ties so equal anchors keep their reading order.
+    entries.sort((left, right) => {
+      if ((left.anchor === undefined) !== (right.anchor === undefined)) return left.anchor === undefined ? -1 : 1;
+      return (left.anchor ?? 0) - (right.anchor ?? 0) || left.order - right.order;
+    });
+    let cursor = stackTop;
+    const tops = entries.map((entry) => {
+      const top = entry.anchor === undefined ? cursor : Math.max(cursor, entry.anchor - baseY);
+      cursor = top + entry.height + RAIL_GAP;
+      return top;
+    });
+    const priorityIndex = priorityRailItem && priorityRailItem.isConnected && !priorityRailItem.hidden ? entries.findIndex((entry) => entry.item === priorityRailItem) : -1;
+    const exact = priorityIndex >= 0 && entries[priorityIndex].anchor !== undefined ? Math.max(stackTop, entries[priorityIndex].anchor - baseY) : undefined;
+    if (exact !== undefined && tops[priorityIndex] > exact + 0.5) {
+      // The priority card sits exactly at its anchor: predecessors yield
+      // upward as far as the top stack allows, a forward sweep restores the
+      // minimum gap (moving the priority card only when there is genuinely
+      // no room), and successors re-approach their own anchors.
+      tops[priorityIndex] = exact;
+      for (let index = priorityIndex - 1; index >= 0; index--) {
+        tops[index] = Math.max(stackTop, Math.min(tops[index], tops[index + 1] - RAIL_GAP - entries[index].height));
+      }
+      for (let index = 1; index <= priorityIndex; index++) {
+        tops[index] = Math.max(tops[index], tops[index - 1] + entries[index - 1].height + RAIL_GAP);
+      }
+      let after = tops[priorityIndex] + entries[priorityIndex].height + RAIL_GAP;
+      for (let index = priorityIndex + 1; index < entries.length; index++) {
+        tops[index] = entries[index].anchor === undefined ? after : Math.max(after, entries[index].anchor - baseY);
+        after = tops[index] + entries[index].height + RAIL_GAP;
+      }
+    }
+    let bottom = floor;
+    entries.forEach((entry, index) => {
+      entry.item.style.top = Math.round(tops[index]) + 'px';
+      bottom = Math.max(bottom, tops[index] + entry.height);
+    });
+    // The rail grows to hold the lowest card so the section keeps room for it.
+    const chrome = rail.offsetHeight - rail.clientHeight + (parseFloat(getComputedStyle(rail).paddingBottom) || 0);
+    rail.style.minHeight = Math.ceil(bottom + chrome) + 'px';
+  };
+  const layoutRails = () => {
+    document.querySelectorAll('[data-review-file]').forEach((section) => {
+      try {
+        layoutRail(section);
+      } catch {
+        // A failed pass must never strand invisible or overlapping cards:
+        // this rail drops back to plain stacked flow.
+        const rail = section.querySelector('.commentary-column');
+        if (rail) {
+          rail.classList.remove('rail-aligned');
+          rail.style.minHeight = '';
+        }
+      }
+    });
+  };
+  // Every layout trigger coalesces into one pass per animation frame.
+  let railLayoutPending = false;
+  const scheduleRailLayout = () => {
+    if (railLayoutPending) return;
+    railLayoutPending = true;
+    requestAnimationFrame(() => {
+      railLayoutPending = false;
+      layoutRails();
+    });
+  };
+  // Anything that can move an anchor or change a card's height reruns the
+  // layout: rail and content-column resizes (window resizes land here too),
+  // per-card resizes as a backstop, and explicit announcements from whatever
+  // changes a card's content at runtime.
+  if (railResizeObserver) {
+    document.querySelectorAll('[data-review-file] .commentary-column, [data-review-file] .diff-column, [data-review-file] .plan-column').forEach((element) => railResizeObserver.observe(element));
+  }
+  document.addEventListener('marginalia:cards-resized', () => scheduleRailLayout());
+  // The composer is a rail item like any card: it wears its draft's anchor so
+  // the layout can seat it beside the selection.
+  const stampComposerAnchor = (composer, pending) => {
+    const start = pending.side === 'old' ? pending.oldStart : pending.newStart ?? pending.oldStart;
+    const end = (pending.side === 'old' ? pending.oldEnd : pending.newEnd ?? pending.oldEnd) ?? start;
+    if (start === undefined) {
+      delete composer.dataset.anchorSide;
+      delete composer.dataset.anchorStart;
+      delete composer.dataset.anchorEnd;
+    } else {
+      composer.dataset.anchorSide = pending.side;
+      composer.dataset.anchorStart = String(start);
+      composer.dataset.anchorEnd = String(end);
+    }
+    if (pending.element) composer.dataset.anchorElement = pending.element;
+    else delete composer.dataset.anchorElement;
   };
   const closestBlock = (node) => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('[data-md-line]');
   const selectedBlocks = (range) => {
@@ -750,10 +880,8 @@
     }
     const composer = selected.section.querySelector('[data-selection-composer]');
     composer.hidden = false;
-    if (planMode && draft.newStart !== undefined) {
-      composer.dataset.anchorStart = String(draft.newStart);
-      layoutPlanRail(selected.section);
-    }
+    stampComposerAnchor(composer, draft);
+    scheduleRailLayout();
     composer.querySelector('[data-selection-quote]').textContent = highlight;
     const textarea = composer.querySelector('[data-selection-feedback]');
     textarea.value = '';
@@ -933,6 +1061,54 @@
 
   // Threads ------------------------------------------------------------------
   const threadHighlights = new Map();
+  // Cards change height at runtime (reply composers expand and collapse,
+  // resolved threads toggle between a compact row and full history); every
+  // such change announces itself on the affected card so layout code can
+  // react without polling.
+  const cardsResized = (element) => {
+    const card = element.closest('.thread-card, .agent-note, .carried-thread') ?? element;
+    card.dispatchEvent(new CustomEvent('marginalia:cards-resized', { bubbles: true }));
+  };
+  // Idle reply composers read as a one-line Reply… affordance; the full box
+  // appears while a draft is in progress and steps back when it holds nothing.
+  const expandReplyComposer = (textarea, focus) => {
+    const composer = textarea.closest('.reply-composer');
+    if (composer && composer.classList.contains('collapsed')) {
+      composer.classList.remove('collapsed');
+      cardsResized(composer);
+    }
+    if (focus) textarea.focus();
+  };
+  const collapseReplyComposer = (textarea) => {
+    const composer = textarea.closest('.reply-composer');
+    if (!composer || composer.classList.contains('collapsed') || textarea.value.trim()) return;
+    // Focus sitting in the composer (its own controls or the box itself)
+    // means it is still in use.
+    if (composer.contains(document.activeElement)) return;
+    composer.classList.add('collapsed');
+    cardsResized(composer);
+  };
+  document.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) return;
+    const affordance = event.target.closest('[data-composer-expand]');
+    const textarea = affordance ? affordance.closest('.reply-composer')?.querySelector('textarea') : undefined;
+    if (textarea) expandReplyComposer(textarea, true);
+  });
+  // The rail layout positions cards by measurement, so any card height change
+  // re-runs it: the marginalia:cards-resized listener plus the ResizeObserver
+  // backstop wired next to layoutRail handle every dispatch from here.
+  // The compact label naming what a thread anchors to: its diagram element or
+  // its line range (side-aware in code mode, plain lines in plan mode).
+  const anchorChipLabel = (thread) => {
+    const elementRef = (thread.carried && thread.carried.element) || thread.element;
+    if (elementRef) return elementRef.replace(/^node:/, '\u2b21 ').replace(/^edge:(.+)->(.+)$/, '$1 \u2192 $2');
+    const anchor = thread.carried && thread.carried.startLine !== undefined ? thread.carried : thread;
+    const start = anchor.startLine ?? (anchor.side === 'old' ? anchor.oldStart : anchor.newStart ?? anchor.oldStart);
+    if (start === undefined) return undefined;
+    const end = anchor.endLine ?? (anchor.side === 'old' ? anchor.oldEnd : anchor.newEnd ?? anchor.oldEnd) ?? start;
+    const side = planMode || anchor.side === 'both' || anchor.side === undefined ? 'lines' : anchor.side + ' lines';
+    return side + ' ' + start + (end !== start ? '\u2013' + end : '');
+  };
   const removeThread = (threadId) => {
     threads.delete(threadId);
     document.querySelector('[data-thread-card="' + threadId + '"]')?.remove();
@@ -944,7 +1120,7 @@
     }
     if (currentThreadId === threadId) currentThreadId = undefined;
     updateAggregates();
-    layoutPlanRails();
+    scheduleRailLayout();
   };
   // Queued (undelivered) reviewer messages stay editable until Pi sees them.
   const openTurnEditor = (entry, thread, turn, value, focus) => {
@@ -969,7 +1145,7 @@
     const closeEditor = () => {
       delete textarea.dataset.turnEditor;
       renderThread(threads.get(thread.id));
-      layoutPlanRails();
+      scheduleRailLayout();
     };
     textarea.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
@@ -1007,7 +1183,7 @@
     row.append(cancel, save);
     entry.append(author, textarea, row);
     if (focus) textarea.focus();
-    layoutPlanRails();
+    scheduleRailLayout();
   };
   const threadHost = (thread) => {
     if (thread.carried) return [...document.querySelectorAll('[data-carried-host]')].find((host) => host.dataset.carriedHost === thread.id);
@@ -1043,11 +1219,18 @@
       // is the thread's visual, so show its composer instead of an empty card.
       if (card) card.remove();
       const origin = [...(sectionForPath(thread.file)?.querySelectorAll('[data-commentary-composer]') ?? [])].find((element) => element.dataset.commentaryComposer === thread.commentaryId);
-      if (origin) origin.hidden = false;
-      layoutPlanRail(sectionForPath(thread.file));
+      if (origin) {
+        origin.hidden = false;
+        // A freshly restored composer starts idle again unless it still holds
+        // a draft.
+        const reply = origin.querySelector('textarea');
+        if (reply && !reply.value.trim()) origin.classList.add('collapsed');
+      }
+      scheduleRailLayout();
       return;
     }
     const previousReply = card?.querySelector('[data-thread-reply]');
+    const previousReplyState = card?.querySelector('[data-reply-state]')?.dataset.replyState;
     const previousDraft = previousReply?.value ?? '';
     const hadFocus = Boolean(previousReply) && document.activeElement === previousReply;
     const previousSelection = hadFocus ? [previousReply.selectionStart, previousReply.selectionEnd] : undefined;
@@ -1055,21 +1238,38 @@
     card?.querySelectorAll('[data-turn-editor]').forEach((editor) => {
       editorStates.set(Number(editor.dataset.turnEditor), { value: editor.value, focus: document.activeElement === editor });
     });
+    const freshCard = !card;
+    const wasResolved = card?.classList.contains('resolved') === true;
     if (!card) {
       card = document.createElement('article');
       card.className = 'thread-card';
       card.dataset.threadCard = thread.id;
-      const anchorLine = thread.newStart ?? thread.startLine;
-      if (planMode && thread.source === 'selection' && !thread.carried && anchorLine !== undefined) {
-        // Rail cards sit in anchor order so the margin layout can align each
-        // one beside its text; the composer stays last.
-        card.dataset.anchorStart = String(anchorLine);
+      // Cards wear their anchor so the rail layout can seat them beside the
+      // content they annotate; carried shells already carry the anchor.
+      const anchorStart = thread.startLine ?? (thread.side === 'old' ? thread.oldStart : thread.newStart ?? thread.oldStart);
+      const anchorEnd = thread.endLine ?? (thread.side === 'old' ? thread.oldEnd : thread.newEnd ?? thread.oldEnd) ?? anchorStart;
+      if (!thread.carried && anchorStart !== undefined) {
+        card.dataset.anchorStart = String(anchorStart);
+        card.dataset.anchorEnd = String(anchorEnd);
+        if (thread.side) card.dataset.anchorSide = thread.side;
+      }
+      if (!thread.carried && thread.element) card.dataset.anchorElement = thread.element;
+      const anchorLine = !thread.carried && anchorStart !== undefined ? anchorStart : undefined;
+      if (thread.source === 'selection' && !thread.carried && anchorLine !== undefined) {
+        // Rail cards sit in anchor order (both modes) so the layout can align
+        // each one beside its content; the composer stays last.
         const successor = [...host.children].find((sibling) => sibling !== card && (sibling.matches('[data-selection-composer]') || (sibling.matches('[data-thread-card]') && Number(sibling.dataset.anchorStart) > anchorLine)));
         host.insertBefore(card, successor ?? null);
       } else if (planMode && host.matches('.plan-rail')) {
         // Anchorless strays (orphaned commentary threads) still keep the
         // composer as the rail's last child.
         host.insertBefore(card, host.querySelector('[data-selection-composer]'));
+      } else if (!planMode && host.matches('[data-selection-threads]') && !thread.carried) {
+        // Code-mode anchorless cards lead the rail (before anchored ones,
+        // matching the alignment layout's top stack); anchored strays that
+        // land here still file in ascending start-line order.
+        const successor = [...host.children].find((sibling) => sibling.matches('[data-thread-card]') && (anchorLine === undefined ? sibling.dataset.anchorStart !== undefined : Number(sibling.dataset.anchorStart) > anchorLine));
+        host.insertBefore(card, successor ?? null);
       } else {
         host.append(card);
       }
@@ -1078,6 +1278,49 @@
     card.classList.toggle('awaiting', awaiting);
     card.classList.toggle('resolved', thread.status === 'resolved');
     card.replaceChildren();
+    // Resolved threads read as one compact row (anchor chip, first message
+    // truncated, resolved tick) with the full history behind a click on that
+    // row. detail is the card itself while the thread stays open.
+    let detail = card;
+    if (thread.status === 'resolved') {
+      detail = document.createElement('div');
+      detail.className = 'resolved-detail';
+      detail.hidden = card.dataset.resolvedOpen !== '1';
+      const summaryRow = document.createElement('button');
+      summaryRow.type = 'button';
+      summaryRow.className = 'resolved-summary';
+      summaryRow.dataset.resolvedToggle = thread.id;
+      summaryRow.title = 'Show or hide the resolved conversation';
+      const chipLabel = anchorChipLabel(thread);
+      if (chipLabel) {
+        const chip = document.createElement('span');
+        chip.className = 'anchor-chip';
+        chip.textContent = chipLabel;
+        summaryRow.append(chip);
+      }
+      // Same first turn the expanded card shows: commentary threads skip Pi's
+      // note, which already renders in the agent-note above the card / except
+      // when the note was resolved without a reply, where the note itself is
+      // the only text the compact row can carry.
+      const firstBody = (thread.source === 'commentary' && !thread.carried && !thread.heldFrom ? thread.turns[1] ?? thread.turns[0] : thread.turns[0])?.body ?? '';
+      const first = document.createElement('span');
+      first.className = 'resolved-first';
+      first.textContent = firstBody.length > 80 ? firstBody.slice(0, 80) + '\u2026' : firstBody;
+      const tick = document.createElement('span');
+      tick.className = 'resolved-tick';
+      tick.textContent = '\u2713';
+      summaryRow.append(first, tick);
+      summaryRow.addEventListener('click', () => {
+        const open = card.dataset.resolvedOpen === '1';
+        if (open) delete card.dataset.resolvedOpen;
+        else card.dataset.resolvedOpen = '1';
+        detail.hidden = open;
+        cardsResized(card);
+      });
+      card.append(summaryRow, detail);
+    } else {
+      delete card.dataset.resolvedOpen;
+    }
     const header = document.createElement('div');
     header.className = 'thread-card-header';
     const status = document.createElement('span');
@@ -1098,7 +1341,7 @@
     resolve.addEventListener('click', () => resolveThread(thread.id, thread.status !== 'resolved'));
     actions.append(resolve);
     header.append(status, actions);
-    card.append(header);
+    detail.append(header);
     const chipRef = (thread.carried && thread.carried.element) || thread.element;
     if (chipRef) {
       const chip = document.createElement('span');
@@ -1110,7 +1353,7 @@
       const quote = document.createElement('div');
       quote.className = 'user-comment-quote';
       quote.textContent = thread.highlight;
-      card.append(quote);
+      detail.append(quote);
     }
     // Held commentary threads keep Pi's note turn visible: the originating
     // commentary card does not exist in this round.
@@ -1175,7 +1418,7 @@
         tools.append(edit, del, sendNow);
         entry.append(tools);
       }
-      card.append(entry);
+      detail.append(entry);
     }
     if (thread.piProposedResolve && thread.status === 'open') {
       const proposal = document.createElement('div');
@@ -1187,10 +1430,19 @@
       accept.textContent = 'Accept & resolve';
       accept.addEventListener('click', () => resolveThread(thread.id, true));
       proposal.append(accept);
-      card.append(proposal);
+      detail.append(proposal);
     }
     if (thread.status === 'open') {
       const composer = document.createElement('div');
+      composer.className = 'reply-composer';
+      // Idle by default: only a card whose draft is in progress (text held or
+      // box focused) keeps the full composer through a re-render.
+      if (!previousDraft.trim() && !hadFocus) composer.classList.add('collapsed');
+      const affordance = document.createElement('button');
+      affordance.type = 'button';
+      affordance.className = 'reply-affordance';
+      affordance.dataset.composerExpand = '1';
+      affordance.textContent = 'Reply\u2026';
       const textarea = document.createElement('textarea');
       textarea.maxLength = 20000;
       textarea.placeholder = 'Reply to Pi';
@@ -1204,7 +1456,14 @@
       textarea.addEventListener('input', () => {
         send.disabled = !textarea.value.trim();
         saveDraft('thread:' + thread.id, textarea.value);
+        // A restored draft arrives through a synthetic input event; the box it
+        // fills must be visible.
+        if (textarea.value.trim()) expandReplyComposer(textarea);
       });
+      // Collapsing back happens on blur only when the box is empty; a draft in
+      // progress keeps its composer open. Deferred one tick so a click that
+      // caused the blur lands before the collapse shifts layout under it.
+      textarea.addEventListener('blur', () => window.setTimeout(() => collapseReplyComposer(textarea), 0));
       textarea.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
         event.preventDefault();
@@ -1237,12 +1496,38 @@
       const sendRow = document.createElement('div');
       sendRow.className = 'composer-actions';
       sendRow.append(send);
-      composer.append(textarea, sendRow);
-      card.append(composer);
+      composer.append(affordance, textarea, sendRow);
+      detail.append(composer);
       if (hadFocus) {
         textarea.focus();
         try { textarea.setSelectionRange(previousSelection[0], previousSelection[1]); } catch {}
       }
+    }
+    // Reply-state line: what Pi is doing with the thread's latest delivered
+    // reviewer message. sent = handed off but queued until Pi settles;
+    // working = in Pi's context with a turn in progress; seen = the turn ended
+    // without a reply here. A Pi reply clears the state server-side, so
+    // replied threads (and undelivered drafts) render nothing. Resolved
+    // threads render no status line either — resolving closes the exchange,
+    // so the line stays gated on open (it reappears on reopen because
+    // renderThread re-runs on the status flip).
+    if (thread.status === 'open' && ['sent', 'working', 'seen'].includes(thread.replyState)) {
+      const replyState = document.createElement('div');
+      replyState.className = 'reply-state';
+      replyState.dataset.replyState = thread.replyState;
+      const icon = document.createElement('span');
+      icon.className = thread.replyState === 'seen' ? 'reply-tick' : 'reply-spinner';
+      if (thread.replyState === 'seen') icon.textContent = '\u2713';
+      replyState.append(icon, document.createTextNode(thread.replyState === 'seen' ? 'Seen' : thread.replyState === 'sent' ? 'Sent' : 'Pi is working\u2026'));
+      card.append(replyState);
+    }
+    // Flipping between open and resolved swaps the full history for the
+    // compact row (or back), changing the card's height.
+    if (!freshCard && wasResolved !== (thread.status === 'resolved')) cardsResized(card);
+    // The status line appearing, disappearing, or changing alters the card's
+    // height; features that position against live card heights listen for this.
+    if (card.querySelector('[data-reply-state]')?.dataset.replyState !== previousReplyState) {
+      cardsResized(card);
     }
     if (thread.source === 'commentary' && !thread.carried && !thread.heldFrom) {
       const section = sectionForPath(thread.file);
@@ -1320,7 +1605,7 @@
     threads.set(thread.id, thread);
     renderThread(thread);
     updateAggregates();
-    if (planMode) layoutPlanRail(sectionForPath(thread.file));
+    scheduleRailLayout();
   };
   const flashTarget = (element) => {
     if (!element) return;
@@ -1357,6 +1642,9 @@
       const section = sectionForPath(thread.file);
       target = [...(section?.querySelectorAll('.agent-note') ?? [])].find((note) => note.dataset.commentaryId === thread.commentaryId);
     }
+    // The revealed card wins alignment priority so it lands exactly beside
+    // the anchor the scroll below brings into view.
+    if (target) setPriorityRailItem(target);
     flashTarget(target);
     // Navigation lands the CODE on the thread's lines, not just the card: the
     // impacted area scrolls to the top band and flashes, exactly like an
@@ -1429,7 +1717,9 @@
     // one must hit the resolved hint, not start an unrelated new thread.
     if (!reply && thread.source === 'overview' && thread.status === 'open') reply = document.querySelector('[data-overview-feedback]');
     if (reply && !reply.closest('[hidden]')) {
-      reply.focus();
+      // Keyboard reply navigation targets the box itself, so a collapsed
+      // composer opens on the way in.
+      expandReplyComposer(reply, true);
       setStatus('Replying — Esc returns to navigation.');
     } else setStatus(thread.status === 'resolved' ? 'The current thread is resolved — reopen it to reply.' : 'No reply box available for the current thread.');
   };
@@ -1457,7 +1747,14 @@
     textarea.addEventListener('input', () => {
       button.disabled = !textarea.value.trim();
       saveDraft(commentaryDraftName, textarea.value);
+      // A restored draft arrives through a synthetic input event; the box it
+      // fills must be visible.
+      if (textarea.value.trim()) expandReplyComposer(textarea);
     });
+    // Collapsing back happens on blur only when the box is empty; a draft in
+    // progress keeps its composer open. Deferred one tick so a click that
+    // caused the blur lands before the collapse shifts layout under it.
+    textarea.addEventListener('blur', () => window.setTimeout(() => collapseReplyComposer(textarea), 0));
     textarea.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' || (!event.metaKey && !event.ctrlKey)) return;
       event.preventDefault();
@@ -1671,11 +1968,16 @@
     });
   });
   inbox?.addEventListener('click', navigateNext);
+  // Clicking anywhere inside a rail card makes it the alignment priority.
+  reviewRoot.addEventListener('click', (event) => {
+    if (event.target instanceof Element) setPriorityRailItem(event.target);
+  });
   shortcutsOverlay?.addEventListener('click', (event) => {
     if (event.target === shortcutsOverlay) shortcutsOverlay.hidden = true;
   });
   document.addEventListener('focusin', (event) => {
     if (!(event.target instanceof HTMLElement)) return;
+    setPriorityRailItem(event.target);
     const card = event.target.closest('[data-thread-card]');
     if (card) {
       currentThreadId = card.dataset.threadCard;
@@ -1912,7 +2214,7 @@
     });
     updateAggregates();
     restoreDrafts();
-    layoutPlanRails();
+    scheduleRailLayout();
     applyDeepLink();
   });
   events.addEventListener('thread', (event) => {

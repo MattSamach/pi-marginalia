@@ -302,6 +302,7 @@ try {
 		assert.doesNotMatch(carryHtml, /data-outdated-threads/, "No thread with a live home lands in the outdated group.");
 	}
 	assert.match(carryHtml, new RegExp(`data-carried-thread="${carriedRecords[1].id}"[^>]*data-anchor-side="new" data-anchor-start="1"`), "Anchored carried shells must expose their jump anchor.");
+	assert.match(carryHtml, new RegExp(`data-carried-thread="${carriedRecords[1].id}"[^]*?class="agent-note-anchor">new lines 1–2<span class="anchor-preview">A marker</span></button>`), "Carried anchor chips quote the origin selection's highlight.");
 	assert.match(carryHtml, new RegExp(`href="/round/1#thread=${carriedRecords[1].id}"`), "Carried shells must deep-link to their origin round.");
 	{
 		// A file-less response to a FILE-anchored thread is genuinely outdated —
@@ -316,6 +317,19 @@ try {
 	}
 	assert.match(carryHtml, /Resolved in earlier rounds \(1\)/, "Prior-round resolutions collect in the overview archive.");
 	assert.match(carryHtml, /href="\/round\/1#thread=abc-t9"/);
+	{
+		// Anchor chips carry a ~40-character preview of the anchored content:
+		// longer highlights truncate with an ellipsis, multi-line ones collapse.
+		const previewHtml = renderReviewHtml(ordered, "preview-nonce", { round: 2, currentRound: 2, phase: "reviewing" }, {
+			carried: [
+				{ id: "prev-t1", source: "selection", file: "untracked.txt", highlight: "y".repeat(60), carried: { fromRound: 1, resolution: "addressed", placement: "anchored", side: "new", startLine: 1, endLine: 2 }, turns: [] },
+				{ id: "prev-t2", source: "selection", file: "untracked.txt", highlight: "alpha\n   beta", carried: { fromRound: 1, resolution: "declined", placement: "anchored", side: "new", startLine: 1, endLine: 1 }, turns: [] },
+			],
+			archive: [],
+		});
+		assert.match(previewHtml, /<span class="anchor-preview">y{40}…<\/span>/, "Anchor previews truncate to 40 characters with an ellipsis.");
+		assert.match(previewHtml, /<span class="anchor-preview">alpha beta<\/span>/, "Multi-line highlights collapse to a single preview line.");
+	}
 
 	const quietStore = createThreadStore(ordered);
 	const quietThread = quietStore.postUserTurn({ source: "overview", body: "First quiet.", quiet: true }).thread;
@@ -523,6 +537,9 @@ try {
 	assert.match(html, /data-selection-threads/, "Each file should host selection comment threads.");
 	assert.match(html, /data-commentary-thread="new-file"/, "Each commentary card should host its live thread.");
 	assert.match(html, /data-commentary-resolve="new-file"/, "Commentary cards should offer resolve without a reply.");
+	assert.match(html, /<div class="reply-composer collapsed" data-commentary-composer="new-file"><button type="button" class="reply-affordance" data-composer-expand>Reply…<\/button>/, "Commentary composers render collapsed behind a Reply… affordance line.");
+	assert.match(html, /new lines 1–2<span class="anchor-preview">new text<\/span>/, "Line-anchored commentary chips quote the first anchored line.");
+	assert.doesNotMatch(html, /File note<span class="anchor-preview">/, "Anchorless notes carry no content preview.");
 	assert.match(html, /data-shortcuts-overlay/, "The shortcuts guide overlay should be rendered.");
 	assert.match(html, /<details class="reference-files"><summary>Reference files \(3\)/, "Reference files should be grouped in a collapsed sidebar section.");
 	assert.match(html, /data-reference-unread/, "The reference group summary should carry an awaiting-you badge.");
@@ -777,6 +794,76 @@ try {
 		assert.equal((await fetch(`${origin}/__pi_code_review_finish__`, request)).status, 200, "A failed handoff must not lock future finishes.");
 	} finally {
 		await flakyServer.close();
+	}
+
+	// Reply-state lifecycle: the per-thread status line tracking what Pi is
+	// doing with the thread's latest delivered reviewer message.
+	let replyStateQueued = false;
+	let replyStateFail = false;
+	let replyStateTurnActive = true;
+	const replyStateServer = await createCodeReviewServer(ordered, {
+		isTurnActive: () => replyStateTurnActive,
+		onThreadPost: async () => {
+			if (replyStateFail) {
+				replyStateFail = false;
+				throw new Error("delivery boom");
+			}
+			return { queued: replyStateQueued };
+		},
+		onFinishPass: async () => ({ stale: false, queued: true }),
+	});
+	try {
+		const origin = new URL(replyStateServer.url).origin;
+		const bootstrap = await fetch(replyStateServer.url, { redirect: "manual" });
+		const cookie = (bootstrap.headers.get("set-cookie") ?? "").split(";", 1)[0];
+		const jsonRequest = (payload) => ({ method: "POST", headers: { cookie, "content-type": "application/json", origin }, body: JSON.stringify(payload) });
+		const immediate = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ source: "overview", body: "Immediate live post." }))).json();
+		assert.equal(immediate.thread.replyState, "working", "An immediately delivered live post reports Pi working on it.");
+		assert.equal(replyStateServer.postPiReply(immediate.thread.id, "Answered.", false).replyState, undefined, "Pi's reply clears the reply state \u2014 the reply itself is the indicator.");
+		replyStateQueued = true;
+		const queuedLive = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ source: "overview", body: "Busy live post." }))).json();
+		assert.equal(queuedLive.thread.replyState, "sent", "A live post queued behind a busy Pi reports sent.");
+		const quietDraft = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ source: "overview", body: "Quiet draft.", quiet: true }))).json();
+		assert.equal(quietDraft.thread.replyState, undefined, "Quiet drafts show no reply state until delivered.");
+		replyStateServer.markQueueDelivered();
+		assert.equal(replyStateServer.getThread(queuedLive.thread.id).replyState, "working", "The settle flush moves sent threads to working.");
+		assert.equal(replyStateServer.getThread(quietDraft.thread.id).replyState, undefined, "The settle flush must not invent state for undelivered drafts.");
+		replyStateServer.markTurnEnd();
+		assert.equal(replyStateServer.getThread(queuedLive.thread.id).replyState, "seen", "A turn that ends without a reply marks the thread seen.");
+		assert.equal(replyStateServer.getThread(immediate.thread.id).replyState, undefined, "A replied thread never regresses to seen.");
+		replyStateQueued = false;
+		const reRaised = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ threadId: queuedLive.thread.id, body: "Follow-up." }))).json();
+		assert.equal(reRaised.thread.replyState, "working", "A new live message restarts the reply-state cycle.");
+		replyStateFail = true;
+		const failedDelivery = await (await fetch(`${origin}/__pi_code_review_post__`, jsonRequest({ threadId: queuedLive.thread.id, body: "Doomed follow-up." }))).json();
+		assert.equal(failedDelivery.deliveryFailed, true);
+		assert.equal(failedDelivery.thread.replyState, undefined, "A failed delivery clears the reply state \u2014 requeued messages track no delivery.");
+		const sendNow = await (await fetch(`${origin}/__pi_code_review_send__`, jsonRequest({ threadId: queuedLive.thread.id }))).json();
+		assert.equal(sendNow.thread.replyState, "working", "Send now delivers the backlog and reports Pi working.");
+		// Restart honesty: an SSE (re)connect with no turn in progress repairs a
+		// stranded working state to seen, and the repair persists.
+		replyStateTurnActive = false;
+		const initEvents = await fetch(`${origin}/__pi_code_review_events__`, { headers: { cookie } });
+		const initReader = initEvents.body.getReader();
+		const initDecoder = new TextDecoder();
+		let initBuffer = "";
+		const initDeadline = Date.now() + 5_000;
+		while (!initBuffer.includes("event: init") || !initBuffer.includes('"replyState":"seen"')) {
+			if (Date.now() > initDeadline) throw new Error("Timed out waiting for the repaired init frame.");
+			const { value, done } = await initReader.read();
+			if (done) throw new Error("SSE stream ended early.");
+			initBuffer += initDecoder.decode(value, { stream: true });
+		}
+		await initReader.cancel();
+		replyStateTurnActive = true;
+		assert.equal(replyStateServer.getThread(queuedLive.thread.id).replyState, "seen", "The reconnect repair persists; a later unrelated turn cannot flip seen back to working.");
+		assert.equal((await fetch(`${origin}/__pi_code_review_finish__`, jsonRequest({}))).status, 200);
+		assert.equal(replyStateServer.getThread(quietDraft.thread.id).replyState, "sent", "A queued finish pass hands its delivered threads to Pi as sent.");
+		assert.equal(replyStateServer.getThread(queuedLive.thread.id).replyState, "seen", "The pass delivers nothing new for already-delivered unanswered threads; they stay seen.");
+		replyStateServer.markQueueDelivered();
+		assert.equal(replyStateServer.getThread(quietDraft.thread.id).replyState, "working", "The flushed pass moves its threads to working.");
+	} finally {
+		await replyStateServer.close();
 	}
 
 	const altId = (id, index) => `${id.slice(0, index)}${id[index] === "0" ? "1" : "0"}${id.slice(index + 1)}`;
@@ -1322,6 +1409,7 @@ try {
 	assert.doesNotMatch(planHtml, /<input[^>]*data-viewed-toggle|<div class="viewed-progress"|<span class="viewed-check"|<span class="badge stale-badge"|<p class="approve-stale-warning"/, "Plans ship none of the diff-only machinery, dormant or otherwise.");
 	assert.match(planHtml, /<button type="button" data-approve-confirm>Approve plan<\/button>/, "The confirm button speaks plan language.");
 	assert.match(planHtml, /class="agent-note-anchor"[^>]*>lines 4–5</, "Plan commentary anchors drop the diff-side vocabulary.");
+	assert.match(planHtml, /class="agent-note-anchor"[^>]*>lines 4–5<span class="anchor-preview">- fast<\/span></, "Plan chips quote the first anchored source line from the section markdown.");
 	assert.match(planHtml, /3 sections · 13 lines/, "Approve stats describe the document.");
 	assert.match(formatReviewPassXml(plan, planStore.list(), planStore.summary(), false, undefined, 1), /^<plan-review-pass [^>]*>[\s\S]*<\/plan-review-pass>$/, "Plan passes speak their own root tag.");
 	assert.match(formatReviewApprovedXml(plan, 1, "Ship it", false), /^<plan-review-approved [\s\S]*<approval-note><!\[CDATA\[Ship it\]\]><\/approval-note>[\s\S]*<\/plan-review-approved>$/, "Plan approval carries an approval note.");
@@ -1582,6 +1670,12 @@ try {
 			await page.waitForFunction(() => document.querySelector('[data-review-file="0"]')?.hidden === false);
 			await page.$eval('[data-review-file="0"] .agent-note-anchor:not(:disabled)', (button) => button.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
 			assert.equal(await page.evaluate(() => document.querySelectorAll('[data-review-file="0"] tr.note-target').length), 2, "Hovering a note tints exactly its anchored rows.");
+			assert.equal(await page.evaluate(() => {
+				const row = document.querySelector('[data-review-file="0"] tr.note-target');
+				const tint = getComputedStyle(row.cells[1]).boxShadow;
+				const edge = getComputedStyle(row.cells[0]).boxShadow;
+				return tint.includes("999px") && edge.split("inset").length === 3;
+			}), true, "Hovered anchor rows carry a background tint plus an accent left border.");
 			await page.$eval('[data-review-file="0"] .agent-note-anchor:not(:disabled)', (button) => button.click());
 			assert.equal(await page.evaluate(() => document.querySelectorAll('[data-review-file="0"] tr.anchor-flash').length), 2, "Clicking a note anchor flashes its lines.");
 			await page.keyboard.press("j");
@@ -1609,6 +1703,11 @@ try {
 			assert.equal(await page.$eval(`[data-review-file="${referenceIndex}"]`, (section) => section.dataset.reviewMode), "reference", "Reference files should remain directly inspectable.");
 			assert.equal(await page.$eval(`[data-review-file="${referenceIndex}"] .file-header-side > span`, (label) => label.textContent), "Reference file");
 			await page.click('[data-file-nav="0"]');
+			// Cards announce reply-state height changes so rail layout can track them.
+			await page.evaluate(() => {
+				window.__cardsResized = [];
+				document.addEventListener("marginalia:cards-resized", (event) => window.__cardsResized.push(event.target.dataset.threadCard));
+			});
 			await page.evaluate(() => {
 				const code = document.querySelector('[data-review-file="0"] .diff-add .diff-code span');
 				const range = document.createRange();
@@ -1630,8 +1729,13 @@ try {
 			assert.equal(browserPosts[0].thread.side, "new");
 			assert.equal(browserPosts[0].turn.body, "Please rename this.");
 			const liveThreadId = browserPosts[0].thread.id;
+			await page.waitForFunction((id) => document.querySelector(`[data-thread-card="${id}"] [data-reply-state]`), {}, liveThreadId);
+			assert.equal(await page.$eval(`[data-thread-card="${liveThreadId}"] [data-reply-state]`, (line) => line.dataset.replyState + "|" + line.textContent), "working|Pi is working\u2026", "A delivered live comment shows the working status line at the bottom of its card.");
+			assert.ok(await page.evaluate((id) => window.__cardsResized.includes(id), liveThreadId), "The appearing status line dispatches marginalia:cards-resized on its card.");
 			browserServer.postPiReply(liveThreadId, "Because generated names collide.", true);
 			await page.waitForFunction(() => document.querySelector('.thread-card.awaiting .thread-turn.turn-pi'));
+			assert.equal(await page.$(`[data-thread-card="${liveThreadId}"] [data-reply-state]`), null, "Pi's reply clears the status line \u2014 the reply itself is the indicator.");
+			assert.ok(await page.evaluate((id) => window.__cardsResized.filter((card) => card === id).length >= 2, liveThreadId), "The disappearing status line dispatches marginalia:cards-resized again.");
 			assert.equal(await page.$eval('[data-inbox]', (strip) => strip.hidden), false, "Pi replies must surface the awaiting-you inbox strip.");
 			assert.match(await page.$eval('[data-inbox]', (strip) => strip.textContent), /^3 awaiting you/);
 			assert.equal(await page.$eval('[data-file-nav="0"] [data-unread-badge]', (badge) => badge.hidden), false, "Sidebar files must show awaiting-you thread counts.");
@@ -1653,6 +1757,8 @@ try {
 			assert.match(await page.$eval('[data-inbox]', (strip) => strip.textContent), /^2 awaiting you/, "Unread notes keep the inbox active after a thread resolution.");
 			await page.keyboard.press("e");
 			assert.match(await page.$eval('[data-global-status]', (statusEl) => statusEl.textContent), /already resolved/, "Resolving an already-resolved current thread is a safe no-op.");
+			// Idle composers collapse behind their Reply… affordance; expand first.
+			await page.$eval('[data-commentary-composer="new-file"] [data-composer-expand]', (button) => button.click());
 			await page.type('[data-review-file="0"] [data-commentary-reply="new-file"]', "Why not generate this?");
 			await page.click('[data-commentary-post="new-file"]');
 			await page.waitForFunction(() => document.querySelector('[data-commentary-thread="new-file"] .thread-card'));
@@ -1661,19 +1767,29 @@ try {
 			const commentaryThreadId = browserPosts.find((post) => post.thread.source === "commentary").thread.id;
 			browserServer.postPiReply(commentaryThreadId, "It stays handwritten for clarity.", false);
 			await page.waitForFunction((id) => document.querySelector(`[data-thread-card="${id}"] .thread-turn.turn-pi`), {}, commentaryThreadId);
+			await page.$eval(`[data-thread-card="${commentaryThreadId}"] [data-composer-expand]`, (button) => button.click());
 			await page.type(`[data-thread-card="${commentaryThreadId}"] [data-thread-reply]`, "Good, keep it handwritten.");
 			await page.click(`[data-thread-card="${commentaryThreadId}"] [data-thread-send]`);
 			await page.waitForFunction((id) => document.querySelectorAll(`[data-thread-card="${id}"] .thread-turn`).length === 3, {}, commentaryThreadId);
 			assert.equal(await page.$eval(`[data-thread-card="${commentaryThreadId}"] [data-thread-reply]`, (textarea) => textarea.value), "", "Sending a thread reply must clear its draft.");
 			assert.match(await page.$eval('[data-inbox]', (strip) => strip.textContent), /^1 awaiting you/, "After replying, only the unread note remains awaiting.");
+			// Pi's turn ends without answering the fresh reply: the honest terminal
+			// state is a subtle Seen tick, never a stranded spinner.
+			browserServer.markTurnEnd();
+			await page.waitForFunction((id) => document.querySelector(`[data-thread-card="${id}"] [data-reply-state="seen"]`), {}, commentaryThreadId);
+			assert.equal(await page.$eval(`[data-thread-card="${commentaryThreadId}"] [data-reply-state]`, (line) => line.textContent), "\u2713Seen", "A turn that ends without a reply renders the Seen tick line.");
+			await page.$eval('[data-commentary-composer="second-note"] [data-composer-expand]', (button) => button.click());
 			await page.click('[data-commentary-resolve="second-note"]');
 			await page.waitForFunction(() => document.querySelector('[data-commentary-thread="second-note"] .thread-card.resolved'));
 			assert.equal(browserPosts.length, 3, "Resolving a note must not message Pi.");
 			assert.equal(await page.$eval('[data-inbox]', (strip) => strip.hidden), true, "Resolving the last unread note clears the inbox.");
+			// The resolved card is compact; its Reopen control lives behind the toggle.
+			await page.click('[data-commentary-thread="second-note"] [data-resolved-toggle]');
 			await page.click('[data-commentary-thread="second-note"] [data-thread-resolve]');
 			await page.waitForFunction(() => !document.querySelector('[data-commentary-thread="second-note"] .thread-card'));
-			assert.equal(await page.$eval('[data-commentary-composer="second-note"]', (composer) => composer.hidden), false, "Reopening an untouched note removes its card and restores the composer.");
+			assert.equal(await page.$eval('[data-commentary-composer="second-note"]', (composer) => composer.hidden === false && composer.classList.contains("collapsed")), true, "Reopening an untouched note removes its card and restores the composer collapsed.");
 			assert.match(await page.$eval('[data-inbox]', (strip) => strip.textContent), /^1 awaiting you/, "A reopened note awaits the reviewer again.");
+			await page.$eval('[data-commentary-composer="second-note"] [data-composer-expand]', (button) => button.click());
 			await page.click('[data-commentary-resolve="second-note"]');
 			await page.waitForFunction(() => document.querySelector('[data-commentary-thread="second-note"] .thread-card.resolved'));
 			assert.equal(await page.$eval('[data-inbox]', (strip) => strip.hidden), true, "Re-resolving the note clears the inbox again.");
@@ -1870,6 +1986,7 @@ try {
 				assert.equal(await plainPage.$eval("[data-finish-overlay]", (overlay) => overlay.hidden), true, "A composer ⇧⌘⏎ quiet-adds only — the textarea guard must keep it from opening the send modal.");
 				assert.match(await plainPage.$eval(".thread-card.queued .thread-status", (label) => label.textContent), /Queued for round/);
 				assert.equal(await plainPage.$eval("[data-finish]", (button) => button.textContent), "Send round to Pi (1 to send)", "The send button must count queued threads.");
+				await plainPage.$eval(".thread-card.queued [data-composer-expand]", (button) => button.click());
 				await plainPage.type(".thread-card.queued [data-thread-reply]", "Answer now please.");
 				await plainPage.click(".thread-card.queued [data-thread-send]");
 				await plainPage.waitForFunction(() => !document.querySelector(".thread-card.queued"));
@@ -1879,12 +1996,14 @@ try {
 				await plainPage.$eval(".thread-card [data-thread-reply]", (textarea) => {
 					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
 				});
+				await plainPage.$eval(".thread-card [data-composer-expand]", (button) => button.click());
 				await plainPage.type(".thread-card [data-thread-reply]", "Mouse follow-up.");
 				await plainPage.click(".thread-card [data-thread-send]");
 				await plainPage.waitForFunction(() => document.querySelectorAll(".thread-card .thread-turn").length >= 3);
 				assert.equal(plainDeliveries.length, 2, "The mouse click must deliver immediately.");
 				assert.equal(plainDeliveries[1].length, 1, "A discarded quiet keystroke must not leak into a later mouse click.");
 				assert.equal(await plainPage.$(".thread-card.queued"), null, "Mouse clicks always post live.");
+				await plainPage.$eval(".thread-card [data-composer-expand]", (button) => button.click());
 				await plainPage.type(".thread-card [data-thread-reply]", "Pending tail.");
 				await plainPage.$eval(".thread-card [data-thread-reply]", (textarea) => {
 					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
@@ -1921,6 +2040,7 @@ try {
 					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
 				});
 				await plainPage.waitForFunction(() => document.querySelector(".thread-card.queued [data-turn-edit]"));
+				await plainPage.$eval(".thread-card.queued [data-composer-expand]", (button) => button.click());
 				await plainPage.type(".thread-card.queued [data-thread-reply]", "Second nit.");
 				await plainPage.$eval(".thread-card.queued [data-thread-reply]", (textarea) => {
 					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
@@ -1977,9 +2097,11 @@ try {
 					document.querySelector(`[data-file-nav="${section.dataset.reviewFile}"]`).click();
 				});
 				await plainPage.waitForFunction(() => !document.querySelector(".thread-card [data-thread-reply]").closest("[data-review-file]").hidden);
+				await plainPage.$eval(".thread-card [data-composer-expand]", (button) => button.click());
 				await plainPage.type(".thread-card [data-thread-reply]", "persisted draft reply");
 				await plainPage.reload({ waitUntil: "domcontentloaded" });
 				await plainPage.waitForFunction(() => document.querySelector(".thread-card [data-thread-reply]")?.value === "persisted draft reply", {});
+				assert.equal(await plainPage.$eval(".thread-card [data-thread-reply]", (textarea) => textarea.closest(".reply-composer").classList.contains("collapsed")), false, "A persisted reply draft auto-expands its composer on restore.");
 				await plainPage.$eval(".thread-card [data-thread-reply]", (textarea) => {
 					textarea.value = "";
 					textarea.dispatchEvent(new Event("input", { bubbles: true }));
@@ -2089,7 +2211,7 @@ try {
 					document.querySelector(`[data-file-nav="${section.dataset.reviewFile}"]`).click();
 				});
 				await plainPage.waitForFunction(() => !document.querySelector(".thread-card [data-thread-reply]").closest("[data-review-file]").hidden);
-				await plainPage.$eval(".thread-card [data-thread-reply]", (textarea) => textarea.focus());
+				await plainPage.$eval(".thread-card [data-composer-expand]", (button) => button.click());
 				await plainPage.keyboard.press("Escape");
 				await plainPage.waitForFunction(() => document.activeElement?.tagName !== "TEXTAREA");
 				await plainPage.keyboard.press("]");
@@ -2126,6 +2248,7 @@ try {
 				await plainPage.waitForFunction(() => document.querySelector(".thread-card.queued"));
 				assert.equal(await plainPage.$eval(".thread-card.queued .md strong", (strong) => strong.textContent), "blocker", "Thread turns render markdown emphasis.");
 				assert.equal(await plainPage.$eval(".thread-card.queued .md code", (code) => code.textContent), "x < y", "Code spans keep their literal escaped content.");
+				await plainPage.$eval(".thread-card.queued [data-composer-expand]", (button) => button.click());
 				await plainPage.type(".thread-card.queued [data-thread-reply]", "probe <img src=x onerror=alert(1)>");
 				await plainPage.$eval(".thread-card.queued [data-thread-reply]", (textarea) => {
 					textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
@@ -2336,20 +2459,24 @@ try {
 				await planPage.waitForFunction(() => document.querySelector(".thread-card"), { polling: 100 });
 				// Margin-note invariants in a congested rail (everything anchors at
 				// line 4): items never float above their text and collisions push
-				// down instead of overlapping. Exact alignment is pinned separately
-				// on an uncongested fixture below.
-				assert.equal(await planPage.evaluate(() => {
+				// down instead of overlapping. The layout coalesces on an animation
+				// frame, so the check polls. Exact alignment is pinned separately on
+				// an uncongested fixture below.
+				const congestedRail = `(() => {
 					const note = document.querySelector('[data-path="goals-b"] .plan-rail .agent-note[data-anchor-start]');
 					const card = document.querySelector('[data-path="goals-b"] .plan-rail .thread-card');
 					const block = document.querySelector('[data-path="goals-b"] [data-md-line="4"]');
 					return note.getBoundingClientRect().top >= block.getBoundingClientRect().top - 1
 						&& card.getBoundingClientRect().top >= note.getBoundingClientRect().bottom;
-				}), true, "Rail items never float above their anchor and never overlap.");
+				})()`;
+				await planPage.waitForFunction(congestedRail, { polling: 100 });
+				assert.equal(await planPage.evaluate(congestedRail), true, "Rail items never float above their anchor and never overlap.");
 				assert.deepEqual(
 					[planPosts[0].file, planPosts[0].side, planPosts[0].newStart, planPosts[0].newEnd, planPosts[0].highlight],
 					["goals-b", "new", 4, 4, "fast"],
 					"Plan selection threads anchor on the block's absolute source lines.",
 				);
+				await planPage.$eval('[data-commentary-composer="g1"] [data-composer-expand]', (button) => button.click());
 				await planPage.type('[data-path="goals-b"] [data-commentary-reply="g1"]', "Agreed, keep the note.");
 				await planPage.$eval('[data-path="goals-b"] [data-commentary-post="g1"]', (button) => button.click());
 				await planPage.waitForFunction(() => document.querySelector('[data-commentary-thread="g1"] .thread-card'), { polling: 100 });
@@ -2363,8 +2490,17 @@ try {
 				// Note↔text linkage: hover ties both directions; the anchor click rings.
 				await planPage.evaluate(() => document.querySelector('.agent-note[data-anchor-start] .agent-note-anchor').dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
 				assert.equal(await planPage.evaluate(() => [...document.querySelectorAll(".note-target")].map((block) => block.dataset.mdLine).join(",")), "4,5", "Hovering a note tints exactly its anchored blocks.");
+				assert.match(await planPage.evaluate(() => getComputedStyle(document.querySelector(".plan-doc .note-target")).boxShadow), /inset/, "Hovered plan blocks carry the accent left-border treatment.");
 				await planPage.evaluate(() => document.querySelector('[data-path="goals-b"] [data-md-line="4"]').dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
 				assert.equal(await planPage.evaluate(() => document.querySelectorAll(".note-target").length === 0 && document.querySelector('.agent-note[data-commentary-id="g1"]').classList.contains("note-hover")), true, "Hovering a block outlines the notes that reference it.");
+				assert.equal(await planPage.evaluate(() => {
+					const probe = document.createElement("span");
+					probe.style.color = "var(--accent)";
+					document.body.append(probe);
+					const accent = getComputedStyle(probe).color;
+					probe.remove();
+					return getComputedStyle(document.querySelector(".agent-note.note-hover")).borderTopColor === accent;
+				}), true, "Hovering anchored content tints the referencing card's border with the accent.");
 				await planPage.evaluate(() => document.querySelector('.agent-note[data-anchor-start] .agent-note-anchor').click());
 				await planPage.waitForFunction(() => document.querySelector('[data-md-line="4"].nav-cursor'), { polling: 100 });
 				await planPage.waitForFunction(() => {
@@ -2494,9 +2630,14 @@ try {
 
 			// Margin-note exact alignment on an uncongested rail: a comment on a
 			// mid-document block sits beside that block, not at the rail top; a
-			// second comment just below collides and pushes down.
+			// colliding neighbor pushes down past the minimum gap; far-apart
+			// comments keep the same vertical separation as their anchors; a card
+			// that grows at runtime re-seats its neighbor; and the card being
+			// replied to wins exact alignment while its neighbor yields upward.
+			// The layout coalesces on an animation frame, so position checks poll.
 			{
-				const railReview = buildPlanReview({ title: "Rail Plan", markdown: planMarkdown });
+				const railMarkdown = ["Intro.", "", "## Steps", ...Array.from({ length: 30 }, (_, index) => `${index + 1}. step ${index + 1}`)].join("\n");
+				const railReview = buildPlanReview({ title: "Rail Plan", markdown: railMarkdown });
 				const railServer = await createCodeReviewServer(railReview, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
 				const railPage = await browser.newPage();
 				try {
@@ -2523,33 +2664,223 @@ try {
 							await railPage.$eval('[data-path="steps"] [data-selection-add]', (button) => button.click());
 						}
 					};
-					await post(8, "On the first step.", true);
+					const cardBesideBlock = (line) => `(() => {
+						const card = document.querySelector('.thread-card[data-anchor-start="${line}"]');
+						const block = document.querySelector('[data-path="steps"] [data-md-line="${line}"]');
+						return Boolean(card && block) && Math.abs(card.getBoundingClientRect().top - block.getBoundingClientRect().top) <= 2;
+					})()`;
+					await post(4, "On the first step.", true);
 					await railPage.waitForFunction(() => document.querySelectorAll(".thread-card").length === 1, { polling: 100 });
-					assert.equal(await railPage.evaluate(() => {
-						const card = document.querySelector('[data-path="steps"] .plan-rail .thread-card');
-						const block = document.querySelector('[data-path="steps"] [data-md-line="8"]');
-						return Math.abs(card.getBoundingClientRect().top - block.getBoundingClientRect().top) <= 2;
-					}), true, "An uncontested comment aligns exactly beside its anchored block.");
-					await post(9, "On the second step.");
+					await railPage.waitForFunction(cardBesideBlock(4), { polling: 100 });
+					assert.equal(await railPage.evaluate(cardBesideBlock(4)), true, "An uncontested comment aligns exactly beside its anchored block.");
+					await post(5, "On the second step.");
 					await railPage.waitForFunction(() => document.querySelectorAll(".thread-card").length === 2, { polling: 100 });
-					assert.equal(await railPage.evaluate(() => {
+					const collision = `(() => {
 						const cards = [...document.querySelectorAll('[data-path="steps"] .plan-rail .thread-card')];
-						const first = cards.find((card) => card.dataset.anchorStart === "8");
-						const second = cards.find((card) => card.dataset.anchorStart === "9");
-						return cards.indexOf(first) < cards.indexOf(second) && second.getBoundingClientRect().top >= first.getBoundingClientRect().bottom;
-					}), true, "A colliding neighbor keeps anchor order and pushes below, never overlapping.");
+						const first = cards.find((card) => card.dataset.anchorStart === "4");
+						const second = cards.find((card) => card.dataset.anchorStart === "5");
+						return cards.indexOf(first) < cards.indexOf(second) && second.getBoundingClientRect().top >= first.getBoundingClientRect().bottom + 10;
+					})()`;
+					await railPage.waitForFunction(collision, { polling: 100 });
+					assert.equal(await railPage.evaluate(collision), true, "A colliding neighbor keeps anchor order and pushes below with the minimum gap.");
+					// Dynamic heights: a card that grows announces the resize (any lane
+					// may change card heights at runtime) and its neighbor re-seats.
+					await railPage.evaluate(() => {
+						const card = document.querySelector('.thread-card[data-anchor-start="4"]');
+						const spacer = document.createElement("div");
+						spacer.style.height = "180px";
+						card.append(spacer);
+						card.dispatchEvent(new CustomEvent("marginalia:cards-resized", { bubbles: true }));
+					});
+					await railPage.waitForFunction(collision, { polling: 100 });
+					assert.equal(await railPage.evaluate(collision), true, "A card that grows at runtime pushes its collision neighbor down on the next relayout.");
 					// Mutation relayout: deleting the queued first comment must let the
 					// second snap back to exact alignment with its own block.
-					await railPage.$eval('.thread-card[data-anchor-start="8"] [data-turn-delete]', (button) => button.click());
+					await railPage.$eval('.thread-card[data-anchor-start="4"] [data-turn-delete]', (button) => button.click());
 					await railPage.waitForFunction(() => document.querySelectorAll(".thread-card").length === 1, { polling: 100 });
-					await railPage.waitForFunction(() => {
-						const card = document.querySelector('[data-path="steps"] .plan-rail .thread-card');
-						const block = document.querySelector('[data-path="steps"] [data-md-line="9"]');
-						return Math.abs(card.getBoundingClientRect().top - block.getBoundingClientRect().top) <= 2;
-					}, { polling: 100 });
+					await railPage.waitForFunction(cardBesideBlock(5), { polling: 100 });
+					// Far-apart anchors: both cards align exactly, so their vertical
+					// separation tracks the separation of the blocks they annotate.
+					await post(30, "Down the document.");
+					await railPage.waitForFunction(() => document.querySelectorAll(".thread-card").length === 2, { polling: 100 });
+					const separationTracks = `(() => {
+						const near = document.querySelector('.thread-card[data-anchor-start="5"]');
+						const far = document.querySelector('.thread-card[data-anchor-start="30"]');
+						const nearBlock = document.querySelector('[data-path="steps"] [data-md-line="5"]');
+						const farBlock = document.querySelector('[data-path="steps"] [data-md-line="30"]');
+						const cardGap = far.getBoundingClientRect().top - near.getBoundingClientRect().top;
+						const anchorGap = farBlock.getBoundingClientRect().top - nearBlock.getBoundingClientRect().top;
+						return Math.abs(cardGap - anchorGap) <= 2;
+					})()`;
+					await railPage.waitForFunction(separationTracks, { polling: 100 });
+					assert.equal(await railPage.evaluate(separationTracks), true, "Far-apart cards keep the same vertical separation as their anchors.");
+					// Interaction priority: focusing a pushed-down card's reply box
+					// aligns it exactly at its anchor while its neighbor yields upward.
+					await post(31, "Just below it.");
+					await railPage.waitForFunction(() => document.querySelectorAll(".thread-card").length === 3, { polling: 100 });
+					await railPage.waitForFunction(`(() => {
+						const pushed = document.querySelector('.thread-card[data-anchor-start="31"]');
+						const above = document.querySelector('.thread-card[data-anchor-start="30"]');
+						return Boolean(pushed && above) && pushed.getBoundingClientRect().top >= above.getBoundingClientRect().bottom + 10;
+					})()`, { polling: 100 });
+					// Idle composers collapse behind their Reply… affordance; expanding
+					// focuses the reply box, which is the interaction under test.
+					await railPage.$eval('.thread-card[data-anchor-start="31"] [data-composer-expand]', (button) => button.click());
+					const prioritized = `(() => {
+						const focusedCard = document.querySelector('.thread-card[data-anchor-start="31"]');
+						const neighbor = document.querySelector('.thread-card[data-anchor-start="30"]');
+						const block = document.querySelector('[data-path="steps"] [data-md-line="31"]');
+						const neighborBlock = document.querySelector('[data-path="steps"] [data-md-line="30"]');
+						return Math.abs(focusedCard.getBoundingClientRect().top - block.getBoundingClientRect().top) <= 2
+							&& neighbor.getBoundingClientRect().bottom <= focusedCard.getBoundingClientRect().top - 10
+							&& neighbor.getBoundingClientRect().top < neighborBlock.getBoundingClientRect().top;
+					})()`;
+					await railPage.waitForFunction(prioritized, { polling: 100 });
+					assert.equal(await railPage.evaluate(prioritized), true, "The focused card aligns exactly at its anchor and its neighbor yields upward.");
 					await railPage.close();
 				} finally {
 					await railServer.close();
+				}
+			}
+
+			// Rail polish: composers idle behind a Reply… affordance, cards file in
+			// anchor order, the Reply button reads primary even disabled, and
+			// resolved threads compact to one row — every height change announced.
+			{
+				const polishServer = await createCodeReviewServer({ ...ordered, id: altId(ordered.id, 72) }, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+				const polishPage = await browser.newPage();
+				try {
+					await polishPage.goto(polishServer.url, { waitUntil: "domcontentloaded" });
+					await polishPage.waitForFunction(() => document.querySelector('[data-file-nav="0"]'), { polling: 100 });
+					await polishPage.evaluate(() => {
+						window.__cardResizes = 0;
+						document.addEventListener("marginalia:cards-resized", () => { window.__cardResizes += 1; });
+						document.querySelector('[data-file-nav="0"]').click();
+					});
+					assert.equal(await polishPage.$eval('[data-commentary-composer="new-file"]', (composer) => composer.classList.contains("collapsed") && composer.querySelector("textarea").offsetParent === null), true, "Commentary composers start as a collapsed Reply… line with the box hidden.");
+					await polishPage.click('[data-commentary-composer="new-file"] [data-composer-expand]');
+					assert.equal(await polishPage.evaluate(() => {
+						const composer = document.querySelector('[data-commentary-composer="new-file"]');
+						return !composer.classList.contains("collapsed") && document.activeElement === composer.querySelector("textarea") && window.__cardResizes === 1;
+					}), true, "The affordance expands the composer, focuses the box, and dispatches marginalia:cards-resized.");
+					await polishPage.keyboard.press("Escape");
+					await polishPage.waitForFunction(() => document.querySelector('[data-commentary-composer="new-file"]').classList.contains("collapsed"), { polling: 100 });
+					assert.equal(await polishPage.evaluate(() => window.__cardResizes), 2, "Blurring an empty composer collapses it and dispatches marginalia:cards-resized again.");
+					await polishPage.click('[data-commentary-composer="new-file"] [data-composer-expand]');
+					await polishPage.type('[data-commentary-composer="new-file"] textarea', "draft in progress");
+					await polishPage.keyboard.press("Escape");
+					assert.equal(await polishPage.$eval('[data-commentary-composer="new-file"]', (composer) => composer.classList.contains("collapsed")), false, "A composer holding a draft never collapses on blur.");
+					const polishSelect = async (spanIndex, text) => {
+						await polishPage.evaluate((index) => {
+							const code = document.querySelectorAll('[data-review-file="0"] .diff-add .diff-code span')[index];
+							const range = document.createRange();
+							range.selectNodeContents(code);
+							const selection = window.getSelection();
+							selection.removeAllRanges();
+							selection.addRange(range);
+							code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+						}, spanIndex);
+						await polishPage.waitForFunction(() => document.querySelector('[data-review-file="0"] [data-selection-composer]')?.hidden === false, { polling: 100 });
+						await polishPage.type('[data-review-file="0"] [data-selection-feedback]', text);
+						await polishPage.$eval('[data-review-file="0"] [data-selection-add]', (button) => button.click());
+					};
+					const longBody = "This opening message runs well past the eighty character mark so the compact row must truncate it.";
+					await polishSelect(1, longBody);
+					await polishPage.waitForFunction(() => document.querySelectorAll('[data-review-file="0"] [data-selection-threads] .thread-card').length === 1, { polling: 100 });
+					assert.equal(await polishPage.$eval('[data-review-file="0"] [data-selection-threads] .thread-card .reply-composer', (composer) => composer.classList.contains("collapsed")), true, "A fresh thread card leads with the collapsed Reply… line.");
+					await polishPage.$eval('[data-review-file="0"] [data-selection-threads] .thread-card [data-composer-expand]', (button) => button.click());
+					assert.equal(await polishPage.evaluate(() => {
+						const probe = document.createElement("button");
+						probe.style.backgroundColor = "var(--accent)";
+						document.body.append(probe);
+						const accent = getComputedStyle(probe).backgroundColor;
+						probe.remove();
+						const send = document.querySelector('[data-review-file="0"] [data-selection-threads] .thread-card [data-thread-send]');
+						const resolve = document.querySelector('[data-review-file="0"] [data-selection-threads] .thread-card [data-thread-resolve]');
+						const style = getComputedStyle(send);
+						return send.disabled && style.cursor === "not-allowed" && style.backgroundColor === accent && getComputedStyle(resolve).backgroundColor === "rgba(0, 0, 0, 0)";
+					}), true, "The disabled Reply button keeps the accent primary treatment with a not-allowed cursor while Resolve stays secondary.");
+					await polishSelect(0, "First line note.");
+					await polishPage.waitForFunction(() => document.querySelectorAll('[data-review-file="0"] [data-selection-threads] .thread-card').length === 2, { polling: 100 });
+					assert.deepEqual(await polishPage.$$eval('[data-review-file="0"] [data-selection-threads] .thread-card', (cards) => cards.map((card) => card.dataset.anchorStart)), ["1", "2"], "Rail cards file in anchor order, not creation order.");
+					await polishPage.$eval('.thread-card[data-anchor-start="2"] [data-thread-resolve]', (button) => button.click());
+					await polishPage.waitForFunction(() => document.querySelector('.thread-card[data-anchor-start="2"].resolved [data-resolved-toggle]'), { polling: 100 });
+					assert.equal(await polishPage.evaluate((body) => {
+						const card = document.querySelector('.thread-card[data-anchor-start="2"]');
+						const summary = card.querySelector("[data-resolved-toggle]");
+						return card.querySelector(".resolved-detail").hidden
+							&& summary.querySelector(".anchor-chip").textContent === "new lines 2"
+							&& summary.querySelector(".resolved-first").textContent === body.slice(0, 80) + "…"
+							&& summary.querySelector(".resolved-tick").textContent === "✓";
+					}, longBody), true, "A resolved card compacts to its anchor chip, truncated first message, and tick.");
+					const resizesBeforeToggle = await polishPage.evaluate(() => window.__cardResizes);
+					await polishPage.click('.thread-card[data-anchor-start="2"] [data-resolved-toggle]');
+					assert.equal(await polishPage.evaluate((body) => {
+						const card = document.querySelector('.thread-card[data-anchor-start="2"]');
+						return !card.querySelector(".resolved-detail").hidden && card.textContent.includes(body);
+					}, longBody), true, "Clicking the compact row expands the full resolved history.");
+					assert.equal(await polishPage.evaluate((before) => window.__cardResizes > before, resizesBeforeToggle), true, "The resolved toggle dispatches marginalia:cards-resized.");
+					await polishPage.click('.thread-card[data-anchor-start="2"] [data-resolved-toggle]');
+					assert.equal(await polishPage.$eval('.thread-card[data-anchor-start="2"] .resolved-detail', (detail) => detail.hidden), true, "A second click compacts the resolved card again.");
+					await polishPage.close();
+				} finally {
+					await polishServer.close();
+				}
+			}
+
+			// Code-mode rail alignment: commentary and comment cards sit beside
+			// their anchored diff rows once the anchor clears the rail's own
+			// furniture, and anchorless notes keep the plain stack at the top.
+			{
+				await writeFile(join(contextRepo, "tall.txt"), `${Array.from({ length: 60 }, (_, index) => `line ${index + 1}`).join("\n")}\n`);
+				const tallReview = applyReviewManifest(await collectReviewSnapshot(contextRepo), {
+					files: [{
+						path: "tall.txt",
+						summary: "Tall fixture for rail alignment.",
+						commentary: [
+							{ id: "deep-note", body: "About the tail.", side: "new", startLine: 50, endLine: 50 },
+							{ id: "loose-note", body: "General remark with no anchor." },
+						],
+					}],
+				});
+				const tallServer = await createCodeReviewServer(tallReview, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+				const tallPage = await browser.newPage();
+				try {
+					await tallPage.setViewport({ width: 1300, height: 800 });
+					await tallPage.goto(tallServer.url, { waitUntil: "domcontentloaded" });
+					await tallPage.waitForFunction(() => document.querySelector('.review-file.active[data-path="tall.txt"] .agent-note'), { polling: 100 });
+					const codeAligned = `(() => {
+						const note = document.querySelector('.agent-note[data-commentary-id="deep-note"]');
+						const loose = document.querySelector('.agent-note[data-commentary-id="loose-note"]');
+						const row = document.querySelector('[data-path="tall.txt"] tr[data-new-line="50"]');
+						return Math.abs(note.getBoundingClientRect().top - row.getBoundingClientRect().top) <= 2
+							&& loose.getBoundingClientRect().bottom <= note.getBoundingClientRect().top;
+					})()`;
+					await tallPage.waitForFunction(codeAligned, { polling: 100 });
+					assert.equal(await tallPage.evaluate(codeAligned), true, "Code-mode notes align beside their anchored rows while anchorless notes keep the top stack.");
+					await tallPage.evaluate(() => {
+						const code = document.querySelector('[data-path="tall.txt"] tr[data-new-line="20"] .diff-code span');
+						const range = document.createRange();
+						range.selectNodeContents(code);
+						const selection = window.getSelection();
+						selection.removeAllRanges();
+						selection.addRange(range);
+						code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+					});
+					await tallPage.waitForFunction(() => document.querySelector('[data-path="tall.txt"] [data-selection-composer]')?.hidden === false, { polling: 100 });
+					await tallPage.type('[data-path="tall.txt"] [data-selection-feedback]', "Mid-file comment.");
+					await tallPage.$eval('[data-path="tall.txt"] [data-selection-add]', (button) => button.click());
+					await tallPage.waitForFunction(() => document.querySelector('[data-path="tall.txt"] .thread-card'), { polling: 100 });
+					const codeCardAligned = `(() => {
+						const card = document.querySelector('[data-path="tall.txt"] .thread-card[data-anchor-start="20"]');
+						const row = document.querySelector('[data-path="tall.txt"] tr[data-new-line="20"]');
+						return Boolean(card && row) && Math.abs(card.getBoundingClientRect().top - row.getBoundingClientRect().top) <= 2;
+					})()`;
+					await tallPage.waitForFunction(codeCardAligned, { polling: 100 });
+					assert.equal(await tallPage.evaluate(codeCardAligned), true, "A code selection card aligns exactly beside its anchored diff row.");
+					await tallPage.close();
+				} finally {
+					await tallServer.close();
 				}
 			}
 

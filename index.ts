@@ -29,6 +29,7 @@ type ReviewThread = {
 	newStart?: number;
 	newEnd?: number;
 	carried?: { fromRound: number; resolution: string; placement: string; side?: string; startLine?: number; endLine?: number };
+	replyState?: "sent" | "working" | "seen";
 	turns: ReviewThreadTurn[];
 };
 type ReviewThreadSummary = { open: number; awaitingUser: number; awaitingPi: number; resolved: number };
@@ -217,6 +218,9 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		const appearance = await loadAppearance();
 		const server = await createCodeReviewServer(review, {
 			appearance,
+			// Reply-state honesty on reconnect: with no turn running, a thread still
+			// marked working renders as seen (delivered, turn over, no reply).
+			isTurnActive: () => !ctx.isIdle(),
 			onThreadPost: async (round: ReviewRound, thread: ReviewThread, turns: ReviewThreadTurn[]) => {
 				const queued = queue.post(formatThreadMessageXml(round.review, thread, turns, round.number), ctx.isIdle());
 				// The message is accepted once queue.post returns; a notify failure must
@@ -225,6 +229,9 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 				try {
 					ctx.ui.notify(`${noun} thread ${thread.id}: ${turns.length === 1 ? "new reviewer message" : `${turns.length} reviewer messages`}${queued ? " (queued until Pi settles)" : ""}.`, "info");
 				} catch {}
+				// The server stamps the thread's reply-state from this verdict: queued
+				// content is sent (awaiting the settle flush), immediate is working.
+				return { queued };
 			},
 			onFinishPass: async (round: ReviewRound, note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
 				// Plans have no worktree to drift from; only code snapshots re-check.
@@ -237,7 +244,9 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 				}
 				const queued = queue.post(formatReviewPassXml(round.review, threads, summary, stale, note, round.number), ctx.isIdle());
 				ctx.ui.notify(`${noun} round ${round.number} pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s)${queued ? " (queued until Pi settles)" : ""}.`, "info");
-				return { stale };
+				// queued tells the server how to stamp the reply-state of the threads
+				// this pass delivers: sent while the pass waits, working once in context.
+				return { stale, queued };
 			},
 			onApprove: async (round: ReviewRound, message: string, staleNow: boolean) => {
 				const queued = queue.post(formatReviewApprovedXml(round.review, round.number, message, staleNow), ctx.isIdle());
@@ -556,8 +565,16 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
+		// Pi's turn is over: threads whose delivered reviewer message drew no reply
+		// were seen, not answered. This runs BEFORE the flush below so a message
+		// that only now reaches Pi's context is never marked seen by the very
+		// settle that delivers it.
+		for (const server of servers) server.markTurnEnd();
 		try {
-			queue.flush(ctx.isIdle());
+			if (queue.flush(ctx.isIdle()) > 0) {
+				// The flushed batch is in Pi's context now; sent threads are working.
+				for (const server of servers) server.markQueueDelivered();
+			}
 		} catch {
 			// A failed delivery keeps the batch queued; retry at the next settle.
 		}

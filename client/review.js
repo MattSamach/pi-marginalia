@@ -314,18 +314,33 @@
       });
       return;
     }
-    // useMaxWidth off: diagrams keep their natural size and legible type;
-    // the CSS max-width shrinks them only when they genuinely overflow.
-    window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral', fontFamily: 'system-ui, sans-serif', themeVariables: { fontSize: '16px' }, flowchart: { useMaxWidth: false }, state: { useMaxWidth: false }, er: { useMaxWidth: false }, sequence: { useMaxWidth: false } });
-    for (const [index, figure] of figures.entries()) {
+    // Diagrams render at natural size with legible type and NEVER scale
+    // down — wide ones pan/scroll instead. The mermaid theme follows the
+    // page's effective scheme so dark pages get dark diagrams.
+    const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : { matches: false };
+    const effectiveDark = () => {
+      const scheme = document.documentElement.dataset.scheme;
+      return scheme === 'dark' || (scheme !== 'light' && darkQuery.matches);
+    };
+    const initializeMermaid = () => window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: effectiveDark() ? 'dark' : 'neutral', fontFamily: 'system-ui, sans-serif', themeVariables: { fontSize: '16px' }, flowchart: { useMaxWidth: false }, state: { useMaxWidth: false }, er: { useMaxWidth: false }, sequence: { useMaxWidth: false } });
+    initializeMermaid();
+    let renderEpoch = 0;
+    const renderAll = () => renderEpoch++ && figures.forEach((figure, index) => renderFigure(figure, index));
+    if (darkQuery.addEventListener) darkQuery.addEventListener('change', () => { initializeMermaid(); renderAll(); });
+    document.querySelector('[data-scheme-picker]')?.addEventListener('change', () => { initializeMermaid(); renderAll(); });
+    const renderFigure = async (figure, index) => {
       const source = figure.querySelector('.diagram-source').textContent;
       const canvas = figure.querySelector('[data-diagram-canvas]');
       try {
-        const { svg } = await window.mermaid.render('picr-mmd-' + index + '-' + figure.dataset.mdLine, source);
+        const epoch = renderEpoch;
+        const { svg } = await window.mermaid.render('picr-mmd-' + renderEpoch + '-' + index + '-' + figure.dataset.mdLine, source);
+        if (epoch !== renderEpoch) return;
         const inner = document.createElement('div');
         inner.className = 'diagram-inner';
         inner.innerHTML = svg;
         canvas.replaceChildren(inner);
+        figure.classList.remove('diagram-scheme-light', 'diagram-scheme-dark');
+        figure.classList.add(effectiveDark() ? 'diagram-scheme-dark' : 'diagram-scheme-light');
         const svgRoot = inner.querySelector('svg');
         if (svgRoot) {
           svgRoot.removeAttribute('style');
@@ -338,8 +353,15 @@
             }
           }
         }
+        if (figure.dataset.zoomWired) return;
+        figure.dataset.zoomWired = '1';
         const view = { scale: 1, x: 0, y: 0 };
-        const apply = () => { inner.style.transform = 'translate(' + view.x + 'px,' + view.y + 'px) scale(' + view.scale + ')'; };
+        // Re-renders replace .diagram-inner, so the transform target is looked
+        // up live rather than closed over.
+        const apply = () => {
+          const target = canvas.querySelector('.diagram-inner');
+          if (target) target.style.transform = 'translate(' + view.x + 'px,' + view.y + 'px) scale(' + view.scale + ')';
+        };
         const zoomBy = (factor) => { view.scale = Math.min(4, Math.max(0.5, view.scale * factor)); if (view.scale === 1) { view.x = 0; view.y = 0; } apply(); };
         const controls = document.createElement('div');
         controls.className = 'diagram-zoom';
@@ -390,6 +412,9 @@
         // Mermaid leaves its failed scratch element behind; drop it.
         document.querySelectorAll('[id^="dpicr-mmd-"]').forEach((scratch) => scratch.remove());
       }
+    };
+    for (const [index, figure] of figures.entries()) {
+      await renderFigure(figure, index);
     }
     // Restored element drafts predate the async renders: mark them now.
     if (draft && draft.element && !draft.elementTarget) {

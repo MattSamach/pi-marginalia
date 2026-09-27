@@ -28,7 +28,7 @@ Use `open_plan_review` to hand the reviewer a rendered plan they can annotate. T
 
 Routing: when the user wants to iterate on diagrams themselves — a topology, a presentation figure, no surrounding prose — use `open_diagram_review` (named diagrams + optional captions; same session engine, same threads and rounds). Use this tool with inline mermaid fences when diagrams accompany a written plan.
 
-Readability guardrails: the document column is ~760px and diagrams never scale down (wide ones pan). Prefer `flowchart TB` for chains longer than ~4 nodes; split anything beyond ~12 nodes into multiple diagrams; keep node and edge labels to a few words — many labeled edges converging on one node overlap. Diagrams render on their own contrast-guaranteed background matched to the viewer's light/dark scheme, so never hand-pick colors for contrast; use semantic classes if color matters.
+Readability guardrails: the document column is ~760px and diagrams never scale down (wide ones pan). Prefer `flowchart TB` for chains longer than ~4 nodes; split anything beyond ~12 nodes into multiple diagrams; keep node and edge labels to a few words — many labeled edges converging on one node overlap. On bidirectional pairs (A to B and back), label at most one direction — mermaid collides the two labels. Diagrams render on their own contrast-guaranteed background matched to the viewer's light/dark scheme, so never hand-pick colors for contrast; use semantic classes if color matters.
 
 Fenced ```mermaid blocks render as live diagrams the reviewer can click: a node or edge click opens a comment thread on that element. Give every meaningful node a stable, semantic id (`api`, `orders_db`) — ids are the anchor contract, and threads follow them across rounds.
 

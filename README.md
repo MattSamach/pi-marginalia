@@ -37,7 +37,7 @@ To review a rendered markdown document without asking Pi to author a manifest â€
 /margin-doc ~/notes/proposal.md
 ```
 
-Plan markdown may include fenced `mermaid` blocks: they render as live architecture diagrams, and clicking a node or edge opens a comment thread anchored to that element. Element-anchored threads carry across rounds by id, Pi's margin notes can point at specific boxes and arrows, and ctrl/cmd-scroll zooms the canvas. A diagram that fails to parse shows its source with an error banner instead.
+To iterate on architecture diagrams without a surrounding document, Pi can call `open_diagram_review` with named mermaid diagrams (plus optional captions); each becomes a sidebar section with the same threads, rounds, and approval. Plan markdown may include fenced `mermaid` blocks: they render as live architecture diagrams, and clicking a node or edge opens a comment thread anchored to that element. Element-anchored threads carry across rounds by id, Pi's margin notes can point at specific boxes and arrows, and ctrl/cmd-scroll zooms the canvas. A diagram that fails to parse shows its source with an error banner instead.
 
 Bare `/margin-doc` opens Pi's latest response as a continuous rendered document; with a path it opens that file. Either way you get the full plan-review surface â€” select text to comment, threads arrive in the session live, Pi answers with `reply_review_thread`, and approval sends a terminal note.
 

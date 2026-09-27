@@ -1254,6 +1254,22 @@ try {
 		const { extractMermaidSources } = await import("../shared/diagram.js");
 		assert.equal(extractMermaidSources("```mermaid extra\nflowchart LR\n  a --> b\n```").length, 1, "Info strings after the language are accepted, matching the renderer.");
 		assert.equal(extractMermaidSources("```text\n```mermaid\n```\nflowchart\n").length, 0, "Fences inside other fences follow the renderer's close-on-any-fence rule.");
+		const { buildDiagramReview } = await import("../shared/plan-review.js");
+		const diagramReview = buildDiagramReview({ title: "Topology", diagrams: [
+			{ name: "Service map", source: "flowchart LR\n  ui[Web] --> api(Gateway)", caption: "The request path.", commentary: [{ id: "gw", body: "one gateway", element: "node:api" }] },
+			{ name: "Deploy flow", source: "flowchart LR\n  build --> prod" },
+		] });
+		assert.equal(diagramReview.kind, "plan", "Diagram reviews ARE plan sessions — one engine, two front doors.");
+		assert.deepEqual(diagramReview.files.map((section) => section.path), ["service-map", "deploy-flow"], "Each diagram becomes one named section.");
+		assert.ok(diagramReview.files[0].markdown.includes("The request path."), "Captions render beneath their diagram.");
+		assert.equal(diagramReview.files[0].commentary[0].element, "node:api", "Element commentary flows through the generated shell.");
+		assert.match(renderReviewHtml(diagramReview, "dg-nonce"), /__pi_code_review_mermaid__/, "The generated shell loads the renderer.");
+		assert.throws(() => buildDiagramReview({ title: "x", diagrams: [{ name: "a", source: "flowchart\n\u0060\u0060\u0060\nboom" }] }), /fence line/, "Sources cannot break out of their fence.");
+		assert.throws(() => buildDiagramReview({ title: "x", diagrams: [{ name: "Same", source: "flowchart" }, { name: "same", source: "flowchart" }] }), /more than once/, "Diagram names are unique section headings.");
+		assert.throws(() => buildDiagramReview({ title: "x", diagrams: [{ name: "a", source: "flowchart", caption: "## Phantom" }] }), /heading or fence marker/, "Captions cannot inject document structure.");
+		assert.throws(() => buildDiagramReview({ title: "x", diagrams: [{ name: "User Flow", source: "flowchart" }, { name: "User-Flow", source: "flowchart" }] }), /same section slug/, "Slug-base collisions are rejected so reorders cannot swap carried threads.");
+		assert.equal(diagramReview.files.length, 2, "One section per diagram, exactly.");
+		assert.throws(() => buildDiagramReview({ title: "x", diagrams: [{ name: "a", source: "flowchart LR\n  m --> n", commentary: [{ id: "c", body: "x", element: "node:zzz" }] }] }), /nodes: m, n/, "Element rejections keep their hints through the shell.");
 		// Markdown: mermaid fences become diagram figures; other fences stay pre.
 		const figureHtml = renderMarkdown(diagramMd, { sourceLines: true });
 		assert.match(figureHtml, /<figure class="diagram-block" data-diagram data-md-line="3" data-md-end="7">/, "Mermaid fences emit diagram figures with source-line anchors.");

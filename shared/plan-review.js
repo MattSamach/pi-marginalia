@@ -194,3 +194,57 @@ export function resolvePlanResponses(review, responses) {
 		return { ...response, file: resolved, ...(response.startLine === undefined ? {} : { side: "new" }) };
 	});
 }
+
+const FENCE = "```";
+
+/**
+ * Build a diagram-first plan review from { title, diagrams }. Each diagram
+ * becomes one generated section: a heading (its name), a mermaid fence, and
+ * an optional caption paragraph. The result IS a plan review — same engine,
+ * same threads, same rounds — so element anchors, carries, and approval all
+ * behave identically to a hand-written plan.
+ */
+export function buildDiagramReview(manifest, limits = PLAN_LIMITS) {
+	if (!manifest || typeof manifest !== "object") fail("Diagram review needs a manifest object.");
+	const diagrams = manifest.diagrams;
+	if (!Array.isArray(diagrams) || !diagrams.length || diagrams.length > 40) fail("Diagram review needs 1-40 diagrams.");
+	const seen = new Set();
+	const parts = [];
+	const sections = [];
+	for (const diagram of diagrams) {
+		if (!diagram || typeof diagram !== "object") fail("Each diagram must be an object.");
+		const name = typeof diagram.name === "string" && diagram.name.trim() ? diagram.name.trim() : fail("Each diagram needs a non-empty name.");
+		if (name.length > 200 || /[\r\n#`]/.test(name)) fail(`Diagram name "${name.slice(0, 40)}" must stay under 200 characters with no newlines, hashes, or backticks.`);
+		const key = name.toLowerCase();
+		if (seen.has(key)) fail(`Diagram name "${name}" is used more than once (names are section headings and must be unique).`);
+		seen.add(key);
+		const source = typeof diagram.source === "string" && diagram.source.trim() ? diagram.source : fail(`Diagram "${name}" needs non-empty mermaid source.`);
+		if (source.length > 100_000) fail(`Diagram "${name}" source must stay under 100000 characters.`);
+		if (/^\s*```/m.test(source)) fail(`Diagram "${name}" source contains a fence line (${FENCE}), which would break out of its markdown fence.`);
+		if (diagram.caption !== undefined && (typeof diagram.caption !== "string" || !diagram.caption.trim() || diagram.caption.length > 2_000)) {
+			fail(`Diagram "${name}" caption must be a non-empty string under 2000 characters.`);
+		}
+		// The caption is one prose paragraph in a generated document: a leading
+		// heading or fence marker would change the document's structure.
+		const cleanCaption = diagram.caption === undefined ? undefined : diagram.caption.replace(/\r\n?|\n/g, " ").trim();
+		if (cleanCaption !== undefined && /^(#|\x60{3})/.test(cleanCaption)) {
+			fail(`Diagram "${name}" caption cannot start with a heading or fence marker.`);
+		}
+		// Distinct names must also produce distinct slug bases: suffix numbering
+		// is document-order dependent, and a reorder would silently swap which
+		// diagram a carried thread's slug resolves to.
+		const slugBase = key.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "section";
+		if (seen.has(`slug\0${slugBase}`)) fail(`Diagram names "${name}" and another collapse to the same section slug "${slugBase}"; make them distinct.`);
+		seen.add(`slug\0${slugBase}`);
+		const cleanSource = source.replace(/\r\n/g, "\n").replace(/\s+$/, "");
+		const caption = cleanCaption === undefined ? "" : `\n\n${cleanCaption}`;
+		parts.push(`## ${name}\n\n${FENCE}mermaid\n${cleanSource}\n${FENCE}${caption}`);
+		sections.push({ heading: name, ...(diagram.summary === undefined ? {} : { summary: diagram.summary }), ...(diagram.commentary === undefined ? {} : { commentary: diagram.commentary }) });
+	}
+	return buildPlanReview({
+		title: manifest.title,
+		markdown: parts.join("\n\n"),
+		sections,
+		...(manifest.proposedApprovalNote === undefined ? {} : { proposedApprovalNote: manifest.proposedApprovalNote }),
+	}, limits);
+}

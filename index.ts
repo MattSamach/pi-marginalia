@@ -8,7 +8,7 @@ import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint,
 import { createReviewMessageQueue } from "./shared/delivery-queue.js";
 import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "./shared/feedback.js";
 import { createCodeReviewServer } from "./shared/server.js";
-import { buildPlanReview, resolvePlanResponses } from "./shared/plan-review.js";
+import { buildDiagramReview, buildPlanReview, resolvePlanResponses } from "./shared/plan-review.js";
 
 type ReviewThreadTurn = { author: "user" | "pi"; body: string; ts: number; seq?: number; delivered?: boolean };
 type ReviewThread = {
@@ -82,6 +82,20 @@ const openPlanReviewSchema = Type.Object({
 	}), { maxItems: 400, description: "Required with previousRoundId when the previous round has open threads: exactly one response per open thread." })),
 });
 type OpenPlanReviewInput = Static<typeof openPlanReviewSchema>;
+const openDiagramReviewSchema = Type.Object({
+	title: Type.String({ minLength: 1, maxLength: 200 }),
+	diagrams: Type.Array(Type.Object({
+		name: Type.String({ minLength: 1, maxLength: 200, description: "Unique diagram name; becomes its section heading in the sidebar. No newlines, hashes, or backticks." }),
+		source: Type.String({ minLength: 1, maxLength: 100_000, description: "Mermaid source rendered as a live, clickable diagram. Use stable semantic element ids — they are the thread anchor contract across rounds." }),
+		caption: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000, description: "Optional one-paragraph framing rendered beneath the diagram." })),
+		summary: Type.Optional(Type.String({ maxLength: 2_000, description: "Orientation-only rail card; anything inviting a reply belongs in commentary instead." })),
+		commentary: Type.Optional(Type.Array(planCommentarySchema, { maxItems: 20, description: "Margin notes; anchor to diagram elements with element: \"node:<id>\" or \"edge:<from>-><to>\"." })),
+	}), { minItems: 1, maxItems: 40, description: "Ordered diagrams; each becomes one section of the generated document." }),
+	proposedApprovalNote: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000, description: "Prefilled on the reviewer's Approve screen; the reviewer may edit it." })),
+	previousRoundId: Type.Optional(Type.String({ minLength: 8, maxLength: 200, description: "Snapshot id of the current round of an open session (from the plan-review-pass message). Opens the revised diagrams as the next round." })),
+	threadResponses: openPlanReviewSchema.properties.threadResponses,
+});
+type OpenDiagramReviewInput = Static<typeof openDiagramReviewSchema>;
 
 const openCodeReviewSchema = Type.Object({
 	title: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
@@ -291,6 +305,14 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		return openSession(ctx, review, manifest.previousRoundId, resolvePlanResponses(review, manifest.threadResponses), {});
 	};
 
+	const openDiagram = async (ctx: ExtensionContext, manifest: OpenDiagramReviewInput) => {
+		const review = buildDiagramReview(manifest);
+		if (!manifest.previousRoundId && manifest.threadResponses !== undefined) {
+			throw new Error("threadResponses requires previousRoundId; fresh diagram reviews have no threads to respond to.");
+		}
+		return openSession(ctx, review, manifest.previousRoundId, resolvePlanResponses(review, manifest.threadResponses), {});
+	};
+
 	pi.registerTool({
 		name: "open_code_review",
 		label: "Open Code Review",
@@ -345,6 +367,33 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			}
 			return {
 				content: [{ type: "text", text: `Opened plan review ${review.id.slice(0, 12)}${round && round > 1 ? ` as round ${round}; the reviewer's browser advances automatically` : ""} with ${review.files.length} section(s). The browser posts live comment threads; reply with reply_review_thread and wait for the reviewer's plan-review-pass message.` }],
+				details: { snapshot: review.id, round, sections: review.files.map((file: { path: string }) => file.path), url: server.url.replace(/\?.*$/, "") },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "open_diagram_review",
+		label: "Open Diagram Review",
+		description: "Open a browser review of one or more mermaid architecture diagrams, without authoring a plan document. Each diagram becomes a section: its name heads the sidebar, the diagram renders live and clickable, and an optional caption frames it. The reviewer clicks nodes and edges to open comment threads anchored to element identity; threads arrive as plan-review-thread messages with an element attribute — answer with reply_review_thread. To revise, call this tool again with the FULL updated diagram set and previousRoundId from the plan-review-pass message: element-anchored threads carry to the new round while their ids exist. Approval closes the session terminally. Under the hood this is a plan session; use open_plan_review instead when the diagrams belong inside a written plan.",
+		promptSnippet: "Open a browser review of mermaid diagrams with element-anchored threads",
+		promptGuidelines: [
+			"Use open_diagram_review when the user wants to iterate on architecture diagrams themselves — no surrounding plan document; use open_plan_review with mermaid fences when diagrams accompany a written plan.",
+			"Give every meaningful node a stable, semantic id (api, orders_db): ids are the anchor contract, and renaming one orphans its threads. Revise diagrams by changing sources, keeping ids for elements whose discussions should survive.",
+			"Anchor open_diagram_review commentary to specific elements with element: \"node:<id>\" or \"edge:<from>-><to>\" rather than leaving notes section-wide.",
+		],
+		parameters: openDiagramReviewSchema,
+		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
+			onUpdate?.({ content: [{ type: "text", text: "Building the diagram review…" }], details: {} });
+			const { review, server, round, identical } = await openDiagram(ctx, params);
+			if (identical) {
+				return {
+					content: [{ type: "text", text: `The diagrams are identical to round ${round} — nothing changed. The session stays on that round; continue answering its threads with reply_review_thread.` }],
+					details: { snapshot: review.id, round, identical: true },
+				};
+			}
+			return {
+				content: [{ type: "text", text: `Opened diagram review ${review.id.slice(0, 12)}${round && round > 1 ? ` as round ${round}; the reviewer's browser advances automatically` : ""} with ${review.files.length} diagram(s). The browser posts live comment threads; reply with reply_review_thread and wait for the reviewer's plan-review-pass message.` }],
 				details: { snapshot: review.id, round, sections: review.files.map((file: { path: string }) => file.path), url: server.url.replace(/\?.*$/, "") },
 			};
 		},

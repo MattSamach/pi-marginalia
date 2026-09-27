@@ -26,6 +26,8 @@ Use `open_plan_review` to hand the reviewer a rendered plan they can annotate. T
 
 ## Architecture diagrams
 
+Routing: when the user wants to iterate on diagrams themselves — a topology, a presentation figure, no surrounding prose — use `open_diagram_review` (named diagrams + optional captions; same session engine, same threads and rounds). Use this tool with inline mermaid fences when diagrams accompany a written plan.
+
 Fenced ```mermaid blocks render as live diagrams the reviewer can click: a node or edge click opens a comment thread on that element. Give every meaningful node a stable, semantic id (`api`, `orders_db`) — ids are the anchor contract, and threads follow them across rounds.
 
 - Anchor commentary to an element with `element: "node:<id>"` or `"edge:<from>-><to>"` in `sections[].commentary` — explain a specific box or arrow in the margin beside the diagram.

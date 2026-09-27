@@ -2573,7 +2573,7 @@ try {
 			// flash it, a broken fence degrades to its source, and a round advance
 			// re-anchors the carried thread's element in the new snapshot.
 			const diagramPlanMd = ["## Topology", "", "```mermaid", "flowchart LR", "  ui[Web] --> api(Gateway)", "  api --> db[(Store)]", "```", "", "Prose after.", "", "## Broken", "", "```mermaid", "flowchart LR", "  a[--> ::: nonsense", "```"].join("\n");
-			const diagramPlan = buildPlanReview({ title: "Diagram demo", markdown: diagramPlanMd, sections: [{ heading: "Topology", commentary: [{ id: "gw", body: "The single gateway.", element: "node:api" }] }] });
+			const diagramPlan = buildPlanReview({ title: "Diagram demo", markdown: diagramPlanMd, sections: [{ heading: "Topology", commentary: [{ id: "gw", body: "The single gateway.", element: "node:api" }, { id: "flow", body: "Traffic enters here.", element: "edge:ui->api" }] }] });
 			const diagramPosts = [];
 			const diagramServer = await createCodeReviewServer(diagramPlan, {
 				onThreadPost: async (_round, thread) => { diagramPosts.push(thread); },
@@ -2587,6 +2587,38 @@ try {
 				await dPage.waitForFunction(() => document.querySelector('.diagram-canvas svg [data-el="node:api"]'), { polling: 100, timeout: 15_000 });
 				assert.equal(await dPage.$eval('[data-review-file="0"] .diagram-source', (pre) => pre.hidden), true, "A rendered diagram hides its source fallback.");
 				assert.ok(await dPage.$('.diagram-canvas svg [data-el="edge:ui->api"]'), "Edges carry element identities too.");
+				assert.equal(await dPage.$eval('[data-review-file="0"] .diagram-canvas', (canvas) => canvas.style.cursor), "", "A fully visible diagram does not advertise panning.");
+				const centered = await dPage.$eval('[data-review-file="0"] .diagram-canvas', (canvas) => {
+					const inner = canvas.querySelector(".diagram-inner");
+					const box = canvas.getBoundingClientRect();
+					const content = inner.getBoundingClientRect();
+					return Math.abs((content.left - box.left) - (box.right - content.right));
+				});
+				assert.equal(centered <= 2, true, "A fitting diagram centers in its canvas (gap skew: " + centered + "px).");
+				// Zooming OUT a fitting diagram reveals nothing: still not pannable.
+				await dPage.$eval('[data-review-file="0"] .diagram-zoom button:nth-child(2)', (button) => button.click());
+				await dPage.waitForFunction(() => (document.querySelector('[data-review-file="0"] .diagram-inner')?.style.transform ?? "").includes("scale(0.8)"), { polling: 50 });
+				assert.equal(await dPage.$eval('[data-review-file="0"] .diagram-canvas', (canvas) => canvas.style.cursor), "", "A zoomed-out fitting diagram does not advertise panning.");
+				await dPage.evaluate(() => {
+					const canvas = document.querySelector('[data-review-file="0"] .diagram-canvas');
+					const opts = (x, y) => ({ bubbles: true, button: 0, pointerId: 9, clientX: x, clientY: y });
+					canvas.dispatchEvent(new PointerEvent("pointerdown", opts(300, 200)));
+					canvas.dispatchEvent(new PointerEvent("pointermove", opts(240, 160)));
+					canvas.dispatchEvent(new PointerEvent("pointerup", opts(240, 160)));
+				});
+				assert.match(await dPage.$eval('[data-review-file="0"] .diagram-inner', (inner) => inner.style.transform), /translate\(0px,\s*0px\)/, "Dragging a zoomed-out fitting diagram moves nothing.");
+				await dPage.$eval('[data-review-file="0"] .diagram-zoom button:nth-child(3)', (button) => button.click());
+				await dPage.waitForFunction(() => (document.querySelector('[data-review-file="0"] .diagram-inner')?.style.transform ?? "").includes("scale(1)"), { polling: 50 });
+				// Hover linkage is two-way for elements, and visible on edges: a
+				// filter glow on a 2px path is imperceptible, so el-target paints
+				// the stroke itself.
+				await dPage.$eval('[data-anchor-element="edge:ui->api"]', (note) => note.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+				await dPage.waitForFunction(() => document.querySelector('[data-el="edge:ui->api"]')?.classList.contains("el-target"), { polling: 50 });
+				assert.equal(await dPage.$eval('[data-el="edge:ui->api"]', (edge) => getComputedStyle(edge).strokeWidth), "3px", "A hovered edge anchor lights the stroke itself, not just a glow.");
+				await dPage.$eval('[data-el="edge:ui->api"]', (edge) => edge.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+				await dPage.waitForFunction(() => document.querySelector('[data-anchor-element="edge:ui->api"]')?.classList.contains("note-hover"), { polling: 50 });
+				await dPage.$eval('.plan-head h1', (title) => title.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+				await dPage.waitForFunction(() => !document.querySelector('.note-hover') && !document.querySelector('.el-target'), { polling: 50 });
 				// The broken fence degrades: banner + visible source, page intact.
 				await dPage.waitForFunction(() => document.querySelector('[data-review-file="1"] .diagram-error')?.hidden === false, { polling: 100 });
 				assert.equal(await dPage.$eval('[data-review-file="1"] .diagram-source', (pre) => pre.hidden), false, "A failed diagram shows its fenced source.");
@@ -2606,6 +2638,63 @@ try {
 				await dPage.waitForFunction(() => document.querySelector('.thread-card'), { polling: 100 });
 				assert.equal(diagramPosts[0].element, "node:db", "The posted thread carries its element to Pi.");
 				assert.match(await dPage.$eval('.thread-card .element-chip', (chip) => chip.textContent), /db/, "Thread cards wear their element chip.");
+				// A wide diagram at natural size drag-scrolls its canvas (no zoom
+				// needed), and a real drag still swallows the click.
+				{
+					const wideMd = ["## Wide", "", "```mermaid", "flowchart LR", "  " + Array.from({ length: 14 }, (_, i) => `w${i}[Waypoint number ${i}]`).join(" --> "), "```"].join("\n");
+					const wideServer = await createCodeReviewServer(buildPlanReview({ title: "Wide", markdown: wideMd, sections: [{ heading: "Wide", commentary: [{ id: "far", body: "The far waypoint.", element: "node:w13" }] }] }), { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+					const widePage = await browser.newPage();
+					try {
+						await widePage.setViewport({ width: 1100, height: 800 });
+						await widePage.goto(wideServer.url, { waitUntil: "domcontentloaded" });
+						await widePage.waitForFunction(() => document.querySelector(".diagram-canvas svg"), { polling: 100, timeout: 15_000 });
+						const scrolled = await widePage.evaluate(() => {
+							const canvas = document.querySelector(".diagram-canvas");
+							if (canvas.scrollWidth <= canvas.clientWidth) return "no-overflow";
+							const opts = (x) => ({ bubbles: true, button: 0, pointerId: 7, clientX: x, clientY: 200 });
+							canvas.dispatchEvent(new PointerEvent("pointerdown", opts(400)));
+							canvas.dispatchEvent(new PointerEvent("pointermove", opts(340)));
+							canvas.dispatchEvent(new PointerEvent("pointerup", opts(340)));
+							return canvas.scrollLeft;
+						});
+						assert.equal(typeof scrolled === "number" && scrolled >= 50, true, "Dragging a wide diagram at natural size scrolls it (got: " + scrolled + ").");
+						const dragSelection = await widePage.evaluate(() => {
+							const canvas = document.querySelector(".diagram-canvas");
+							const sel = window.getSelection();
+							sel.removeAllRanges();
+							try { sel.selectAllChildren(canvas.querySelector("svg")); } catch {}
+							canvas.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+							return { selected: String(sel).length, selectable: getComputedStyle(canvas).userSelect };
+						});
+						assert.equal(dragSelection.selectable, "none", "Diagram canvases are not text-selectable.");
+						assert.equal(await widePage.$eval(".diagram-canvas", (canvas) => canvas.style.cursor), "grab", "An overflowing diagram advertises panning with a grab cursor.");
+						// Clicking an element chip scrolls the element into the canvas
+						// viewport at natural size, and shifts the transform when zoomed.
+						await widePage.$eval('[data-anchor-element="node:w13"] .agent-note-anchor', (button) => button.click());
+						await widePage.waitForFunction(() => {
+							const canvas = document.querySelector(".diagram-canvas");
+							const el = document.querySelector('[data-el="node:w13"]');
+							const box = canvas.getBoundingClientRect();
+							const t = el.getBoundingClientRect();
+							return canvas.scrollLeft > 0 && t.left >= box.left && t.right <= box.right;
+						}, { polling: 100 });
+						await widePage.evaluate(() => document.querySelector(".diagram-canvas").scrollTo({ left: 0 }));
+						await widePage.$eval(".diagram-zoom button", (button) => button.click());
+						await widePage.waitForFunction(() => (document.querySelector(".diagram-inner")?.style.transform ?? "").includes("scale(1.25)"), { polling: 50 });
+						await widePage.$eval('[data-anchor-element="node:w13"] .agent-note-anchor', (button) => button.click());
+						await widePage.waitForFunction(() => {
+							const el = document.querySelector('[data-el="node:w13"]');
+							const box = document.querySelector(".diagram-canvas").getBoundingClientRect();
+							const t = el.getBoundingClientRect();
+							return t.left >= box.left - 1 && t.right <= box.right + 1;
+						}, { polling: 100 });
+						await new Promise((resolve) => setTimeout(resolve, 50));
+						assert.equal(await widePage.$eval("[data-selection-composer]", (composer) => composer.hidden), true, "A drag across the diagram never opens the selection composer.");
+					} finally {
+						await widePage.close();
+						await wideServer.close();
+					}
+				}
 				// Round 2: the response re-anchors the element; the carried shell
 				// jump lands on the new round's node.
 				const nextDiagramPlan = buildPlanReview({ title: "Diagram demo", markdown: diagramPlanMd.replace("db[(Store)]", "pg[(Postgres)]"), sections: [] });
@@ -2791,6 +2880,15 @@ try {
 					});
 					assert.equal(packed.overlaps, false, "Cross-section packing keeps the 12px minimum gap.");
 					assert.equal(packed.deepest > packed.alphaBottom, true, "A busy section's cards continue past its own document text into the next rail's space.");
+					const hit = await docPage.evaluate(() => {
+						const cards = [...document.querySelectorAll('[data-path="alpha"] .thread-card')];
+						const deepest = cards.reduce((best, card) => card.getBoundingClientRect().top > best.getBoundingClientRect().top ? card : best);
+						deepest.scrollIntoView({ block: "center" });
+						const box = deepest.getBoundingClientRect();
+						const struck = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+						return deepest.contains(struck);
+					});
+					assert.equal(hit, true, "A card that drifted into a later rail's territory still receives pointer events.");
 				} finally {
 					await docPage.close();
 					await docServer.close();

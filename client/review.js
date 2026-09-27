@@ -251,9 +251,17 @@
       const note = event.target.closest('.agent-note[data-anchor-start], .carried-thread[data-anchor-start], .agent-note[data-anchor-element], .carried-thread[data-anchor-element]');
       const block = note || !planMode ? undefined : event.target.closest('.plan-doc [data-md-line]');
       clearHoverMarks();
+      const glyph = note ? undefined : event.target.closest('.diagram-canvas [data-el]');
       if (note) {
         noteAnchorTargets(note).forEach((candidate) => {
           candidate.classList.add(candidate.closest('svg') ? 'el-target' : 'note-target');
+          hoverMarked.push(candidate);
+        });
+      } else if (glyph) {
+        const section = glyph.closest('[data-review-file]');
+        section?.querySelectorAll('.agent-note[data-anchor-element], .carried-thread[data-anchor-element]').forEach((candidate) => {
+          if (candidate.dataset.anchorElement !== glyph.dataset.el) return;
+          candidate.classList.add('note-hover');
           hoverMarked.push(candidate);
         });
       } else if (block) {
@@ -303,6 +311,27 @@
     });
   };
   let diagramPanConsumedClick = false;
+  const diagramViews = new Map();
+  // Bring an element into its canvas viewport: scroll the canvas at natural
+  // size, shift the transform when zoomed. Anchors are element identities
+  // with live nodes, so visibility is pure geometry.
+  const revealDiagramElement = (element) => {
+    const canvas = element.closest('.diagram-canvas');
+    if (!canvas) return;
+    const box = canvas.getBoundingClientRect();
+    const target = element.getBoundingClientRect();
+    const pad = 16;
+    if (target.left >= box.left + pad && target.right <= box.right - pad && target.top >= box.top + pad && target.bottom <= box.bottom - pad) return;
+    const dx = box.left + box.width / 2 - (target.left + target.width / 2);
+    const dy = box.top + box.height / 2 - (target.top + target.height / 2);
+    const wired = diagramViews.get(canvas);
+    if (!wired || wired.view.scale === 1) canvas.scrollBy({ left: -dx, top: -dy, behavior: 'smooth' });
+    else {
+      wired.view.x += dx;
+      wired.view.y += dy;
+      wired.apply();
+    }
+  };
   const setupDiagrams = async () => {
     const figures = [...document.querySelectorAll('[data-diagram]')];
     if (!figures.length) return;
@@ -359,12 +388,25 @@
         if (figure.dataset.zoomWired) return;
         figure.dataset.zoomWired = '1';
         const view = { scale: 1, x: 0, y: 0 };
+        const pannable = () => {
+          if (view.scale === 1) return canvas.scrollWidth > canvas.clientWidth || canvas.scrollHeight > canvas.clientHeight;
+          const inner = canvas.querySelector('.diagram-inner') ?? canvas.querySelector('svg');
+          if (!inner) return false;
+          const content = inner.getBoundingClientRect();
+          const box = canvas.getBoundingClientRect();
+          return content.width > box.width || content.height > box.height || content.left < box.left || content.top < box.top || content.right > box.right || content.bottom > box.bottom;
+        };
+        const updateCursor = () => {
+          canvas.style.cursor = pannable() ? 'grab' : '';
+        };
         // Re-renders replace .diagram-inner, so the transform target is looked
         // up live rather than closed over.
         const apply = () => {
           const target = canvas.querySelector('.diagram-inner');
           if (target) target.style.transform = 'translate(' + view.x + 'px,' + view.y + 'px) scale(' + view.scale + ')';
+          updateCursor();
         };
+        diagramViews.set(canvas, { view, apply });
         const zoomBy = (factor) => { view.scale = Math.min(4, Math.max(0.5, view.scale * factor)); if (view.scale === 1) { view.x = 0; view.y = 0; } apply(); };
         const controls = document.createElement('div');
         controls.className = 'diagram-zoom';
@@ -389,16 +431,28 @@
         // Capture starts only after real movement: capturing on pointerdown
         // would retarget the click and kill element commenting while zoomed.
         let pan;
+        // At natural size dragging scrolls the canvas (macOS hides the
+        // scrollbars, so an overflowing diagram would otherwise feel stuck);
+        // zoomed, dragging moves the transform.
         canvas.addEventListener('pointerdown', (event) => {
-          if (view.scale === 1 || event.button !== 0) return;
-          pan = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX - view.x, y: event.clientY - view.y, moved: false };
+          if (event.button !== 0 || !pannable()) return;
+          const scrolls = view.scale === 1;
+          pan = scrolls
+            ? { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, scrollX: canvas.scrollLeft + event.clientX, scrollY: canvas.scrollTop + event.clientY, scrolls: true, moved: false }
+            : { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: event.clientX - view.x, y: event.clientY - view.y, moved: false };
+          canvas.style.cursor = 'grabbing';
         });
         canvas.addEventListener('pointermove', (event) => {
           if (!pan) return;
           if (!pan.moved && Math.hypot(event.clientX - pan.startX, event.clientY - pan.startY) < 4) return;
           if (!pan.moved) {
             pan.moved = true;
-            canvas.setPointerCapture(pan.pointerId);
+            try { canvas.setPointerCapture(pan.pointerId); } catch { /* synthetic or released pointer */ }
+          }
+          if (pan.scrolls) {
+            canvas.scrollLeft = pan.scrollX - event.clientX;
+            canvas.scrollTop = pan.scrollY - event.clientY;
+            return;
           }
           view.x = event.clientX - pan.x;
           view.y = event.clientY - pan.y;
@@ -407,7 +461,10 @@
         canvas.addEventListener('pointerup', () => {
           diagramPanConsumedClick = pan !== undefined && pan.moved;
           pan = undefined;
+          updateCursor();
         });
+        window.addEventListener('resize', updateCursor);
+        updateCursor();
       } catch (error) {
         figure.querySelector('.diagram-error').textContent = 'Diagram failed to render: ' + (error && error.message ? String(error.message).split('\n')[0] : 'unknown error');
         figure.querySelector('.diagram-error').hidden = false;
@@ -656,6 +713,10 @@
     const item = railItemOf(element);
     if (!item || item === priorityRailItem || !item.closest('.commentary-column')) return;
     priorityRailItem = item;
+    if (item.dataset.anchorElement !== undefined) {
+      const element = diagramElementIn(item.closest('[data-review-file]'), item.dataset.anchorElement);
+      if (element) revealDiagramElement(element);
+    }
     scheduleRailLayout();
   };
   // Where an item's anchor sits, in viewport coordinates; undefined keeps the
@@ -1881,6 +1942,7 @@
     document.querySelectorAll('.el-flash').forEach((element) => element.classList.remove('el-flash'));
     targets.forEach((element) => {
       if (element.closest('svg')) {
+        revealDiagramElement(element);
         void element.getBoundingClientRect();
         element.classList.add('el-flash');
         element.addEventListener('animationend', () => element.classList.remove('el-flash'), { once: true });

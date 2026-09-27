@@ -95,7 +95,7 @@ function normalizeCommentary(entries, section, limits, usedIds, sectionMarkdown)
 /**
  * Build a plan review object from a manifest { title, markdown, sections? }.
  * sections entries reference a heading by its exact text (case-insensitive)
- * and may add a summary and anchored commentary (absolute source lines).
+ * and may add anchored commentary (absolute source lines).
  */
 export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 	if (!manifest || typeof manifest !== "object") fail("Plan review needs a manifest object.");
@@ -132,9 +132,7 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 		if (!section) fail(`Manifest section "${entry.heading}" matches no plan heading. Available: ${sections.map((candidate) => candidate.title).join(" · ")}`);
 		if (claimed.has(section.slug)) fail(`Manifest references heading "${entry.heading}" more than once.`);
 		claimed.add(section.slug);
-		if (entry.summary !== undefined && (typeof entry.summary !== "string" || entry.summary.length > limits.maxSummary)) fail(`Section "${entry.heading}" summary must be a string under ${limits.maxSummary} characters.`);
 		extras.set(section.slug, {
-			summary: typeof entry.summary === "string" && entry.summary.trim() ? entry.summary.trim() : undefined,
 			commentary: normalizeCommentary(entry.commentary, section, limits, usedIds, lines.slice(section.startLine - 1, section.endLine).join("\n")),
 		});
 	}
@@ -155,7 +153,6 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 			markdown: segment,
 			contentSha256: createHash("sha256").update(segment).digest("hex"),
 			lines: segmentLines.map((content, offset) => ({ kind: "context", newLine: section.startLine + offset, content })),
-			summary: extras.get(section.slug)?.summary,
 			commentary: extras.get(section.slug)?.commentary ?? [],
 		};
 	});
@@ -239,7 +236,7 @@ export function buildDiagramReview(manifest, limits = PLAN_LIMITS) {
 		const cleanSource = source.replace(/\r\n/g, "\n").replace(/\s+$/, "");
 		const caption = cleanCaption === undefined ? "" : `\n\n${cleanCaption}`;
 		parts.push(`## ${name}\n\n${FENCE}mermaid\n${cleanSource}\n${FENCE}${caption}`);
-		sections.push({ heading: name, ...(diagram.summary === undefined ? {} : { summary: diagram.summary }), ...(diagram.commentary === undefined ? {} : { commentary: diagram.commentary }) });
+		sections.push({ heading: name, ...(diagram.commentary === undefined ? {} : { commentary: diagram.commentary }) });
 	}
 	return buildPlanReview({
 		title: manifest.title,

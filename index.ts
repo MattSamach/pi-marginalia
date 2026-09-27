@@ -62,7 +62,6 @@ const planCommentarySchema = Type.Object({
 });
 const planSectionSchema = Type.Object({
 	heading: Type.String({ minLength: 1, maxLength: 500, description: "Exact heading text of a plan section (case-insensitive match)." }),
-	summary: Type.Optional(Type.String({ maxLength: 2_000, description: "Orientation only — why this section is shaped the way it is. Renders as a non-replyable summary card; anything that invites a reviewer response belongs in commentary (ideally line-anchored) instead, and must not be duplicated here." })),
 	commentary: Type.Optional(Type.Array(planCommentarySchema, { maxItems: 20 })),
 });
 const openPlanReviewSchema = Type.Object({
@@ -88,7 +87,6 @@ const openDiagramReviewSchema = Type.Object({
 		name: Type.String({ minLength: 1, maxLength: 200, description: "Unique diagram name; becomes its section heading in the sidebar. No newlines, hashes, or backticks." }),
 		source: Type.String({ minLength: 1, maxLength: 100_000, description: "Mermaid source rendered as a live, clickable diagram. Use stable semantic element ids — they are the thread anchor contract across rounds." }),
 		caption: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000, description: "Optional one-paragraph framing rendered beneath the diagram." })),
-		summary: Type.Optional(Type.String({ maxLength: 2_000, description: "Orientation-only rail card; anything inviting a reply belongs in commentary instead." })),
 		commentary: Type.Optional(Type.Array(planCommentarySchema, { maxItems: 20, description: "Margin notes; anchor to diagram elements with element: \"node:<id>\" or \"edge:<from>-><to>\"." })),
 	}), { minItems: 1, maxItems: 40, description: "Ordered diagrams; each becomes one section of the generated document." }),
 	proposedApprovalNote: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000, description: "Prefilled on the reviewer's Approve screen; the reviewer may edit it." })),

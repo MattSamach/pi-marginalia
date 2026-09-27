@@ -96,7 +96,6 @@ function renderCommentary(file, carriedForFile, planMode, elementDiff) {
   <div data-commentary-composer="${attribute(entry.id)}"><label>Reply to Pi<textarea data-commentary-reply="${attribute(entry.id)}" maxlength="20000" placeholder="Respond to this note"></textarea></label><div class="composer-actions"><button type="button" data-commentary-resolve="${attribute(entry.id)}" title="Mark this note read; never messages Pi">Resolve</button><button type="button" data-commentary-post="${attribute(entry.id)}" title="Reply (⌘⏎ live · ⇧⌘⏎ quiet)" disabled>Reply</button></div></div>
 </article>`).join("\n");
 		return `<aside class="commentary-column plan-rail" data-selection-threads aria-label="Pi commentary for ${attribute(file.path)}">
-  ${file.summary ? `<div class="file-summary plan-summary"><span class="summary-label">Section summary</span><div class="md">${renderMarkdown(file.summary)}</div></div>` : ""}
   ${renderRemovedElements(elementDiff)}
   ${carriedCards}
   ${cards}

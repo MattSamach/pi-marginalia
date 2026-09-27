@@ -1223,19 +1223,18 @@ try {
 	const plan = buildPlanReview({
 		title: "Test Plan",
 		markdown: planMarkdown,
-		sections: [{ heading: "goals <b>", summary: "Why **this**", commentary: [{ id: "g1", body: "Note on goals", startLine: 4, endLine: 5 }] }],
+		sections: [{ heading: "goals <b>", commentary: [{ id: "g1", body: "Note on goals", startLine: 4, endLine: 5 }] }],
 	});
 	assert.equal(plan.kind, "plan");
 	assert.deepEqual(plan.files.map((section) => [section.path, section.startLine, section.endLine]), [["introduction", 1, 2], ["goals-b", 3, 6], ["steps", 7, 13]], "Sections split at the shallowest heading level; fenced hashes are not headings; the preamble becomes an introduction.");
 	assert.equal(plan.files[1].sectionTitle, "Goals <b>");
-	assert.equal(plan.files[1].summary, "Why **this**");
 	assert.deepEqual(plan.files[1].commentary.map((entry) => [entry.id, entry.startLine, entry.endLine, entry.side]), [["g1", 4, 5, "new"]]);
 	assert.deepEqual(plan.files[1].lines[1], { kind: "context", newLine: 4, content: "- fast" }, "Section lines carry absolute source line numbers for anchor validation.");
 	assert.throws(() => buildPlanReview({ title: "x", markdown: planMarkdown, sections: [{ heading: "missing" }] }), /matches no plan heading/);
 	assert.throws(() => buildPlanReview({ title: "x", markdown: planMarkdown, sections: [{ heading: "Steps", commentary: [{ id: "s1", body: "b", startLine: 3 }] }] }), /outside its section/);
 	assert.throws(() => buildPlanReview({ title: "x", markdown: planMarkdown, sections: [{ heading: "Steps" }, { heading: "steps" }] }), /more than once/);
 	assert.throws(() => buildPlanReview({ title: "x", markdown: "## Same\na\n## Same\nb", sections: [{ heading: "Same" }] }), /reference it by its slug/, "Duplicate heading text is ambiguous as a reference.");
-	assert.equal(buildPlanReview({ title: "x", markdown: "## Same\na\n## Same\nb", sections: [{ heading: "same-2", summary: "второй" }] }).files[1].summary, "второй", "Slugs stay exact references even for duplicate headings.");
+	assert.equal(buildPlanReview({ title: "x", markdown: "## Same\na\n## Same\nb", sections: [{ heading: "same-2", commentary: [{ id: "probe", body: "второй" }] }] }).files[1].commentary[0].body, "второй", "Slugs stay exact references even for duplicate headings.");
 	const planHtmlNoDiagram = renderReviewHtml(plan, "plain-nonce");
 	{
 		// Diagram element identity: parsing, anchors, carries, and wire format.
@@ -1317,7 +1316,7 @@ try {
 	assert.match(planHtml, /<h2 data-md-line="3" data-md-end="3">Goals &lt;b&gt;<\/h2>/, "The section's own markdown heading marks it — no header bar exists.");
 	assert.doesNotMatch(planHtml, /<header class="file-header">[^]*?status-section/, "Plan sections render without file-review chrome.");
 	assert.match(planHtml, /<header class="plan-head"><h1>Test Plan<\/h1><\/header>/, "The document opens with its own rendered title.");
-	assert.match(planHtml, /<div class="file-summary plan-summary"><span class="summary-label">Section summary<\/span><div class="md"><p>Why <strong>this<\/strong><\/p><\/div><\/div>/, "Plan summaries carry a label that tells them apart from replyable notes.");
+	assert.doesNotMatch(planHtml, /plan-summary|Section summary/, "Plan sections never render summary cards — the document text is the orientation; the rail is for threads.");
 	assert.match(planHtml, /Plan sections/, "The sidebar labels plan sections.");
 	assert.match(planHtml, /Approval note/, "The approve overlay asks for an approval note, not a commit message.");
 	assert.doesNotMatch(planHtml, /<input[^>]*data-viewed-toggle|<div class="viewed-progress"|<span class="viewed-check"|<span class="badge stale-badge"|<p class="approve-stale-warning"/, "Plans ship none of the diff-only machinery, dormant or otherwise.");

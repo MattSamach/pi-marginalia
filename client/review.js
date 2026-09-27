@@ -314,7 +314,9 @@
       });
       return;
     }
-    window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral', fontFamily: 'system-ui, sans-serif' });
+    // useMaxWidth off: diagrams keep their natural size and legible type;
+    // the CSS max-width shrinks them only when they genuinely overflow.
+    window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral', fontFamily: 'system-ui, sans-serif', themeVariables: { fontSize: '16px' }, flowchart: { useMaxWidth: false }, state: { useMaxWidth: false }, er: { useMaxWidth: false }, sequence: { useMaxWidth: false } });
     for (const [index, figure] of figures.entries()) {
       const source = figure.querySelector('.diagram-source').textContent;
       const canvas = figure.querySelector('[data-diagram-canvas]');

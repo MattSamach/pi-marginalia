@@ -113,3 +113,4 @@ A review session is an ordered sequence of immutable rounds served in one browse
 - Commit only the reviewed unit. Do not include unrelated or unreviewed files.
 - After the commit succeeds, move to the next logical unit only when it belongs to an implementation plan the user already authorized and the next scope is clear. Otherwise, stop and ask.
 - Repeat implementation, validation, review, approval, and commit for each remaining unit. Never wait until the end to combine independently reviewable units into one large commit.
+- Reviewer-side density: clicking annotated text pulls its card to the click; the Density picker (Auto/Comfortable/Compact) collapses non-working cards to one-line rows past a dozen open threads, and clicking a compact card expands it.

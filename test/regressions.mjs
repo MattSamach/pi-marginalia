@@ -3291,18 +3291,21 @@ try {
 			// rails drop the flow-era Carried-threads heading (it orphans when
 			// packing moves its cards).
 			{
-				const crowdedMd = (v) => ["## Alpha", "", ...Array.from({ length: 6 }, (_, i) => `Alpha point ${i} ${v}.`), "", "## Beta", "", ...Array.from({ length: 6 }, (_, i) => `Beta point ${i} ${v}.`), "", "## Gamma", "", ...Array.from({ length: 6 }, (_, i) => `Gamma point ${i} ${v}.`)].join("\n");
+				const crowdedMd = (v) => ["## Alpha", "", ...Array.from({ length: 20 }, (_, i) => `Alpha point ${i} ${v}.`), "", "## Beta", "", ...Array.from({ length: 20 }, (_, i) => `Beta point ${i} ${v}.`), "", "## Gamma", "", ...Array.from({ length: 20 }, (_, i) => `Gamma point ${i} ${v}.`)].join("\n");
 				const crowded1 = buildPlanReview({ title: "Crowded", markdown: crowdedMd("one") });
 				const crowdedServer = await createCodeReviewServer(crowded1, { onThreadPost: async () => ({ queued: false }), onFinishPass: async () => ({ stale: false }) });
 				const crowdedPage = await browser.newPage();
 				try {
 					await crowdedPage.setViewport({ width: 1500, height: 900 });
+					// The packing pins below assert comfortable-mode geometry; density
+					// gets its own assertions at the end of this block.
+					await crowdedPage.evaluateOnNewDocument(() => { try { localStorage.setItem("picr-density", "comfortable"); } catch { /* private mode */ } });
 					await crowdedPage.goto(crowdedServer.url, { waitUntil: "domcontentloaded" });
 					await crowdedPage.waitForFunction(() => document.querySelector("[data-finish]"), { polling: 100 });
 					const crowdedCookie = (await crowdedPage.cookies()).map((entry) => `${entry.name}=${entry.value}`).join("; ");
 					const crowdedOrigin = new URL(crowdedServer.url).origin;
 					const crowdedHeaders = { cookie: crowdedCookie, "content-type": "application/json", origin: crowdedOrigin };
-					const crowdedSections = [["alpha", 3], ["beta", 12], ["gamma", 21]];
+					const crowdedSections = [["alpha", 3], ["beta", 26], ["gamma", 49]];
 					const crowdedPosted = [];
 					for (let i = 0; i < 16; i++) {
 						const [file, base] = crowdedSections[i % 3];
@@ -3314,7 +3317,7 @@ try {
 					}
 					await fetch(`${crowdedOrigin}/__pi_code_review_finish__`, { method: "POST", headers: crowdedHeaders, body: "{}" });
 					const crowded2 = buildPlanReview({ title: "Crowded", markdown: crowdedMd("two") });
-					const crowdedResponses = crowdedPosted.filter((_, i) => i % 2 === 1).map((thread) => ({ respondsTo: thread.id, resolution: "addressed", body: "Folded in, with prose long enough to size the carried card realistically.", file: thread.file, startLine: crowdedSections.find(([name]) => name === thread.file)[1], side: "new" }));
+					const crowdedResponses = crowdedPosted.filter((_, i) => i % 2 === 1).map((thread, index) => ({ respondsTo: thread.id, resolution: "addressed", body: "Folded in, with prose long enough to size the carried card realistically.", file: thread.file, startLine: crowdedSections.find(([name]) => name === thread.file)[1] + (index % 2) * 2, side: "new" }));
 					assert.equal(crowdedServer.addRound(crowded2, crowded1.id, crowdedResponses).round, 2, "The crowded next round opens.");
 					await crowdedPage.waitForFunction(() => document.body.dataset.round === "2", { polling: 100, timeout: 15_000 });
 					await new Promise((resolvePromise) => setTimeout(resolvePromise, 1200));
@@ -3334,6 +3337,31 @@ try {
 					assert.equal(crowdedAudit.cardOverlaps, 0, "No two cards overlap after navigation reveals.");
 					assert.equal(crowdedAudit.furnitureOverlaps, 0, "No card sits on rail furniture — bands bind the priority and yield sweeps too.");
 					assert.equal(crowdedAudit.alignedHeadings, 0, "Aligned rails hide the flow-era Carried-threads heading.");
+					// n walks reading order: within a section, anchor lines never go
+					// backwards mid-cycle (creation order interleaves them).
+					{
+						const visits = [];
+						const cycleSize = await crowdedPage.evaluate(() => document.querySelectorAll("[data-carried-thread]").length);
+						for (let presses = 0; presses < cycleSize; presses++) {
+							await crowdedPage.keyboard.press("n");
+							await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+							visits.push(await crowdedPage.evaluate(() => {
+								const flashed = document.querySelector(".thread-flash");
+								return { section: flashed?.closest("[data-review-file]")?.dataset.path, line: Number(flashed?.dataset.anchorStart) };
+							}));
+						}
+						const bySection = new Map();
+						for (const visit of visits) {
+							if (!visit.section || !Number.isFinite(visit.line)) continue;
+							const seen = bySection.get(visit.section) ?? [];
+							seen.push(visit.line);
+							bySection.set(visit.section, seen);
+						}
+						for (const [sectionName, lines] of bySection) {
+							const sorted = [...lines].sort((a, b) => a - b);
+							assert.deepEqual(lines, sorted, "n visits " + sectionName + " anchors in reading order (got " + lines.join(",") + ").");
+						}
+					}
 					// Clicking a card seats the navigation cursor: n continues from it.
 					const navCheck = await crowdedPage.evaluate(() => {
 						const cards = [...document.querySelectorAll("[data-carried-thread]")];
@@ -3346,6 +3374,81 @@ try {
 					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
 					const revealed = await crowdedPage.evaluate(() => document.querySelector(".thread-flash")?.dataset.threadCard ?? document.querySelector(".thread-flash")?.dataset.carriedThread);
 					assert.ok(revealed !== undefined && revealed !== navCheck.clicked, "n after a click reveals a different thread than the clicked one (revealed: " + revealed + ").");
+					// Click-to-pull: clicking annotated document text pulls the card
+					// anchored there to the click, without moving the document.
+					const pulled = await crowdedPage.evaluate(() => {
+						document.querySelectorAll(".thread-flash").forEach((el) => el.classList.remove("thread-flash"));
+						const block = document.querySelector('[data-path="gamma"] [data-md-line="49"]');
+						block.scrollIntoView({ block: "center" });
+						const docTopBefore = document.querySelector('[data-path="alpha"] .plan-doc').getBoundingClientRect().top + scrollY;
+						const box = block.getBoundingClientRect();
+						block.dispatchEvent(new MouseEvent("click", { bubbles: true, clientY: box.top + 4 }));
+						return { docTopBefore, blockTop: box.top + scrollY };
+					});
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+					const pulledResult = await crowdedPage.evaluate(({ docTopBefore, blockTop }) => {
+						const flashed = document.querySelector(".thread-flash");
+						if (!flashed) return { flashed: false };
+						const cardTop = flashed.getBoundingClientRect().top + scrollY;
+						const docTopAfter = document.querySelector('[data-path="alpha"] .plan-doc').getBoundingClientRect().top + scrollY;
+						return { flashed: true, anchorStart: flashed.dataset.anchorStart, who: flashed.className + '|' + (flashed.dataset.commentaryId || flashed.dataset.carriedThread || ''), distance: Math.abs(cardTop - blockTop), docMoved: Math.abs(docTopAfter - docTopBefore) };
+					}, pulled);
+					assert.equal(pulledResult.flashed, true, "Clicking annotated text rings the card anchored there.");
+					assert.equal(pulledResult.anchorStart, "49", "The pulled card is the one anchored to the clicked line (got " + JSON.stringify(pulledResult) + ").");
+					// Comfortable mode under extreme volume cannot promise exactness —
+					// predecessor mass may exceed the space above the anchor. The
+					// compact-mode pull below pins the exact-alignment guarantee.
+					assert.equal(pulledResult.docMoved < 1, true, "The document never moves when the rail reorganizes.");
+					// Deeper into the same paragraph, the interpolated line pulls the
+					// other card: the click's y position disambiguates stacked anchors.
+					await crowdedPage.evaluate(() => {
+						document.querySelectorAll(".thread-flash").forEach((el) => el.classList.remove("thread-flash"));
+						const block = document.querySelector('[data-path="gamma"] [data-md-line="49"]');
+						const box = block.getBoundingClientRect();
+						block.dispatchEvent(new MouseEvent("click", { bubbles: true, clientY: box.top + box.height * (2.5 / 20) }));
+					});
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
+					assert.equal(await crowdedPage.evaluate(() => document.querySelector(".thread-flash")?.dataset.anchorStart), "51", "A click deeper in the paragraph pulls the card anchored to the nearer line.");
+					// Density: compact collapses every non-working card to a short row;
+					// the priority card stays full; auto engages past a dozen cards.
+					await crowdedPage.$eval("[data-density-picker]", (select) => { select.value = "compact"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+					const density = await crowdedPage.evaluate(() => {
+						const outers = [...document.querySelectorAll("[data-carried-thread]")];
+						const priority = outers.find((card) => !card.classList.contains("card-compact"));
+						const compacts = outers.filter((card) => card.classList.contains("card-compact"));
+						return { total: outers.length, compacts: compacts.length, tallCompacts: compacts.filter((card) => card.getBoundingClientRect().height > 90).length, priorityHeight: priority ? priority.getBoundingClientRect().height : 0 };
+					});
+					assert.equal(density.compacts >= density.total - 1, true, "Compact density collapses every card except the working one.");
+					assert.equal(density.tallCompacts, 0, "Compact cards are short rows.");
+					assert.equal(density.priorityHeight > 120, true, "The working card stays full height (got " + density.priorityHeight + "px).");
+					const expanded = await crowdedPage.evaluate(() => {
+						const target = [...document.querySelectorAll("[data-carried-thread].card-compact")][3];
+						target.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+						return target.dataset.carriedThread;
+					});
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+					assert.equal(await crowdedPage.$eval(`[data-carried-thread="${expanded}"]`, (card) => card.classList.contains("card-compact")), false, "Clicking a compact card expands it into the working card.");
+					await crowdedPage.$eval("[data-density-picker]", (select) => { select.value = "auto"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+					assert.equal(await crowdedPage.evaluate(() => document.querySelectorAll(".card-compact").length > 12), true, "Auto density compacts a crowded review on its own.");
+					// With compact cards the volume fits, so click-to-pull achieves
+					// exact alignment even in the last section.
+					const compactPull = await crowdedPage.evaluate(() => {
+						document.querySelectorAll(".thread-flash").forEach((el) => el.classList.remove("thread-flash"));
+						const block = document.querySelector('[data-path="gamma"] [data-md-line="49"]');
+						block.scrollIntoView({ block: "center" });
+						const box = block.getBoundingClientRect();
+						block.dispatchEvent(new MouseEvent("click", { bubbles: true, clientY: box.top + 4 }));
+						return box.top + scrollY;
+					});
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+					const compactPullResult = await crowdedPage.evaluate((blockTop) => {
+						const flashed = document.querySelector(".thread-flash");
+						return { anchor: flashed?.dataset.anchorStart, distance: flashed ? Math.abs(flashed.getBoundingClientRect().top + scrollY - blockTop) : Infinity };
+					}, compactPull);
+					assert.equal(compactPullResult.anchor, "49", "The compact-mode pull selects the clicked line's card.");
+					assert.equal(compactPullResult.distance < 48, true, "With room to yield, the pulled card aligns beside the clicked text (distance: " + compactPullResult.distance + "px).");
 				} finally {
 					await crowdedPage.close();
 					await crowdedServer.close();

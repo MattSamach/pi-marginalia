@@ -204,8 +204,17 @@
     return section ? Number(section.dataset.reviewFile) : fileSections.length;
   };
   const threadNumber = (thread) => Number(thread.id.split('-t')[1]) || 0;
-  const orderedAwaiting = () => [...threads.values()].filter(isAwaiting).sort((left, right) => sectionIndexOf(left) - sectionIndexOf(right) || threadNumber(left) - threadNumber(right));
-  const orderedResolved = () => [...threads.values()].filter((thread) => thread.status === 'resolved').sort((left, right) => sectionIndexOf(left) - sectionIndexOf(right) || threadNumber(left) - threadNumber(right));
+  // Navigation walks reading order: section, then anchor position, then age.
+  // Creation order alone interleaves same-line and later-line threads, so n
+  // would visit line 25, jump to 27, then return to the other 25.
+  const anchorLineOf = (thread) => {
+    const anchor = thread.carried && thread.carried.startLine !== undefined ? thread.carried : thread;
+    const start = anchor.startLine ?? (anchor.side === 'old' ? anchor.oldStart : anchor.newStart ?? anchor.oldStart);
+    return Number.isFinite(start) ? start : -1;
+  };
+  const readingOrder = (left, right) => sectionIndexOf(left) - sectionIndexOf(right) || anchorLineOf(left) - anchorLineOf(right) || threadNumber(left) - threadNumber(right);
+  const orderedAwaiting = () => [...threads.values()].filter(isAwaiting).sort(readingOrder);
+  const orderedResolved = () => [...threads.values()].filter((thread) => thread.status === 'resolved').sort(readingOrder);
   const commentaryThreadFor = (file, commentaryId) => [...threads.values()].find((thread) => thread.source === 'commentary' && thread.file === file && thread.commentaryId === commentaryId);
 
   // Navigation ---------------------------------------------------------------
@@ -757,6 +766,18 @@
     }
     if (!rails.length) return;
     try {
+      // Density first: compact everything except the working card (priority,
+      // focused, or holding a draft), so measurement sees final heights.
+      // Auto engages past a dozen open cards; resolved cards keep their own
+      // compact machinery; composers never compact.
+      const densityMode = (() => { try { return localStorage.getItem('picr-density') || 'auto'; } catch { return 'auto'; } })();
+      const allItems = rails.flatMap((entry) => entry.items);
+      const compactable = allItems.filter((item) => !item.matches('.selection-composer') && !item.classList.contains('resolved') && !item.classList.contains('resolved-collapsed') && !item.querySelector('.thread-card.resolved'));
+      const compactAll = densityMode === 'compact' || (densityMode === 'auto' && compactable.length > 12);
+      for (const item of allItems) {
+        const working = item === priorityRailItem || item.contains(document.activeElement) || [...item.querySelectorAll('textarea')].some((box) => box.value.trim());
+        item.classList.toggle('card-compact', compactAll && compactable.includes(item) && !working);
+      }
       // Writes first: aligned mode engages before measuring so the in-flow
       // furniture reports its extent without the cards.
       for (const entry of rails) {
@@ -1154,6 +1175,14 @@
       } catch (ignored) { /* private mode: theme lives for this page only */ }
     });
   });
+  const densityPicker = document.querySelector('[data-density-picker]');
+  if (densityPicker) {
+    try { densityPicker.value = localStorage.getItem('picr-density') || 'auto'; } catch { densityPicker.value = 'auto'; }
+    densityPicker.addEventListener('change', () => {
+      try { localStorage.setItem('picr-density', densityPicker.value); } catch (ignored) { /* private mode */ }
+      scheduleRailLayout();
+    });
+  }
 
   // Threads ------------------------------------------------------------------
   const threadHighlights = new Map();
@@ -2090,13 +2119,7 @@
     });
   });
   inbox?.addEventListener('click', navigateNext);
-  // Clicking anywhere inside a rail card makes it the alignment priority
-  // and the navigation cursor: n continues from the card you clicked.
-  reviewRoot.addEventListener('click', (event) => {
-    if (!(event.target instanceof Element)) return;
-    setPriorityRailItem(event.target);
-    const card = event.target.closest('[data-thread-card], [data-carried-thread], .agent-note');
-    if (!card) return;
+  const seatNavCursor = (card) => {
     let threadId = card.dataset.threadCard || card.dataset.carriedThread;
     if (threadId === undefined && card.dataset.commentaryId !== undefined) {
       threadId = commentaryThreadFor(card.closest('[data-review-file]')?.dataset.path, card.dataset.commentaryId)?.id;
@@ -2105,6 +2128,61 @@
       currentThreadId = threadId;
       rememberThreadLocation(threadId);
     }
+  };
+  // The card anchored to a document position. A plan paragraph is one block
+  // spanning several source lines, so the click's vertical position within it
+  // interpolates the intended line; the nearest anchor wins, then the most
+  // specific range.
+  const railItemForBlock = (block, clientY) => {
+    const section = block.closest('[data-review-file]');
+    if (!section) return undefined;
+    let clickedLine;
+    if (planMode) {
+      const first = Number(block.dataset.mdLine);
+      const last = Number(block.dataset.mdEnd ?? block.dataset.mdLine);
+      const box = block.getBoundingClientRect();
+      const share = box.height > 0 && clientY !== undefined ? Math.min(0.999, Math.max(0, (clientY - box.top) / box.height)) : 0;
+      clickedLine = first + Math.floor(share * (last - first + 1));
+    }
+    const covers = (item) => {
+      const start = Number(item.dataset.anchorStart);
+      if (!Number.isFinite(start)) return false;
+      const end = Number(item.dataset.anchorEnd || item.dataset.anchorStart);
+      if (planMode) return Number(block.dataset.mdEnd ?? block.dataset.mdLine) >= start && Number(block.dataset.mdLine) <= end;
+      const side = item.dataset.anchorSide;
+      const keys = side === 'old' ? ['oldLine'] : side === 'new' ? ['newLine'] : ['oldLine', 'newLine'];
+      return keys.some((key) => {
+        const value = Number(block.dataset[key]);
+        return Number.isInteger(value) && value >= start && value <= end;
+      });
+    };
+    const span = (item) => Number(item.dataset.anchorEnd || item.dataset.anchorStart) - Number(item.dataset.anchorStart);
+    const off = (item) => clickedLine === undefined ? 0 : Math.abs(Number(item.dataset.anchorStart) - clickedLine);
+    const matches = [...section.querySelectorAll('[data-anchor-start]')].filter((item) => item.matches('.agent-note, .thread-card, [data-carried-thread]') && !item.hidden && covers(item));
+    matches.sort((left, right) => off(left) - off(right) || span(left) - span(right));
+    return matches[0];
+  };
+  // Clicking anywhere inside a rail card makes it the alignment priority
+  // and the navigation cursor: n continues from the card you clicked.
+  // Clicking annotated document text pulls that card to the click instead —
+  // the document never scrolls for the rail.
+  reviewRoot.addEventListener('click', (event) => {
+    if (!(event.target instanceof Element)) return;
+    setPriorityRailItem(event.target);
+    const card = event.target.closest('[data-thread-card], [data-carried-thread], .agent-note');
+    if (card) {
+      seatNavCursor(card);
+      return;
+    }
+    if (!window.getSelection().isCollapsed) return;
+    if (event.target.closest('a, button, textarea, .line-number, .diagram-block, .selection-composer')) return;
+    const block = event.target.closest(planMode ? '[data-md-line]' : 'tr.diff-line');
+    if (!block) return;
+    const item = railItemForBlock(block, event.clientY);
+    if (!item) return;
+    setPriorityRailItem(item);
+    seatNavCursor(item);
+    flashTarget(item);
   });
   shortcutsOverlay?.addEventListener('click', (event) => {
     if (event.target === shortcutsOverlay) shortcutsOverlay.hidden = true;

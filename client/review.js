@@ -1682,6 +1682,51 @@
       if (origin) origin.hidden = true;
     }
   };
+  // Rail filter chips: one session-transient filter over every rail card in
+  // every section. Threads own the truth — a card shows when its thread passes
+  // the active filter — and the outermost rail item decides for everything
+  // nested inside it (thread cards under carried shells or agent notes follow
+  // their shell). Selection composers are never filtered.
+  const railFilterBar = document.querySelector('[data-rail-filters]');
+  const railFilterButtons = [...document.querySelectorAll('[data-rail-filter]')];
+  let railFilter = 'all';
+  const railFilterAccepts = (thread) => {
+    if (railFilter === 'all' || !thread) return true;
+    if (railFilter === 'awaiting') return isAwaiting(thread);
+    if (railFilter === 'open') return thread.status === 'open';
+    return thread.status === 'resolved';
+  };
+  const railItemThread = (item) => {
+    if (item.dataset.threadCard !== undefined) return threads.get(item.dataset.threadCard);
+    if (item.dataset.carriedThread !== undefined) return threads.get(item.dataset.carriedThread);
+    return commentaryThreadFor(item.closest('[data-review-file]')?.dataset.path, item.dataset.commentaryId);
+  };
+  const RAIL_FILTER_LABELS = { all: 'All', awaiting: 'Awaiting you', open: 'Open', resolved: 'Resolved' };
+  const applyRailFilter = () => {
+    const all = [...threads.values()];
+    const counts = {
+      all: all.length,
+      awaiting: all.filter(isAwaiting).length,
+      open: all.filter((thread) => thread.status === 'open').length,
+      resolved: all.filter((thread) => thread.status === 'resolved').length,
+    };
+    if (railFilterBar) railFilterBar.hidden = all.length === 0;
+    railFilterButtons.forEach((button) => {
+      button.textContent = RAIL_FILTER_LABELS[button.dataset.railFilter] + ' ' + counts[button.dataset.railFilter];
+      button.classList.toggle('active', button.dataset.railFilter === railFilter);
+    });
+    // Filtering hides the card outright: the rail layout skips hidden items,
+    // so packing and density see only what the filter keeps.
+    document.querySelectorAll('.thread-card, [data-carried-thread], .agent-note').forEach((item) => {
+      if (railItemOf(item) !== item) return;
+      item.hidden = !railFilterAccepts(railItemThread(item));
+    });
+    scheduleRailLayout();
+  };
+  railFilterButtons.forEach((button) => button.addEventListener('click', () => {
+    railFilter = button.dataset.railFilter;
+    applyRailFilter();
+  }));
   const updateAggregates = () => {
     const all = [...threads.values()];
     const awaiting = orderedAwaiting();
@@ -1747,6 +1792,7 @@
         return item;
       }));
     }
+    applyRailFilter();
   };
   const upsertThread = (thread) => {
     threads.set(thread.id, thread);
@@ -1779,6 +1825,13 @@
     revealThread(awaiting[next]);
   };
   const revealThread = (thread) => {
+    // A reveal must be visible: a filter that hides the target's card resets
+    // to All (chips included) rather than navigating to blank rail space.
+    if (!railFilterAccepts(thread)) {
+      railFilter = 'all';
+      applyRailFilter();
+      setStatus('Filter cleared to show the thread.');
+    }
     currentThreadId = thread.id;
     rememberThreadLocation(thread.id);
     if (!thread.file) showOverview();

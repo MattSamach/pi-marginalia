@@ -576,6 +576,37 @@ try {
 	failDeliver = false;
 	assert.equal(flakyQueue.flush(true), 1, "The kept batch delivers on the next settle.");
 	{
+		// Busy-burst coalescing: same-key entries merge into one rendered
+		// message; keyless entries are barriers nothing merges across.
+		const batches = [];
+		const coalescing = createReviewMessageQueue((batch) => batches.push(batch));
+		const entry = (key, turn) => ({ key, payload: { attrs: key + "@" + turn, turns: [turn] }, merge: (prev, next) => ({ ...next, turns: [...prev.turns, ...next.turns] }), render: (payload) => payload.attrs + ":" + payload.turns.join("+") });
+		assert.equal(coalescing.post(entry("t1", "a"), true), false, "Idle keyed posts deliver immediately.");
+		assert.deepEqual(batches, [["t1@a:a"]]);
+		coalescing.post(entry("t1", "b"), false);
+		coalescing.post(entry("t2", "c"), false);
+		coalescing.post(entry("t1", "d"), false);
+		assert.equal(coalescing.size(), 2, "A same-key burst occupies one queued entry.");
+		assert.equal(coalescing.flush(true), 2);
+		assert.deepEqual(batches[1], ["t1@d:b+d", "t2@c:c"], "Merged entries render once with all turns in post order and the newest attributes.");
+		coalescing.post(entry("t1", "e"), false);
+		coalescing.post("pass-barrier", false);
+		coalescing.post(entry("t1", "f"), false);
+		assert.equal(coalescing.size(), 3, "A keyless barrier stops merging: same-key turns on both sides stay separate.");
+		assert.equal(coalescing.flush(true), 3);
+		assert.deepEqual(batches[2], ["t1@e:e", "pass-barrier", "t1@f:f"], "Thread context never migrates across a pass message.");
+		// A failed flush keeps merged state intact for the retry.
+		let boom = true;
+		const flakyCoalescing = createReviewMessageQueue((batch) => { if (boom) throw new Error("boom"); batches.push(batch); });
+		flakyCoalescing.post(entry("t9", "x"), false);
+		flakyCoalescing.post(entry("t9", "y"), false);
+		assert.throws(() => flakyCoalescing.flush(true), /boom/);
+		assert.equal(flakyCoalescing.size(), 1, "The merged entry survives a failed flush.");
+		boom = false;
+		flakyCoalescing.flush(true);
+		assert.deepEqual(batches[3], ["t9@y:x+y"], "The retry renders the same merged envelope.");
+	}
+	{
 		// Every invalid anchor is reported in ONE rejection, each with the
 		// ranges that are visible — one corrected resubmission fixes them all.
 		let aggregated;

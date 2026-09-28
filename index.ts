@@ -223,7 +223,16 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			// marked working renders as seen (delivered, turn over, no reply).
 			isTurnActive: () => !ctx.isIdle(),
 			onThreadPost: async (round: ReviewRound, thread: ReviewThread, turns: ReviewThreadTurn[]) => {
-				const queued = queue.post(formatThreadMessageXml(round.review, thread, turns, round.number), ctx.isIdle());
+				// Same-thread turns queued during one busy stretch coalesce into a
+				// single envelope at flush; the payload freezes copies at post time
+				// (matching the old pre-formatted-string behavior), and merge keeps
+				// the newest thread attributes with all turns in post order.
+				const queued = queue.post({
+					key: `${round.review.id}:${thread.id}`,
+					payload: { review: round.review, thread: { ...thread }, turns: turns.map((turn) => ({ ...turn })), round: round.number },
+					merge: (prev: { turns: ReviewThreadTurn[] }, next: { turns: ReviewThreadTurn[] }) => ({ ...next, turns: [...prev.turns, ...next.turns] }),
+					render: (payload: { review: ReviewRound["review"]; thread: ReviewThread; turns: ReviewThreadTurn[]; round: number }) => formatThreadMessageXml(payload.review, payload.thread, payload.turns, payload.round),
+				}, ctx.isIdle());
 				// The message is accepted once queue.post returns; a notify failure must
 				// not be reported as a delivery failure (the server would requeue an
 				// escalation whose content is already on its way).

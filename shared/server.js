@@ -95,6 +95,7 @@ export async function createCodeReviewServer(review, options) {
 	const diffSignature = (file) => JSON.stringify([file.status, file.oldPath ?? null, file.binary === true, file.omitted === true, file.truncated === true, file.patchBytes ?? 0, file.contentSha256 ?? null, (file.lines ?? []).map((line) => [line.kind, line.content, line.oldLine ?? null, line.newLine ?? null])]);
 	const rounds = [{ number: 1, review, store: createThreadStore(review), viewed: new Set() }];
 	let phase = "reviewing";
+	let closeReason;
 	const entryTokens = new Map();
 	const mintToken = () => {
 		const token = randomBytes(24).toString("base64url");
@@ -129,7 +130,7 @@ export async function createCodeReviewServer(review, options) {
 		for (const client of sseClients) client.write(frame);
 	};
 	const broadcastThread = (round, thread) => broadcast("thread", { round: round.number, thread, summary: round.store.summary() });
-	const broadcastPhase = () => broadcast("phase", { phase, currentRound: current().number });
+	const broadcastPhase = () => broadcast("phase", { phase, currentRound: current().number, ...(closeReason === undefined ? {} : { reason: closeReason }) });
 	const heartbeat = setInterval(() => {
 		for (const client of sseClients) client.write(": ping\n\n");
 	}, SSE_HEARTBEAT_MS);
@@ -217,7 +218,7 @@ export async function createCodeReviewServer(review, options) {
 		} catch {
 			// An approval that landed while this delivery was in flight closed the
 			// session; nothing will re-deliver, so the terminal store stays frozen.
-			if (phase === "approved") return { thread: result.thread, failed: true };
+			if (phase === "approved" || phase === "closed") return { thread: result.thread, failed: true };
 			const requeued = round.store.requeue(result.thread.id, result.deliveredTurns.map((turn) => turn.seq), result.prevLive);
 			if (requeued) broadcastThread(round, requeued);
 			return { thread: requeued ?? result.thread, failed: true };
@@ -238,6 +239,7 @@ export async function createCodeReviewServer(review, options) {
 	const guardReviewingPhase = (res) => {
 		if (phase === "reviewing") return true;
 		if (phase === "approved") writeText(res, 409, "This review is approved and closed to changes; pages stay readable.");
+		else if (phase === "closed") writeText(res, 409, "Pi closed this review session; pages stay readable.");
 		else writeText(res, 409, "Pi is revising this review. Press \u201cResume reviewing this round\u201d to comment while you wait, or hold on for the next round.");
 		return false;
 	};
@@ -278,7 +280,7 @@ export async function createCodeReviewServer(review, options) {
 			}
 		}
 		res.writeHead(200, htmlHeaders(nonce));
-		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase }, { carried: round.store.list().filter((thread) => thread.carried), archive, viewed: [...round.viewed], changedSections, elementDiff, appearance: options.appearance }));
+		res.end(renderReviewHtml(round.review, nonce, { round: round.number, currentRound: current().number, phase, closeReason }, { carried: round.store.list().filter((thread) => thread.carried), archive, viewed: [...round.viewed], changedSections, elementDiff, appearance: options.appearance }));
 	};
 
 	let mermaidSource;
@@ -458,8 +460,8 @@ export async function createCodeReviewServer(review, options) {
 				// Viewed is reviewer bookkeeping: allowed while Pi revises (unlike thread
 				// mutations), but only on the current round — and never after approval.
 				// Closed means closed: the terminal 409 outranks payload shape errors.
-				if (phase === "approved") {
-					writeText(res, 409, "This review is approved and closed to changes; pages stay readable.");
+				if (phase === "approved" || phase === "closed") {
+					writeText(res, 409, phase === "approved" ? "This review is approved and closed to changes; pages stay readable." : "Pi closed this review session; pages stay readable.");
 					return;
 				}
 				if (!body || typeof body !== "object" || typeof body.file !== "string" || typeof body.viewed !== "boolean") {
@@ -703,6 +705,13 @@ export async function createCodeReviewServer(review, options) {
 		isStale: () => stale,
 		currentReview: () => current().review,
 		currentRoundNumber: () => current().number,
+		closeSession(reason) {
+			if (phase === "approved" || phase === "closed") return { error: phase };
+			phase = "closed";
+			closeReason = typeof reason === "string" && reason.trim() ? reason.trim() : undefined;
+			broadcastPhase();
+			return { round: current().number };
+		},
 		roundFiles: (reviewId) => rounds.find((round) => round.review.id === reviewId)?.review.files.map(({ path, summary, reviewMode, commentary, contentSha256 }) => ({ path, summary, reviewMode, commentary, contentSha256 })),
 		hasRound: (reviewId) => rounds.some((round) => round.review.id === reviewId),
 		locateThread(threadId) {
@@ -734,14 +743,14 @@ export async function createCodeReviewServer(review, options) {
 		postPiReply(threadId, body, resolves) {
 			// A closed session names the true reason; a bare failure would read as a
 			// turn-limit guess and send Pi down the wrong recovery path.
-			if (phase === "approved") return { error: "approved" };
+			if (phase === "approved" || phase === "closed") return { error: phase };
 			const round = current();
 			const thread = round.store.postPiReply(threadId, body, resolves);
 			if (thread) broadcastThread(round, thread);
 			return thread;
 		},
 		addRound(nextReview, previousRoundId, threadResponses) {
-			if (phase === "approved") return { error: "approved" };
+			if (phase === "approved" || phase === "closed") return { error: phase };
 			const active = current();
 			if (previousRoundId !== active.review.id) {
 				if (rounds.some((round) => round.review.id === previousRoundId)) {

@@ -206,6 +206,22 @@ try {
 
 	assert.throws(() => buildCarriedThreads([{ respondsTo: "t1", resolution: "addressed", body: "b", line: 4 }], [{ id: "t1", status: "open", source: "selection", file: "untracked.txt", turns: [{ author: "user", body: "q", ts: 1 }] }], ordered, 1), /Unknown key "line" on thread response t1/, "Unknown thread-response keys are rejected.");
 
+	// closeSession is terminal like approval: replies, rounds, and re-closing
+	// all refuse, and the phase names the cause.
+	{
+		const closeServer = await createCodeReviewServer(ordered, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+		try {
+			assert.deepEqual(closeServer.closeSession("Approved in chat."), { round: 1 }, "Closing an open session reports the current round.");
+			assert.deepEqual(closeServer.closeSession("again"), { error: "closed" }, "Closing twice refuses.");
+			assert.deepEqual(closeServer.addRound(ordered, ordered.id, undefined), { error: "closed" }, "A closed session accepts no further rounds.");
+			const seededThread = closeServer.roundThreads?.() ?? [];
+			void seededThread;
+			assert.deepEqual(closeServer.postPiReply("any-id", "body", false), { error: "closed" }, "A closed session accepts no replies.");
+		} finally {
+			await closeServer.close();
+		}
+	}
+
 	// The server exposes a round's applied manifest state for carry-forward.
 	{
 		const rfServer = await createCodeReviewServer(ordered, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
@@ -1322,6 +1338,10 @@ try {
 	assert.equal(renderMarkdown("```\nunterminated"), "<pre><code>unterminated</code></pre>");
 	assert.equal(renderMarkdown("[docs](https://example.com/a?b=1&c=2)"), '<p><a href="https://example.com/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">docs</a></p>');
 	assert.equal(renderMarkdown("[evil](javascript:alert(1))"), "<p>[evil](javascript:alert(1))</p>", "Non-http(s) schemes never become links.");
+	assert.equal(renderMarkdown("[round one](/round/1#loc=a.ts:L5)"), '<p><a href="/round/1#loc=a.ts:L5">round one</a></p>', "Same-origin round links render as in-place navigation.");
+	assert.equal(renderMarkdown("[thread](/round/12#thread=abc-t1)"), '<p><a href="/round/12#thread=abc-t1">thread</a></p>', "Round thread anchors link too.");
+	assert.equal(renderMarkdown("[bad](/rounds/1)"), "<p>[bad](/rounds/1)</p>", "Only the /round/N path shape links; other paths stay text.");
+	assert.equal(renderMarkdown("[bad](//evil.com/round/1)"), "<p>[bad](//evil.com/round/1)</p>", "Protocol-relative URLs never become links.");
 	assert.equal(renderMarkdown("<script>alert(1)</script>"), "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>", "Raw HTML is always escaped.");
 	assert.equal(renderMarkdown('<img src=x onerror="alert(1)">'), "<p>&lt;img src=x onerror=&quot;alert(1)&quot;&gt;</p>");
 	assert.equal(renderMarkdown("a \uE000 0 \uE001 b `c`"), "<p>a  0  b <code>c</code></p>", "Token sentinels in input are stripped so they cannot splice the stash.");
@@ -3195,6 +3215,25 @@ try {
 				await quietPage.close();
 			} finally {
 				await quietServer.close();
+			}
+			// Closing a session flips the open page to a terminal banner with the
+			// reason, and locks composing exactly like approval.
+			{
+				const closePlan = buildPlanReview({ title: "Close demo", markdown: "## Only\n\nBody text here." });
+				const closeServer = await createCodeReviewServer(closePlan, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+				const closePage = await browser.newPage();
+				try {
+					await closePage.goto(closeServer.url, { waitUntil: "domcontentloaded" });
+					await closePage.waitForFunction(() => document.querySelector("[data-finish]"), { polling: 100 });
+					closeServer.closeSession("Unit approved in chat.");
+					await closePage.waitForFunction(() => document.body.dataset && document.querySelector("[data-phase-banner]")?.hidden === false, { polling: 100 });
+					const banner = await closePage.$eval("[data-phase-banner-text]", (node) => node.textContent);
+					assert.match(banner, /Closed — Unit approved in chat\. Pages stay readable\./, "The closed banner carries Pi's reason verbatim.");
+					assert.equal(await closePage.evaluate(() => document.body.classList.contains("locked") || getComputedStyle(document.querySelector("[data-finish]")).display === "none"), true, "A closed session locks its controls.");
+				} finally {
+					await closePage.close();
+					await closeServer.close();
+				}
 			}
 			console.log("Headless browser live-thread flow passed.");
 		} finally {

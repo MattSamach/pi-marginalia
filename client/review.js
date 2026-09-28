@@ -18,10 +18,11 @@
   const myRound = Number(document.body.dataset.round || 1);
   let currentRound = Number(document.body.dataset.currentRound || myRound);
   let phase = document.body.dataset.phase || 'reviewing';
+  let closeReason = document.body.dataset.closeReason || '';
   const loadedAsCurrent = myRound === currentRound;
   let autoNavigating = false;
   const isSuperseded = () => myRound < currentRound;
-  const isLocked = () => isSuperseded() || phase === 'approved';
+  const isLocked = () => isSuperseded() || phase === 'approved' || phase === 'closed';
   // While Pi revises, composing stays open but everything posts quietly —
   // queued for the next round. Live delivery, resolves, and passes wait.
   const quietOnly = () => phase === 'revising' && !isSuperseded();
@@ -136,6 +137,11 @@
       } else if (phase === 'approved') {
         phaseBanner.hidden = false;
         phaseBannerText.textContent = 'Approved — this review is closed. Pages stay readable.';
+        resumeButton.hidden = true;
+        gotoCurrent.hidden = true;
+      } else if (phase === 'closed') {
+        phaseBanner.hidden = false;
+        phaseBannerText.textContent = 'Closed — ' + (closeReason || 'Pi ended this review session.') + ' Pages stay readable.';
         resumeButton.hidden = true;
         gotoCurrent.hidden = true;
       } else if (phase === 'revising') {
@@ -2361,8 +2367,9 @@
     const data = JSON.parse(event.data);
     phase = data.phase;
     currentRound = data.currentRound;
+    if (data.reason) closeReason = data.reason;
     applySessionState();
-    if (myRound === currentRound) setStatus(phase === 'approved' ? 'Review approved — this session is closed.' : phase === 'revising' ? 'Pass sent — Pi is revising. New comments queue for the next round.' : 'Round ' + myRound + ' is live again — posting is unlocked.');
+    if (myRound === currentRound) setStatus(phase === 'approved' ? 'Review approved — this session is closed.' : phase === 'closed' ? 'Pi closed this review session.' : phase === 'revising' ? 'Pass sent — Pi is revising. New comments queue for the next round.' : 'Round ' + myRound + ' is live again — posting is unlocked.');
   });
   events.addEventListener('round-ready', (event) => {
     const data = JSON.parse(event.data);

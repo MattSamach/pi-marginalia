@@ -20,7 +20,8 @@ function emphasis(text) {
 
 // Input arrives escaped. Code spans are tokenized first so their contents are
 // never emphasized or linkified; whole anchors are tokenized so hrefs are
-// never re-processed. Only http(s) URLs become links; anything else stays text.
+// never re-processed. Only http(s) URLs and same-origin /round/N paths
+// become links; anything else stays text.
 function renderInline(text) {
 	const tokens = [];
 	const stash = (html) => {
@@ -31,6 +32,10 @@ function renderInline(text) {
 	// a URL breaks the anchor match instead of expanding markup into the href.
 	let work = text.replace(/`([^`]+)`/g, (_match, code) => stash("<code>" + code + "</code>"));
 	work = work.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)\uE000\uE001]+)\)/g, (_match, label, href) => stash('<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + emphasis(label) + "</a>"));
+	// Prior rounds are addressable: /round/N pages (with #loc= and #thread=
+	// anchors) are same-origin and navigate in place, so Pi can point the
+	// reviewer at earlier states instead of pasting old code into the rail.
+	work = work.replace(/\[([^\]]+)\]\((\/round\/\d+(?:#[^\s)\uE000\uE001]*)?)\)/g, (_match, label, href) => stash('<a href="' + href + '">' + emphasis(label) + "</a>"));
 	work = emphasis(work);
 	// A stashed anchor can carry earlier code-span markers in its label, so
 	// reinsertion loops; indices only ever reference earlier tokens, and the

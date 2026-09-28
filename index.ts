@@ -204,6 +204,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			if (!server) throw new Error(`No open review session contains round ${previousRoundId.slice(0, 12)}. Open a fresh review without previousRoundId.`);
 			const added = server.addRound(review, previousRoundId, threadResponses);
 			if (added.error === "approved") throw new Error("This review session was approved and is closed; open a fresh review without previousRoundId if another unit needs review.");
+			if (added.error === "closed") throw new Error("This review session was closed; open a fresh review without previousRoundId if another unit needs review.");
 			if (added.error === "superseded") throw new Error(`Round ${previousRoundId.slice(0, 12)} is already superseded; the current round is ${added.currentRoundId?.slice(0, 12)} (round ${added.currentRound}).`);
 			if (added.error === "wrong-root") throw new Error("The new snapshot belongs to a different repository than the open review session.");
 			if (added.error === "invalid-responses") throw new Error(`Thread responses are invalid: ${added.message}`);
@@ -418,7 +419,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "reply_review_thread",
 		label: "Reply Review Thread",
-		description: "Reply inside a live comment thread of the open browser code review. Use the thread id from the code-review-thread message. Set resolves=true to propose resolution; only the reviewer's explicit resolve action closes a thread.",
+		description: "Reply inside a live comment thread of the open browser code review. Use the thread id from the code-review-thread message. Set resolves=true to propose resolution; only the reviewer's explicit resolve action closes a thread. Markdown links to prior rounds render as clickable same-origin navigation: /round/N#loc=<file>:L<line> lands on a location, /round/N#thread=<id> on a thread — reference earlier states instead of pasting old code into the rail.",
 		promptSnippet: "Reply to a live browser code-review comment thread",
 		promptGuidelines: [
 			"When a code-review-thread message arrives, answer promptly with reply_review_thread using that thread id.",
@@ -437,6 +438,9 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 				if (result && "error" in result && result.error === "approved") {
 					throw new Error("This review session was approved and is closed; its threads are read-only. If another unit needs review, open a fresh review.");
 				}
+				if (result && "error" in result && result.error === "closed") {
+					throw new Error("This review session was closed; its threads are read-only. If another unit needs review, open a fresh review.");
+				}
 				const thread = result as ReviewThread | undefined;
 				if (!thread) throw new Error(`Reply to thread ${params.threadId} was rejected; the thread may have reached its turn limit.`);
 				const summary = server.threadSummary();
@@ -446,6 +450,31 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 				};
 			}
 			throw new Error(`No open code review contains thread ${params.threadId}.`);
+		},
+	});
+
+	pi.registerTool({
+		name: "close_review",
+		label: "Close Review Session",
+		description: "Close an open browser review, plan, or diagram session that concluded outside the browser — verbally approved, superseded, or abandoned. The reviewer's pages stay readable, but posting, thread replies, further rounds, and approval are disabled, and the browser shows a closed banner with the reason. Takes any round's snapshot id from the session.",
+		promptSnippet: "Close a browser review session that concluded outside the browser",
+		promptGuidelines: [
+			"Use close_review when a review or plan session's outcome was decided outside the browser (for example approved in chat) so the reviewer's open tab shows a truthful terminal state instead of live-looking controls.",
+			"Give close_review a short reviewer-facing reason; it appears verbatim in the browser banner.",
+		],
+		parameters: Type.Object({
+			roundId: Type.String({ minLength: 8, maxLength: 200, description: "Any round's snapshot id from the session to close." }),
+			reason: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Short reviewer-visible reason shown in the closed banner." })),
+		}, { additionalProperties: false }),
+		async execute(_toolCallId, params) {
+			const server = [...servers].find((candidate) => candidate.hasRound(params.roundId));
+			if (!server) throw new Error(`No open review session contains round ${params.roundId.slice(0, 12)}.`);
+			const result = server.closeSession(params.reason);
+			if ("error" in result) throw new Error(result.error === "approved" ? "This session was approved; approval is already terminal." : "This session is already closed.");
+			return {
+				content: [{ type: "text", text: `Closed the review session (round ${result.round} was current). Pages stay readable; posting, rounds, and approval are disabled.` }],
+				details: { round: result.round },
+			};
 		},
 	});
 

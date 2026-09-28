@@ -106,6 +106,8 @@ A review session is an ordered sequence of immutable rounds served in one browse
 - Browser approval is the reviewer's sign-off on the unit as reviewed. Whether that also authorizes a commit is governed by the commit policy of your session — follow it; where the reviewer's approval satisfies that policy, commit using their message. When committing, prefer the reviewer's edited commit message verbatim: it is their reviewed statement of the change.
 - Feedback submission is not approval by itself; only the approval message (or an equally explicit statement in chat) closes the unit.
 - Never commit a stale review or include changes made after the approved snapshot. If the approval arrived with `stale="true"`, reconcile before acting: identify the drift, and either confirm it is expected (e.g. your own already-authorized follow-up) or reopen a fresh review.
+- Link prior rounds instead of quoting them: `[the round-1 version](/round/1#loc=src/app.ts:L42)` and `[that thread](/round/2#thread=<id>)` render as same-origin links in replies and commentary. Never paste earlier code into the rail.
+- If a unit's outcome is decided outside the browser (approved in chat, abandoned, superseded), call `close_review` with any round id and a short reason so the open tab shows a truthful closed banner instead of live controls.
 - After approval the session is closed: no further rounds (`previousRoundId` is rejected), no thread replies, pages stay readable. A new unit gets a fresh review.
 - Commit only the reviewed unit. Do not include unrelated or unreviewed files.
 - After the commit succeeds, move to the next logical unit only when it belongs to an implementation plan the user already authorized and the next scope is clear. Otherwise, stop and ask.

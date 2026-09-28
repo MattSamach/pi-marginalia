@@ -25,7 +25,74 @@ export const THREAD_RESOLUTIONS = Object.freeze(["addressed", "declined", "needs
  * awaiting delivery, and rounds carry it forward still queued instead.
  */
 export function threadsAwaitingResponse(threads) {
-	return threads.filter((thread) => thread.status === "open" && thread.turns.some((turn) => turn.author === "user" && turn.delivered === true));
+	return threads.filter((thread) => {
+		if (thread.status !== "open" || thread.queued === true) return false;
+		// Awaiting means the reviewer's delivered word is newer than Pi's last
+		// reply. Undelivered tails do not count (Pi has not seen them; they flow
+		// through the pass or the next delivery), and a thread Pi answered last
+		// carries forward quietly instead of demanding re-justification.
+		let lastPi = -1;
+		for (let index = thread.turns.length - 1; index >= 0; index--) {
+			if (thread.turns[index].author === "pi") { lastPi = index; break; }
+		}
+		return thread.turns.some((turn, index) => index > lastPi && turn.author === "user" && turn.delivered === true);
+	});
+}
+
+/**
+ * Carry open threads that need no response — Pi spoke last (or the newest
+ * reviewer turn never reached Pi's context outside the queued machinery) — into
+ * the next round untouched: same turns, same proposed-resolve state, no
+ * appended message. Anchors revalidate against the new snapshot exactly like
+ * held threads: visible boundaries keep their spot, anything else lands in the
+ * outdated group with the file link kept when the file still exists.
+ */
+export function buildQuietCarriedThreads(previousThreads, respondedIds, nextReview, fromRound) {
+	const files = new Map(nextReview.files.map((file) => [file.path, file]));
+	const awaiting = new Set(threadsAwaitingResponse(previousThreads).map((thread) => thread.id));
+	return previousThreads
+		.filter((thread) => thread.status === "open" && thread.queued !== true && !awaiting.has(thread.id) && !respondedIds.has(thread.id) && thread.turns.some((turn) => turn.author === "user"))
+		.map((thread) => {
+			const file = thread.file === undefined ? undefined : files.get(thread.file);
+			const anchorable = file !== undefined && !file.binary && !file.omitted;
+			const anchor = {};
+			if (thread.element !== undefined && anchorable && typeof file.markdown === "string" && elementExists(thread.element, file.markdown)) anchor.element = thread.element;
+			const lineVisible = (key, start, end) => [start, end].every((boundary) => file.lines.some((line) => line[key] === boundary));
+			if (anchorable && thread.startLine !== undefined) {
+				if (lineVisible("newLine", thread.startLine, thread.endLine ?? thread.startLine)) {
+					anchor.side = thread.side ?? "new";
+					anchor.startLine = thread.startLine;
+					anchor.endLine = thread.endLine ?? thread.startLine;
+				}
+			} else if (anchorable && (thread.newStart !== undefined || thread.oldStart !== undefined)) {
+				if (thread.newStart !== undefined && lineVisible("newLine", thread.newStart, thread.newEnd ?? thread.newStart)) {
+					anchor.side = "new";
+					anchor.startLine = thread.newStart;
+					anchor.endLine = thread.newEnd ?? thread.newStart;
+				} else if (thread.oldStart !== undefined && lineVisible("oldLine", thread.oldStart, thread.oldEnd ?? thread.oldStart)) {
+					anchor.side = "old";
+					anchor.startLine = thread.oldStart;
+					anchor.endLine = thread.oldEnd ?? thread.oldStart;
+				}
+			}
+			const placement = anchor.startLine !== undefined || anchor.element !== undefined
+				? "anchored"
+				: thread.source === "overview" && thread.file === undefined
+					? "overview"
+					: file !== undefined && anchor.startLine === undefined && anchor.element === undefined && thread.startLine === undefined && thread.newStart === undefined && thread.oldStart === undefined
+						? "file"
+						: "outdated";
+			return {
+				id: thread.id,
+				source: thread.source,
+				...(thread.highlight === undefined ? {} : { highlight: thread.highlight }),
+				...(file === undefined ? {} : { file: thread.file }),
+				...(anchor.element === undefined ? {} : { element: anchor.element }),
+				piProposedResolve: thread.piProposedResolve === true,
+				carried: { fromRound, quiet: true, placement, ...(anchor.side === undefined ? {} : { side: anchor.side, startLine: anchor.startLine, endLine: anchor.endLine }), ...(anchor.element === undefined ? {} : { element: anchor.element }) },
+				turns: thread.turns.map((turn) => ({ ...turn })),
+			};
+		});
 }
 
 /**
@@ -85,7 +152,8 @@ export function buildHeldThreads(previousThreads, nextReview, fromRound) {
 export function buildCarriedThreads(responses, previousThreads, nextReview, fromRound, limits = THREAD_LIMITS) {
 	const list = responses ?? [];
 	if (!Array.isArray(list)) throw new Error("threadResponses must be an array.");
-	const eligible = new Map(threadsAwaitingResponse(previousThreads).map((thread) => [thread.id, thread]));
+	const eligible = new Map(previousThreads.filter((thread) => thread.status === "open" && thread.queued !== true && thread.turns.some((turn) => turn.author === "user")).map((thread) => [thread.id, thread]));
+	const required = new Set(threadsAwaitingResponse(previousThreads).map((thread) => thread.id));
 	const files = new Map(nextReview.files.map((file) => [file.path, file]));
 	const seen = new Set();
 	const carried = list.map((response) => {
@@ -94,7 +162,7 @@ export function buildCarriedThreads(responses, previousThreads, nextReview, from
 			if (!["respondsTo", "resolution", "body", "file", "startLine", "endLine", "side", "element"].includes(key)) throw new Error(`Unknown key "${key}" on thread response ${response.respondsTo}.`);
 		}
 		const origin = eligible.get(response.respondsTo);
-		if (!origin) throw new Error(`Thread response ${response.respondsTo} does not match an open thread awaiting a response in round ${fromRound}.`);
+		if (!origin) throw new Error(`Thread response ${response.respondsTo} does not match an open thread in round ${fromRound}.`);
 		if (seen.has(origin.id)) throw new Error(`Thread ${origin.id} has more than one response.`);
 		seen.add(origin.id);
 		if (!THREAD_RESOLUTIONS.includes(response.resolution)) throw new Error(`Thread response ${origin.id} needs a resolution of addressed, declined, or needs-discussion.`);
@@ -146,8 +214,8 @@ export function buildCarriedThreads(responses, previousThreads, nextReview, from
 			turns: [...origin.turns.map((turn) => ({ ...turn })), { author: "pi", body: response.body.trim(), ts: Date.now(), resolution: response.resolution }],
 		};
 	});
-	const missing = [...eligible.keys()].filter((id) => !seen.has(id));
-	if (missing.length) throw new Error(`Every open thread needs exactly one response; missing: ${missing.join(", ")}.`);
+	const missing = [...required].filter((id) => !seen.has(id));
+	if (missing.length) throw new Error(`Every thread awaiting your response (the reviewer spoke after your last reply) needs exactly one; missing: ${missing.join(", ")}. Threads where you spoke last may be omitted and carry forward automatically.`);
 	return carried;
 }
 

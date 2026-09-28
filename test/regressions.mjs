@@ -11,7 +11,7 @@ import { renderReviewHtml } from "../shared/render.js";
 import { renderMarkdown } from "../shared/markdown.js";
 import { computeIntraline } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
-import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS, threadsAwaitingResponse } from "../shared/threads.js";
+import { buildCarriedThreads, buildHeldThreads, buildQuietCarriedThreads, createThreadStore, THREAD_LIMITS, threadsAwaitingResponse } from "../shared/threads.js";
 import { createReviewMessageQueue } from "../shared/delivery-queue.js";
 import { buildDiagramReview, buildPlanReview, PLAN_LIMITS, resolvePlanResponses, sectionizePlan } from "../shared/plan-review.js";
 
@@ -343,6 +343,37 @@ try {
 	assert.throws(() => buildCarriedThreads([validPair[0], { respondsTo: carrySelection.id, resolution: "addressed", body: "x", file: "untracked.txt", side: "new" }], carrySource.list(), ordered, 1), /without startLine/, "Partial anchors must be rejected, not downgraded to file placement.");
 	assert.throws(() => buildCarriedThreads([validPair[0], { respondsTo: carrySelection.id, resolution: "addressed", body: "x", file: "untracked.txt", endLine: 2 }], carrySource.list(), ordered, 1), /without startLine/);
 	assert.throws(() => buildCarriedThreads([validPair[0], { ...validPair[1], file: "binary.dat" }], carrySource.list(), ordered, 1), /cannot line-anchor/, "Binary files reject line anchors for carried threads.");
+
+	// Quiet threads — Pi spoke last — are omissible; the server referees.
+	{
+		const quietRound = createThreadStore(ordered);
+		const quietThread = quietRound.postUserTurn({ source: "selection", file: "untracked.txt", side: "new", newStart: 1, newEnd: 1, highlight: "A", body: "Q?" }).thread;
+		quietRound.postPiReply(quietThread.id, "Answered; proposing resolve.", true);
+		const awaitingThread = quietRound.postUserTurn({ source: "overview", body: "New topic." }).thread;
+		assert.throws(() => buildCarriedThreads([], quietRound.list(), ordered, 1), new RegExp(`missing: ${awaitingThread.id}`), "Threads the reviewer touched last still demand a response — and only those.");
+		const responded = buildCarriedThreads([{ respondsTo: awaitingThread.id, resolution: "addressed", body: "ok" }], quietRound.list(), ordered, 1);
+		assert.equal(responded.length, 1, "Omitting a quiet thread is legal.");
+		const quietCarried = buildQuietCarriedThreads(quietRound.list(), new Set(responded.map((record) => record.id)), ordered, 1);
+		assert.equal(quietCarried.length, 1, "The quiet thread carries automatically.");
+		const carriedQuiet = quietCarried[0];
+		assert.equal(carriedQuiet.id, quietThread.id);
+		assert.equal(carriedQuiet.turns.length, 2, "Quiet carry appends no message.");
+		assert.equal(carriedQuiet.carried.quiet, true);
+		assert.equal(carriedQuiet.carried.resolution, undefined, "No response means no resolution badge.");
+		assert.equal(carriedQuiet.piProposedResolve, true, "The proposed-resolve state survives the carry.");
+		assert.equal(carriedQuiet.carried.placement, "anchored", "A still-visible anchor keeps its spot.");
+		assert.equal(carriedQuiet.carried.startLine, 1);
+		const volunteered = buildCarriedThreads([
+			{ respondsTo: awaitingThread.id, resolution: "addressed", body: "ok" },
+			{ respondsTo: quietThread.id, resolution: "needs-discussion", body: "One more consideration." },
+		], quietRound.list(), ordered, 1);
+		assert.equal(volunteered.length, 2, "A voluntary response to a quiet thread is accepted.");
+		assert.equal(buildQuietCarriedThreads(quietRound.list(), new Set(volunteered.map((record) => record.id)), ordered, 1).length, 0, "A responded thread never double-carries.");
+		const vanished = buildQuietCarriedThreads(quietRound.list(), new Set([awaitingThread.id]), { ...ordered, files: [] }, 1);
+		assert.equal(vanished[0].carried.placement, "outdated", "A vanished anchor lands the quiet carry in outdated.");
+		assert.equal(vanished[0].file, undefined, "A vanished file is not referenced.");
+		assert.equal(buildQuietCarriedThreads(carrySource.list(), new Set(), ordered, 1).some((record) => record.id === untouchedSeedId), false, "Untouched notes still die with their round.");
+	}
 	const capSource = createThreadStore(ordered, { ...THREAD_LIMITS, maxTurnsPerThread: 2 });
 	const capThread = capSource.postUserTurn({ source: "overview", body: "cap me" }).thread;
 	capSource.postPiReply(capThread.id, "at cap", false);
@@ -524,7 +555,7 @@ try {
 	const loseAnchor = heldSource.postUserTurn({ source: "selection", file: "untracked.txt", side: "new", newStart: 2, newEnd: 2, highlight: "lose", body: "lose me", quiet: true }).thread;
 	heldSource.postUserTurn({ source: "commentary", file: "untracked.txt", commentaryId: "new-file", body: "note quiet", quiet: true });
 	assert.equal(threadsAwaitingResponse(heldSource.list()).length, 0, "Undelivered threads are never awaiting a response.");
-	assert.throws(() => buildCarriedThreads([{ respondsTo: keepAnchor.id, resolution: "addressed", body: "x" }], heldSource.list(), ordered, 1), /does not match an open thread awaiting a response/, "Pi cannot respond to a thread it never received.");
+	assert.throws(() => buildCarriedThreads([{ respondsTo: keepAnchor.id, resolution: "addressed", body: "x" }], heldSource.list(), ordered, 1), /does not match an open thread/, "Pi cannot respond to a thread it never received.");
 	const heldRecords = buildHeldThreads(heldSource.list(), heldNext, 1);
 	assert.equal(heldRecords.length, 3, "Every undelivered open thread is held over.");
 	const heldKeep = heldRecords.find((record) => record.id === keepAnchor.id);

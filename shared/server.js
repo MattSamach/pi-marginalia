@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { computeContextGaps, CONTEXT_LIMITS, reviewFileDriftKey } from "./git-review.js";
 import { renderReviewHtml } from "./render.js";
-import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS } from "./threads.js";
+import { buildCarriedThreads, buildQuietCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS } from "./threads.js";
 
 const POST_PATH = "/__pi_code_review_post__";
 const RESOLVE_PATH = "/__pi_code_review_resolve__";
@@ -776,6 +776,9 @@ export async function createCodeReviewServer(review, options) {
 			} catch (error) {
 				return { error: "invalid-responses", message: error instanceof Error ? error.message : String(error) };
 			}
+			// Open threads Pi answered last need no response: they carry forward
+			// silently — same turns, no appended message, anchors revalidated.
+			carried = [...carried, ...buildQuietCarriedThreads(active.store.list(), new Set(carried.map((record) => record.id)), nextReview, active.number)];
 			// Open threads whose reviewer content Pi never received are not part of
 			// the response contract; they cross into the new round still queued.
 			const held = buildHeldThreads(active.store.list(), nextReview, active.number);

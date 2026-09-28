@@ -61,7 +61,7 @@ function renderCarriedShell(thread) {
 		: "";
 	const outdated = carried.placement === "outdated" ? `<span class="badge outdated-badge">outdated — anchored to round ${Number(carried.fromRound)}</span>` : "";
 	return `<article class="carried-thread" data-carried-thread="${attribute(thread.id)}"${anchorAttrs}>
-  <div class="carried-header"><span class="badge resolution-badge resolution-${attribute(carried.resolution)}">${text(RESOLUTION_LABELS[carried.resolution] ?? carried.resolution)}</span><a class="carried-origin" href="/round/${Number(carried.fromRound)}#thread=${attribute(thread.id)}" title="View this thread in round ${Number(carried.fromRound)} (read-only)">from round ${Number(carried.fromRound)}</a>${anchorButton}${outdated}</div>
+  <div class="carried-header">${carried.resolution === undefined ? "" : `<span class="badge resolution-badge resolution-${attribute(carried.resolution)}">${text(RESOLUTION_LABELS[carried.resolution] ?? carried.resolution)}</span>`}<a class="carried-origin" href="/round/${Number(carried.fromRound)}#thread=${attribute(thread.id)}" title="View this thread in round ${Number(carried.fromRound)} (read-only)">from round ${Number(carried.fromRound)}</a>${anchorButton}${outdated}</div>
   <div data-carried-host="${attribute(thread.id)}"></div>
 </article>`;
 }

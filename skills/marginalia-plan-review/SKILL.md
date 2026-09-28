@@ -61,3 +61,5 @@ Approval closes the session with the reviewer's approval note. It is **not** an 
 No git, no diffs, no staleness badge, no viewed checklist, no expandable context, and no old-side line references. `list_review_threads` and `get_review_thread` work identically to code reviews.
 - Link prior rounds instead of quoting them: `[the earlier framing](/round/1#loc=<section>:L12)` renders as a same-origin link in replies and commentary.
 - If the plan's outcome is decided outside the browser (approved in chat, abandoned), call `close_review` with any round id and a short reason so the open tab shows a truthful closed banner.
+
+- On next rounds, respond only to threads AWAITING you (the reviewer spoke after your last reply). Threads where you spoke last carry forward automatically when omitted from threadResponses — no re-justification round after round; respond to one voluntarily only to re-anchor it or add something new.

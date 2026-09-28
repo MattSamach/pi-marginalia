@@ -86,6 +86,7 @@ The review browser is conversational: reviewer comments arrive individually as `
 
 A review session is an ordered sequence of immutable rounds served in one browser session. Sending a pass locks the reviewer's posting controls behind a “Pi is revising” banner, so revise promptly.
 
+- On next rounds, respond only to threads AWAITING you (the reviewer spoke after your last reply). Threads where you spoke last carry forward automatically when omitted from threadResponses — no re-justification round after round; respond to one voluntarily only to re-anchor it or add something new.
 - After a `code-review-pass`, apply the feedback as one batch, validate, then call `open_code_review` again with `previousRoundId` set to the pass's `snapshot` id. The revised changes open as the next round and the reviewer's browser advances automatically; never open a fresh review mid-unit unless no session is live.
 - On next rounds, re-author only what changed: a file whose content is byte-identical to the previous round carries its summary, classification, and commentary forward when listed without a summary (keeps your ordering) or omitted entirely (keeps its previous position). The carry is hash-gated — a changed file listed without a summary is an error, never a stale carry.
 - The next round must include `threadResponses`: exactly one `{respondsTo, resolution, body}` per open thread listed in the pass. The round is rejected if any open thread lacks a response, has duplicates, or anchors invalidly.

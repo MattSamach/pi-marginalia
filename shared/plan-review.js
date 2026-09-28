@@ -106,7 +106,7 @@ function normalizeCommentary(entries, section, limits, usedIds, sectionMarkdown)
  * sections entries reference a heading by its exact text (case-insensitive)
  * and may add anchored commentary (absolute source lines).
  */
-export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
+export function buildPlanReview(manifest, limits = PLAN_LIMITS, previousFiles = undefined) {
 	if (!manifest || typeof manifest !== "object") fail("Plan review needs a manifest object.");
 	const title = typeof manifest.title === "string" && manifest.title.trim() ? manifest.title.trim() : fail("Plan review needs a non-empty title.");
 	if (title.length > limits.maxTitle) fail(`Plan title must stay under ${limits.maxTitle} characters.`);
@@ -131,6 +131,11 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 		byHeading.set(key, byHeading.has(key) ? "ambiguous" : section);
 	}
 	const claimed = new Set();
+	// Sections whose manifest entry carries an explicit commentary value (even
+	// an empty array) are authored this round; entries without one, and
+	// sections never listed, carry the previous round's commentary while the
+	// section's content is byte-identical.
+	const authoredSlugs = new Set();
 	const extras = new Map();
 	const usedIds = new Set();
 	for (const entry of manifestSections) {
@@ -142,10 +147,22 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 		rejectUnknownKeys(entry, ["heading", "commentary"], `manifest section "${entry.heading}"`);
 		if (claimed.has(section.slug)) fail(`Manifest references heading "${entry.heading}" more than once.`);
 		claimed.add(section.slug);
+		if (entry.commentary !== undefined) authoredSlugs.add(section.slug);
 		extras.set(section.slug, {
 			commentary: normalizeCommentary(entry.commentary, section, limits, usedIds, lines.slice(section.startLine - 1, section.endLine).join("\n")),
 		});
 	}
+	const previousByPath = previousFiles === undefined ? undefined : new Map(previousFiles.map((file) => [file.path, file]));
+	const carryCommentary = (file) => {
+		if (authoredSlugs.has(file.path) || previousByPath === undefined) return file.commentary;
+		const previous = previousByPath.get(file.path);
+		if (!previous || previous.contentSha256 !== file.contentSha256 || !previous.commentary?.length) return file.commentary;
+		for (const entry of previous.commentary) {
+			if (usedIds.has(entry.id)) fail(`Carried commentary id "${entry.id}" in section "${file.sectionTitle}" collides with an authored id; re-author that section or rename the id.`);
+			usedIds.add(entry.id);
+		}
+		return structuredClone(previous.commentary);
+	};
 
 	const files = sections.map((section) => {
 		const segmentLines = lines.slice(section.startLine - 1, section.endLine);
@@ -165,7 +182,7 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 			lines: segmentLines.map((content, offset) => ({ kind: "context", newLine: section.startLine + offset, content })),
 			commentary: extras.get(section.slug)?.commentary ?? [],
 		};
-	});
+	}).map((file) => ({ ...file, commentary: carryCommentary(file) }));
 	const id = createHash("sha256").update(`plan\0${title}\0${markdown}`).digest("hex");
 	return {
 		kind: "plan",

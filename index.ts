@@ -421,10 +421,16 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		return undefined;
 	};
 	const openPlan = async (ctx: ExtensionContext, manifest: OpenPlanReviewInput) => {
-		const review = buildPlanReview(manifest);
 		if (!manifest.previousRoundId && manifest.threadResponses !== undefined) {
 			throw new Error("threadResponses requires previousRoundId; fresh plans have no threads to respond to.");
 		}
+		// Next rounds carry the previous round's commentary for sections whose
+		// content is byte-identical and whose manifest entry authors nothing.
+		let previousFiles;
+		if (manifest.previousRoundId) {
+			previousFiles = (await findSessionWithRound(manifest.previousRoundId))?.roundFiles(manifest.previousRoundId);
+		}
+		const review = buildPlanReview(manifest, undefined, previousFiles);
 		return openSession(ctx, review, manifest.previousRoundId, resolvePlanResponses(review, manifest.threadResponses), {});
 	};
 
@@ -469,7 +475,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "open_plan_review",
 		label: "Open Plan Review",
-		description: "Open a browser review of a markdown plan document. The plan is sliced into sections at its shallowest heading level; the reviewer reads the rendered document, selects text to open comment threads, and replies to your per-section commentary. Threads arrive as plan-review-thread messages; answer each with reply_review_thread, and treat the plan-review-pass message as the signal that the pass is complete. To revise, call this tool again with the FULL updated markdown and previousRoundId set to that pass's snapshot id: the new plan opens as the next round in the same browser session. The next round must include threadResponses: exactly one {respondsTo, resolution, body} per open thread whose reviewer content you have received, anchored to a section (heading text) and absolute source lines of the NEW markdown, or no section only when the concern's home is truly gone. When the reviewer approves, a plan-review-approved message carries their approval note and the session closes terminally.",
+		description: "Open a browser review of a markdown plan document. The plan is sliced into sections at its shallowest heading level; the reviewer reads the rendered document, selects text to open comment threads, and replies to your per-section commentary. Threads arrive as plan-review-thread messages; answer each with reply_review_thread, and treat the plan-review-pass message as the signal that the pass is complete. To revise, call this tool again with the FULL updated markdown and previousRoundId set to that pass's snapshot id: the new plan opens as the next round in the same browser session. Sections left unlisted (or listed without a commentary value) keep the previous round's commentary while their content is byte-identical — re-author only sections whose notes should change. The next round must include threadResponses: exactly one {respondsTo, resolution, body} per open thread whose reviewer content you have received, anchored to a section (heading text) and absolute source lines of the NEW markdown, or no section only when the concern's home is truly gone. When the reviewer approves, a plan-review-approved message carries their approval note and the session closes terminally.",
 		promptSnippet: "Open a browser review of a markdown plan with sections, threads, and rounds",
 		promptGuidelines: [
 			"Use open_plan_review when the user wants to iterate on a plan, proposal, or design document interactively — draft the full plan as markdown with clear headings, then open it for annotation.",

@@ -204,6 +204,31 @@ try {
 	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", summary: "s", commentary: [{ id: "c", body: "b", text: "x" }] }] }), /Unknown key "text" on commentary c in untracked\.txt/, "Unknown commentary keys are rejected.");
 	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "One sentence.", changes: ["a", "b"], validation: ["c"], summary: "extra" }, files: [] }), /Unknown key "summary" on the review overview/, "Unknown overview keys are rejected.");
 	assert.throws(() => buildPlanReview({ title: "T", markdown: "## A\n\nBody.", sections: [{ heading: "A", startLine: 2 }] }), /Unknown key "startLine" on manifest section "A"\. Anchors belong inside commentary entries\./, "Misplaced anchors on plan sections name the key and the fix.");
+
+	// Plan commentary carries across rounds while a section's content stays
+	// byte-identical: unlisted sections and entries without a commentary value
+	// inherit the previous round's notes; an explicit commentary value (even
+	// empty) authors the section; changed content drops the carry.
+	{
+		const carryMd = "## Alpha\n\nAlpha body.\n\n## Beta\n\nBeta body.\n";
+		const carryR1 = buildPlanReview({ title: "Carry", markdown: carryMd, sections: [
+			{ heading: "Alpha", commentary: [{ id: "a1", body: "Alpha note", startLine: 3 }] },
+			{ heading: "Beta", commentary: [{ id: "b1", body: "Beta note", startLine: 7 }] },
+		] });
+		const carryPrev = carryR1.files.map(({ path, summary, reviewMode, commentary, contentSha256 }) => ({ path, summary, reviewMode, commentary, contentSha256 }));
+		const carryNext = buildPlanReview({ title: "Carry", markdown: carryMd, sections: [{ heading: "Alpha", commentary: [{ id: "a2", body: "Fresh alpha note", startLine: 3 }] }] }, undefined, carryPrev);
+		assert.deepEqual(carryNext.files.find((file) => file.path === "beta").commentary.map((entry) => entry.id), ["b1"], "An unlisted identical section inherits the previous round's commentary.");
+		assert.deepEqual(carryNext.files.find((file) => file.path === "alpha").commentary.map((entry) => entry.id), ["a2"], "An authored section replaces its commentary outright.");
+		const carryChanged = buildPlanReview({ title: "Carry", markdown: carryMd.replace("Beta body.", "Beta body, changed.") }, undefined, carryPrev);
+		assert.equal(carryChanged.files.find((file) => file.path === "beta").commentary.length, 0, "Changed section content drops the carry silently — commentary is optional for plans.");
+		assert.deepEqual(carryChanged.files.find((file) => file.path === "alpha").commentary.map((entry) => entry.id), ["a1"], "Sibling sections still identical keep carrying.");
+		const carryCleared = buildPlanReview({ title: "Carry", markdown: carryMd, sections: [{ heading: "Beta", commentary: [] }] }, undefined, carryPrev);
+		assert.equal(carryCleared.files.find((file) => file.path === "beta").commentary.length, 0, "An explicit empty commentary array clears the section's notes.");
+		const carryBare = buildPlanReview({ title: "Carry", markdown: carryMd, sections: [{ heading: "Beta" }] }, undefined, carryPrev);
+		assert.deepEqual(carryBare.files.find((file) => file.path === "beta").commentary.map((entry) => entry.id), ["b1"], "A section listed without a commentary value still carries, matching how listed files without summaries carry.");
+		assert.throws(() => buildPlanReview({ title: "Carry", markdown: carryMd, sections: [{ heading: "Alpha", commentary: [{ id: "b1", body: "x", startLine: 3 }] }] }, undefined, carryPrev), /Carried commentary id "b1"/, "A carried id colliding with an authored id fails loudly.");
+		assert.deepEqual(buildPlanReview({ title: "Carry", markdown: carryMd }).files.map((file) => file.commentary.length), [0, 0], "Without previous files nothing carries — fresh plans are unchanged.");
+	}
 	assert.throws(() => buildPlanReview({ title: "T", markdown: "## A\n\nBody.", sections: [{ heading: "A", commentary: [{ id: "n", body: "b", side: "new" }] }] }), /Unknown key "side" on commentary note "n"/, "Unknown plan commentary keys are rejected.");
 	assert.throws(() => buildDiagramReview({ title: "T", diagrams: [{ name: "D", source: "flowchart LR\n  a --> b", zoom: 2 }] }), /Unknown key "zoom" on diagram "D"/, "Unknown diagram keys are rejected.");
 

@@ -163,6 +163,49 @@ try {
 	assert.equal(prioritizedCaps.files.find((file) => file.path === "untracked.txt")?.omitted, false, "Primary review files must receive rendering capacity before references.");
 	assert.equal(prioritizedCaps.files.find((file) => file.path === "unstaged.txt")?.omitted, true, "References should yield rendering capacity to primary review files regardless of manifest order.");
 
+	// Manifest carry-forward: on a next round, authored state survives omission
+	// exactly when the file's content is byte-identical — and only then.
+	{
+		const carrySource = applyReviewManifest(snapshot, { files: [
+			{ path: "unstaged.txt", summary: "Reference material.", reviewMode: "reference" },
+			{ path: "untracked.txt", summary: "The new file.", commentary: [{ id: "keep-me", body: "Note.", side: "new", startLine: 1 }] },
+		] });
+		const carried = applyReviewManifest(snapshot, { files: [{ path: "untracked.txt" }] }, undefined, carrySource.files);
+		const carriedFile = carried.files.find((file) => file.path === "untracked.txt");
+		assert.equal(carriedFile.summary, "The new file.", "A listed file without a summary carries the previous one on identical content.");
+		assert.deepEqual(carriedFile.commentary.map((entry) => entry.id), ["keep-me"], "Commentary carries with the summary.");
+		const carriedRef = carried.files.find((file) => file.path === "unstaged.txt");
+		assert.equal(carriedRef.summary, "Reference material.", "A fully omitted identical file carries its summary too.");
+		assert.equal(carriedRef.reviewMode, "reference", "Omission no longer regresses a reference classification.");
+		assert.equal(carried.files.indexOf(carriedRef), 1, "Carried omitted files keep their previous relative order ahead of never-authored ones.");
+		assert.throws(
+			() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt" }] }, undefined, carrySource.files.map((file) => file.path === "untracked.txt" ? { ...file, contentSha256: "changed" } : file)),
+			/content changed since the previous round/,
+			"A changed file listed without a summary fails loudly instead of carrying stale prose.",
+		);
+		assert.throws(
+			() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt" }] }, undefined, []),
+			/no byte-identical file to carry it from/,
+			"Round one has nothing to carry: a missing summary is an error when a previous-files context is supplied.",
+		);
+		const blanked = applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", summary: "", commentary: [] }] }, undefined, carrySource.files);
+		const blankedFile = blanked.files.find((file) => file.path === "untracked.txt");
+		assert.equal(blankedFile.summary, "", "An explicit empty summary overrides the carry.");
+		assert.deepEqual(blankedFile.commentary, [], "Explicit empty commentary clears instead of carrying.");
+	}
+
+	// The server exposes a round's applied manifest state for carry-forward.
+	{
+		const rfServer = await createCodeReviewServer(ordered, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+		try {
+			const files = rfServer.roundFiles(ordered.id);
+			assert.ok(Array.isArray(files) && files.length > 0 && files.every((file) => typeof file.path === "string" && "summary" in file && "contentSha256" in file), "roundFiles returns path, summary, and content identity per file.");
+			assert.equal(rfServer.roundFiles("no-such-round"), undefined, "Unknown round ids return undefined.");
+		} finally {
+			await rfServer.close();
+		}
+	}
+
 	const store = createThreadStore(ordered);
 	const seeded = store.list();
 	assert.deepEqual(seeded.map((thread) => thread.commentaryId), ["new-file", "second-note"], "Commentary notes seed threads at store creation.");

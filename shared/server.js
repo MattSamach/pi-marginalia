@@ -703,6 +703,7 @@ export async function createCodeReviewServer(review, options) {
 		isStale: () => stale,
 		currentReview: () => current().review,
 		currentRoundNumber: () => current().number,
+		roundFiles: (reviewId) => rounds.find((round) => round.review.id === reviewId)?.review.files.map(({ path, summary, reviewMode, commentary, contentSha256 }) => ({ path, summary, reviewMode, commentary, contentSha256 })),
 		hasRound: (reviewId) => rounds.some((round) => round.review.id === reviewId),
 		locateThread(threadId) {
 			const round = roundOfThread(threadId);

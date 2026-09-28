@@ -507,10 +507,18 @@ function normalizeOverview(overview) {
 	return { intent, changes, validation, ...(reviewFocus ? { reviewFocus } : {}), ...(risks ? { risks } : {}) };
 }
 
-/** Validate the overview and commentary, apply agent ordering, and enforce rendering caps. */
-export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIMITS) {
+/**
+ * Validate the overview and commentary, apply agent ordering, and enforce
+ * rendering caps. previousFiles (the applied files of the round being
+ * superseded) enables carry-forward: a listed file without a summary, or a
+ * file omitted entirely, keeps its previous summary, classification, and
+ * commentary — but only while its content is byte-identical. Callers that
+ * pass no previousFiles (fresh internal reviews) keep blank defaults.
+ */
+export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIMITS, /** @type {Array<{ path: string, summary?: string, reviewMode?: string, commentary?: object[], contentSha256?: string }> | undefined} */ previousFiles = undefined) {
 	if (!manifest || typeof manifest !== "object") throw new Error("Review manifest must be an object.");
 	const overview = normalizeOverview(manifest.overview);
+	const prevByPath = new Map((previousFiles ?? []).map((file, index) => [file.path, { ...file, index }]));
 	const requested = manifest.files ?? [];
 	if (!Array.isArray(requested) || requested.length > REVIEW_LIMITS.maxManifestFiles) throw new Error(`Review manifest may contain at most ${REVIEW_LIMITS.maxManifestFiles} files.`);
 	const byPath = new Map(snapshot.files.map((file) => [file.path, file]));
@@ -523,11 +531,17 @@ export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIM
 		const file = byPath.get(path);
 		if (!file) throw new Error(`Manifest path is not changed against HEAD: ${path}`);
 		used.add(path);
-		const summary = item.summary === undefined ? "" : assertString(item.summary, `Summary for ${path}`, true);
-		const requestedReviewMode = item.reviewMode ?? "review";
+		const previous = prevByPath.get(path);
+		const identical = previous !== undefined && previous.contentSha256 === file.contentSha256;
+		let summary;
+		if (item.summary !== undefined) summary = assertString(item.summary, `Summary for ${path}`, true);
+		else if (previousFiles === undefined) summary = "";
+		else if (identical) summary = previous.summary;
+		else throw new Error(`Summary for ${path} is required: ${previous ? "its content changed since the previous round" : "the previous round has no byte-identical file to carry it from"}.`);
+		const requestedReviewMode = item.reviewMode ?? (identical ? previous.reviewMode : "review");
 		if (!["review", "reference"].includes(requestedReviewMode)) throw new Error(`Review mode for ${path} must be review or reference.`);
 		const reviewMode = file.binary ? "reference" : requestedReviewMode;
-		const entries = item.commentary ?? [];
+		const entries = item.commentary ?? (identical ? previous.commentary : []);
 		if (!Array.isArray(entries) || entries.length > REVIEW_LIMITS.maxCommentaryPerFile) throw new Error(`${path} may contain at most ${REVIEW_LIMITS.maxCommentaryPerFile} commentary entries.`);
 		const ids = new Set();
 		const commentary = entries.map((entry) => {
@@ -548,7 +562,20 @@ export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIM
 		});
 		ordered.push({ ...file, summary, reviewMode, commentary });
 	}
-	for (const file of snapshot.files) if (!used.has(file.path)) ordered.push({ ...file, summary: "", reviewMode: file.binary ? "reference" : "review", commentary: [] });
+	// Files omitted from the manifest keep their previous state (and relative
+	// order) while byte-identical; anything else appends with blank defaults.
+	const appended = [];
+	for (const file of snapshot.files) {
+		if (used.has(file.path)) continue;
+		const previous = prevByPath.get(file.path);
+		if (previous !== undefined && previous.contentSha256 === file.contentSha256) {
+			appended.push({ order: previous.index, entry: { ...file, summary: previous.summary, reviewMode: file.binary ? "reference" : previous.reviewMode, commentary: previous.commentary } });
+		} else {
+			appended.push({ order: Infinity, entry: { ...file, summary: "", reviewMode: file.binary ? "reference" : "review", commentary: [] } });
+		}
+	}
+	appended.sort((left, right) => left.order - right.order);
+	ordered.push(...appended.map(({ entry }) => entry));
 
 	let totalBytes = 0;
 	let totalLines = 0;

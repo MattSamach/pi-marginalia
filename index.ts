@@ -43,7 +43,7 @@ const commentarySchema = Type.Object({
 });
 const reviewFileSchema = Type.Object({
 	path: Type.String({ minLength: 1, maxLength: 20_000, description: "Repository-relative changed file path. Files are displayed in this array order." }),
-	summary: Type.String({ maxLength: 20_000, description: "File-level purpose, design rationale, suggested review focus, or why a reference file needs no focused review." }),
+	summary: Type.Optional(Type.String({ maxLength: 20_000, description: "File-level purpose, design rationale, suggested review focus, or why a reference file needs no focused review. On a next round, omit it to carry the previous round's summary, classification, and commentary forward — allowed only while the file's content is byte-identical; changed files must be re-authored." })),
 	reviewMode: Type.Optional(Type.String({ pattern: "^(review|reference)$", description: "Use reference only for visible but low-value review artifacts such as binaries or deterministic generated output; defaults to review." })),
 	commentary: Type.Optional(Type.Array(commentarySchema, { maxItems: 100 })),
 });
@@ -274,11 +274,20 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal, root?: string) => {
 		const repoPath = "repoPath" in manifest && typeof manifest.repoPath === "string" ? await resolveRepoArg(ctx, manifest.repoPath) : undefined;
 		const snapshot = await collectReviewSnapshot(root ?? repoPath ?? ctx.cwd, { signal });
-		const review = applyReviewManifest(snapshot, manifest);
 		const previousRoundId = "previousRoundId" in manifest ? manifest.previousRoundId : undefined;
 		if (!previousRoundId && "threadResponses" in manifest && manifest.threadResponses !== undefined) {
 			throw new Error("threadResponses requires previousRoundId; fresh reviews have no threads to respond to.");
 		}
+		// Agent calls always carry a previous-files context ([] on round 1) so
+		// omitted summaries carry forward on identical content or fail loudly;
+		// the empty round-1 context makes a missing first summary an error.
+		let previousFiles: { path: string }[] = [];
+		if (previousRoundId) {
+			const host = [...servers].find((candidate) => candidate.hasRound(previousRoundId));
+			if (!host) throw new Error(`No open review session contains round ${previousRoundId.slice(0, 12)}. Open a fresh review without previousRoundId.`);
+			previousFiles = host.roundFiles(previousRoundId) ?? [];
+		}
+		const review = applyReviewManifest(snapshot, manifest, undefined, previousFiles);
 		return openSession(ctx, review, previousRoundId, "threadResponses" in manifest ? manifest.threadResponses : undefined, {
 			staleness: {
 				fingerprint: () => computeWorktreeFingerprint(review.root),
@@ -323,7 +332,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "open_code_review",
 		label: "Open Code Review",
-		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with a concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered. The reviewer's browser posts live comment threads as code-review-thread messages; answer each with reply_review_thread, and treat the code-review-pass message as the signal that the pass is complete. After a pass, apply the feedback as one batch and call this tool again with previousRoundId set to that pass's snapshot id: the revised changes open as the next round of the same session and the reviewer's browser advances automatically. The next round must include threadResponses: exactly one {respondsTo, resolution, body} per open thread whose reviewer content you have received, each with an explicitly designated anchor (file plus optional lines) into the new snapshot, or no file only when the anchor is truly gone. Open threads whose content never reached you (still queued/pending drafts) are carried into the new round automatically — do not respond to them. When the reviewer approves the review, a code-review-approved message carries their final commit message and the session closes terminally — no further rounds.",
+		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with a concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered. On next rounds, files whose content is byte-identical to the previous round carry their summary, classification, and commentary forward when listed without a summary or omitted entirely — re-author only what changed. The reviewer's browser posts live comment threads as code-review-thread messages; answer each with reply_review_thread, and treat the code-review-pass message as the signal that the pass is complete. After a pass, apply the feedback as one batch and call this tool again with previousRoundId set to that pass's snapshot id: the revised changes open as the next round of the same session and the reviewer's browser advances automatically. The next round must include threadResponses: exactly one {respondsTo, resolution, body} per open thread whose reviewer content you have received, each with an explicitly designated anchor (file plus optional lines) into the new snapshot, or no file only when the anchor is truly gone. Open threads whose content never reached you (still queued/pending drafts) are carried into the new round automatically — do not respond to them. When the reviewer approves the review, a code-review-approved message carries their final commit message and the session closes terminally — no further rounds.",
 		promptSnippet: "Open an ordered, agent-commented browser review of current Git changes",
 		promptGuidelines: [
 			"Use open_code_review when the user asks to be walked through or interactively review the agent's current code changes.",

@@ -1175,6 +1175,20 @@
       } catch (ignored) { /* private mode: theme lives for this page only */ }
     });
   });
+  const sidebarToggle = document.querySelector('[data-sidebar-toggle]');
+  const sidebarCollapsed = () => document.documentElement.dataset.sidebar === 'collapsed';
+  const setSidebarCollapsed = (collapsed) => {
+    if (collapsed) document.documentElement.dataset.sidebar = 'collapsed';
+    else delete document.documentElement.dataset.sidebar;
+    sidebarToggle?.setAttribute('aria-expanded', String(!collapsed));
+    try {
+      localStorage.setItem('picr-sidebar', collapsed ? 'collapsed' : 'open');
+    } catch (ignored) { /* private mode: the choice lives for this page only */ }
+    // The content column changes width, so card geometry re-measures.
+    scheduleRailLayout();
+  };
+  sidebarToggle?.setAttribute('aria-expanded', String(!sidebarCollapsed()));
+  sidebarToggle?.addEventListener('click', () => setSidebarCollapsed(!sidebarCollapsed()));
   const densityPicker = document.querySelector('[data-density-picker]');
   if (densityPicker) {
     try { densityPicker.value = localStorage.getItem('picr-density') || 'auto'; } catch { densityPicker.value = 'auto'; }
@@ -2266,6 +2280,10 @@
     } else if (event.key === '[') {
       event.preventDefault();
       stepFile(-1);
+    } else if (event.key === 'b') {
+      event.preventDefault();
+      setSidebarCollapsed(!sidebarCollapsed());
+      setStatus(sidebarCollapsed() ? 'Navigation pane hidden.' : 'Navigation pane shown.');
     } else if (event.key === 'o') {
       event.preventDefault();
       if (!overviewSection) setStatus('This review has no overview.');

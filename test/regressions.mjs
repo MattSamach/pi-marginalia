@@ -3558,6 +3558,35 @@ try {
 					await crowdedServer.close();
 				}
 			}
+			// The navigation pane collapses: b and the topbar toggle hide the
+			// sidebar, the content column widens, and the choice persists.
+			{
+				const paneReview = buildPlanReview({ title: "Pane", markdown: "## A\n\nBody line here.\n" });
+				const paneServer = await createCodeReviewServer(paneReview, { onThreadPost: async () => ({ queued: false }), onFinishPass: async () => ({ stale: false }) });
+				const panePage = await browser.newPage();
+				try {
+					await panePage.setViewport({ width: 1500, height: 900 });
+					await panePage.goto(paneServer.url, { waitUntil: "domcontentloaded" });
+					await panePage.waitForFunction(() => document.querySelector("[data-finish]"), { polling: 100 });
+					const widthBefore = await panePage.evaluate(() => document.querySelector(".review-content").getBoundingClientRect().width);
+					assert.equal(await panePage.$eval(".file-sidebar", (sidebar) => getComputedStyle(sidebar).display !== "none"), true, "The sidebar starts visible.");
+					await panePage.keyboard.press("b");
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+					assert.equal(await panePage.$eval(".file-sidebar", (sidebar) => getComputedStyle(sidebar).display), "none", "b hides the navigation pane.");
+					assert.equal(await panePage.evaluate(() => localStorage.getItem("picr-sidebar")), "collapsed", "The collapse persists per browser.");
+					assert.equal(await panePage.evaluate((before) => document.querySelector(".review-content").getBoundingClientRect().width > before, widthBefore), true, "The content column takes the freed width.");
+					await panePage.reload({ waitUntil: "domcontentloaded" });
+					await panePage.waitForFunction(() => document.querySelector("[data-finish]"), { polling: 100 });
+					assert.equal(await panePage.$eval(".file-sidebar", (sidebar) => getComputedStyle(sidebar).display), "none", "A reload keeps the pane collapsed before first paint.");
+					await panePage.click("[data-sidebar-toggle]");
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+					assert.equal(await panePage.$eval(".file-sidebar", (sidebar) => getComputedStyle(sidebar).display !== "none"), true, "The topbar toggle restores the pane.");
+					assert.equal(await panePage.evaluate(() => localStorage.getItem("picr-sidebar")), "open", "The restore persists too.");
+				} finally {
+					await panePage.close();
+					await paneServer.close();
+				}
+			}
 			// Tab heal: a page whose server dies reconnects on its own once a healed
 			// server binds the same port with the same cookie material, and the live
 			// SSE channel resumes end to end.

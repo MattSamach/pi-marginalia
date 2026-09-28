@@ -90,6 +90,9 @@ export function buildCarriedThreads(responses, previousThreads, nextReview, from
 	const seen = new Set();
 	const carried = list.map((response) => {
 		if (!response || typeof response !== "object" || typeof response.respondsTo !== "string") throw new Error("Each thread response needs a respondsTo thread id.");
+		for (const key of Object.keys(response)) {
+			if (!["respondsTo", "resolution", "body", "file", "startLine", "endLine", "side", "element"].includes(key)) throw new Error(`Unknown key "${key}" on thread response ${response.respondsTo}.`);
+		}
 		const origin = eligible.get(response.respondsTo);
 		if (!origin) throw new Error(`Thread response ${response.respondsTo} does not match an open thread awaiting a response in round ${fromRound}.`);
 		if (seen.has(origin.id)) throw new Error(`Thread ${origin.id} has more than one response.`);

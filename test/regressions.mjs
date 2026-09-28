@@ -13,7 +13,7 @@ import { computeIntraline } from "../shared/render.js";
 import { createCodeReviewServer } from "../shared/server.js";
 import { buildCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS, threadsAwaitingResponse } from "../shared/threads.js";
 import { createReviewMessageQueue } from "../shared/delivery-queue.js";
-import { buildPlanReview, PLAN_LIMITS, resolvePlanResponses, sectionizePlan } from "../shared/plan-review.js";
+import { buildDiagramReview, buildPlanReview, PLAN_LIMITS, resolvePlanResponses, sectionizePlan } from "../shared/plan-review.js";
 
 const exec = promisify(execFile);
 const git = (cwd, ...args) => exec("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -193,6 +193,18 @@ try {
 		assert.equal(blankedFile.summary, "", "An explicit empty summary overrides the carry.");
 		assert.deepEqual(blankedFile.commentary, [], "Explicit empty commentary clears instead of carrying.");
 	}
+
+	// Unknown keys on tool-payload objects fail loudly at call time instead of
+	// silently shipping mangled reviews (misplaced anchors were rendered as
+	// truncated file notes before this).
+	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", summary: "s", startLine: 3 }] }), /Unknown key "startLine" on manifest file untracked\.txt\. Anchors belong inside commentary entries\./, "Misplaced anchors on file objects name the key and the fix.");
+	assert.throws(() => applyReviewManifest(snapshot, { files: [{ path: "untracked.txt", summary: "s", commentary: [{ id: "c", body: "b", text: "x" }] }] }), /Unknown key "text" on commentary c in untracked\.txt/, "Unknown commentary keys are rejected.");
+	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "One sentence.", changes: ["a", "b"], validation: ["c"], summary: "extra" }, files: [] }), /Unknown key "summary" on the review overview/, "Unknown overview keys are rejected.");
+	assert.throws(() => buildPlanReview({ title: "T", markdown: "## A\n\nBody.", sections: [{ heading: "A", startLine: 2 }] }), /Unknown key "startLine" on manifest section "A"\. Anchors belong inside commentary entries\./, "Misplaced anchors on plan sections name the key and the fix.");
+	assert.throws(() => buildPlanReview({ title: "T", markdown: "## A\n\nBody.", sections: [{ heading: "A", commentary: [{ id: "n", body: "b", side: "new" }] }] }), /Unknown key "side" on commentary note "n"/, "Unknown plan commentary keys are rejected.");
+	assert.throws(() => buildDiagramReview({ title: "T", diagrams: [{ name: "D", source: "flowchart LR\n  a --> b", zoom: 2 }] }), /Unknown key "zoom" on diagram "D"/, "Unknown diagram keys are rejected.");
+
+	assert.throws(() => buildCarriedThreads([{ respondsTo: "t1", resolution: "addressed", body: "b", line: 4 }], [{ id: "t1", status: "open", source: "selection", file: "untracked.txt", turns: [{ author: "user", body: "q", ts: 1 }] }], ordered, 1), /Unknown key "line" on thread response t1/, "Unknown thread-response keys are rejected.");
 
 	// The server exposes a round's applied manifest state for carry-forward.
 	{

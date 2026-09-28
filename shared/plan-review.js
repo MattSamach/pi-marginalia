@@ -65,12 +65,21 @@ export function sectionizePlan(markdown, title) {
 	return { lines, sections };
 }
 
+function rejectUnknownKeys(value, allowed, label) {
+	for (const key of Object.keys(value)) {
+		if (allowed.includes(key)) continue;
+		const hint = ["startLine", "endLine", "side", "element"].includes(key) && !allowed.includes("startLine") ? " Anchors belong inside commentary entries." : "";
+		throw new Error(`Unknown key "${key}" on ${label}.${hint}`);
+	}
+}
+
 function normalizeCommentary(entries, section, limits, usedIds, sectionMarkdown) {
 	if (entries === undefined) return [];
 	if (!Array.isArray(entries) || entries.length > limits.maxCommentaryPerSection) fail(`Section "${section.title}" commentary must be an array of at most ${limits.maxCommentaryPerSection} notes.`);
 	return entries.map((entry, index) => {
 		if (!entry || typeof entry !== "object") fail("Each commentary note must be an object.");
 		const id = typeof entry.id === "string" && entry.id.trim() ? entry.id.trim() : fail("Commentary notes need a non-empty string id.");
+		rejectUnknownKeys(entry, ["id", "body", "startLine", "endLine", "element"], `commentary note "${id}"`);
 		if (usedIds.has(id)) fail(`Commentary id "${id}" is used more than once.`);
 		usedIds.add(id);
 		if (typeof entry.body !== "string" || !entry.body.trim() || entry.body.length > limits.maxCommentaryBody) fail(`Commentary note "${id}" needs a body of at most ${limits.maxCommentaryBody} characters.`);
@@ -130,6 +139,7 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS) {
 		const section = bySlug.get(reference) ?? byHeading.get(reference.toLowerCase());
 		if (section === "ambiguous") fail(`Heading "${entry.heading}" appears more than once in the plan; reference it by its slug instead.`);
 		if (!section) fail(`Manifest section "${entry.heading}" matches no plan heading. Available: ${sections.map((candidate) => candidate.title).join(" · ")}`);
+		rejectUnknownKeys(entry, ["heading", "commentary"], `manifest section "${entry.heading}"`);
 		if (claimed.has(section.slug)) fail(`Manifest references heading "${entry.heading}" more than once.`);
 		claimed.add(section.slug);
 		extras.set(section.slug, {
@@ -211,6 +221,7 @@ export function buildDiagramReview(manifest, limits = PLAN_LIMITS) {
 	for (const diagram of diagrams) {
 		if (!diagram || typeof diagram !== "object") fail("Each diagram must be an object.");
 		const name = typeof diagram.name === "string" && diagram.name.trim() ? diagram.name.trim() : fail("Each diagram needs a non-empty name.");
+		rejectUnknownKeys(diagram, ["name", "source", "caption", "commentary"], `diagram "${name}"`);
 		if (name.length > 200 || /[\r\n#`]/.test(name)) fail(`Diagram name "${name.slice(0, 40)}" must stay under 200 characters with no newlines, hashes, or backticks.`);
 		const key = name.toLowerCase();
 		if (seen.has(key)) fail(`Diagram name "${name}" is used more than once (names are section headings and must be unique).`);

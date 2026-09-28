@@ -507,6 +507,14 @@ function normalizeOverview(overview) {
 	return { intent, changes, validation, ...(reviewFocus ? { reviewFocus } : {}), ...(risks ? { risks } : {}) };
 }
 
+function rejectUnknownKeys(value, allowed, label) {
+	for (const key of Object.keys(value)) {
+		if (allowed.includes(key)) continue;
+		const hint = ["startLine", "endLine", "side", "element"].includes(key) && !allowed.includes("startLine") ? " Anchors belong inside commentary entries." : "";
+		throw new Error(`Unknown key "${key}" on ${label}.${hint}`);
+	}
+}
+
 /**
  * Validate the overview and commentary, apply agent ordering, and enforce
  * rendering caps. previousFiles (the applied files of the round being
@@ -518,6 +526,7 @@ function normalizeOverview(overview) {
 export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIMITS, /** @type {Array<{ path: string, summary?: string, reviewMode?: string, commentary?: object[], contentSha256?: string }> | undefined} */ previousFiles = undefined) {
 	if (!manifest || typeof manifest !== "object") throw new Error("Review manifest must be an object.");
 	const overview = normalizeOverview(manifest.overview);
+	if (manifest.overview && typeof manifest.overview === "object") rejectUnknownKeys(manifest.overview, ["intent", "changes", "validation", "reviewFocus", "risks"], "the review overview");
 	const prevByPath = new Map((previousFiles ?? []).map((file, index) => [file.path, { ...file, index }]));
 	const requested = manifest.files ?? [];
 	if (!Array.isArray(requested) || requested.length > REVIEW_LIMITS.maxManifestFiles) throw new Error(`Review manifest may contain at most ${REVIEW_LIMITS.maxManifestFiles} files.`);
@@ -527,6 +536,7 @@ export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIM
 	for (const item of requested) {
 		if (!item || typeof item !== "object") throw new Error("Each manifest file must be an object.");
 		const path = assertString(item.path, "Manifest file path");
+		rejectUnknownKeys(item, ["path", "summary", "reviewMode", "commentary"], `manifest file ${path}`);
 		if (used.has(path)) throw new Error(`Manifest file path is duplicated: ${path}`);
 		const file = byPath.get(path);
 		if (!file) throw new Error(`Manifest path is not changed against HEAD: ${path}`);
@@ -547,6 +557,7 @@ export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIM
 		const commentary = entries.map((entry) => {
 			if (!entry || typeof entry !== "object") throw new Error(`Commentary for ${path} must be an object.`);
 			const id = assertString(entry.id, `Commentary id for ${path}`);
+			rejectUnknownKeys(entry, ["id", "body", "side", "startLine", "endLine"], `commentary ${id} in ${path}`);
 			if (ids.has(id)) throw new Error(`Commentary id is duplicated in ${path}: ${id}`);
 			ids.add(id);
 			const body = assertString(entry.body, `Commentary body for ${path}`);

@@ -40,31 +40,31 @@ const commentarySchema = Type.Object({
 	side: Type.Optional(Type.String({ pattern: "^(old|new|both)$", description: "Diff side for an anchored note; defaults to both." })),
 	startLine: Type.Optional(Type.Integer({ minimum: 1 })),
 	endLine: Type.Optional(Type.Integer({ minimum: 1 })),
-});
+}, { additionalProperties: false });
 const reviewFileSchema = Type.Object({
 	path: Type.String({ minLength: 1, maxLength: 20_000, description: "Repository-relative changed file path. Files are displayed in this array order." }),
 	summary: Type.Optional(Type.String({ maxLength: 20_000, description: "File-level purpose, design rationale, suggested review focus, or why a reference file needs no focused review. On a next round, omit it to carry the previous round's summary, classification, and commentary forward — allowed only while the file's content is byte-identical; changed files must be re-authored." })),
 	reviewMode: Type.Optional(Type.String({ pattern: "^(review|reference)$", description: "Use reference only for visible but low-value review artifacts such as binaries or deterministic generated output; defaults to review." })),
 	commentary: Type.Optional(Type.Array(commentarySchema, { maxItems: 100 })),
-});
+}, { additionalProperties: false });
 const reviewOverviewSchema = Type.Object({
 	intent: Type.String({ minLength: 1, maxLength: 500, description: "One sentence stating the problem and resulting behavior." }),
 	changes: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { minItems: 2, maxItems: 4, description: "Outcome-level changes; do not enumerate files." }),
 	validation: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { minItems: 1, maxItems: 2, description: "Meaningful automated or manual checks performed." }),
 	reviewFocus: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "At most one area where human judgment is especially useful." })),
 	risks: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "At most one material risk, limitation, or deferred gap." })),
-});
+}, { additionalProperties: false });
 const planCommentarySchema = Type.Object({
 	id: Type.String({ minLength: 1, maxLength: 20_000, description: "Stable ID unique within this plan; used to identify user replies." }),
 	body: Type.String({ minLength: 1, maxLength: 20_000, description: "Pi's note on this part of the plan — rationale, tradeoff, open question." }),
 	startLine: Type.Optional(Type.Integer({ minimum: 1, description: "Absolute 1-based source line in the plan markdown this note anchors to; must fall inside its section." })),
 	endLine: Type.Optional(Type.Integer({ minimum: 1 })),
 	element: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Diagram element this note anchors to: \"node:<id>\" or \"edge:<from>-><to>\" from a mermaid fence in the same section. May accompany or replace a line anchor." })),
-});
+}, { additionalProperties: false });
 const planSectionSchema = Type.Object({
 	heading: Type.String({ minLength: 1, maxLength: 500, description: "Exact heading text of a plan section (case-insensitive match)." }),
 	commentary: Type.Optional(Type.Array(planCommentarySchema, { maxItems: 20 })),
-});
+}, { additionalProperties: false });
 const openPlanReviewSchema = Type.Object({
 	title: Type.String({ minLength: 1, maxLength: 200 }),
 	markdown: Type.String({ minLength: 1, maxLength: 1_048_576, description: "The full plan document as markdown. It is sliced into sections at its shallowest heading level; the reviewer annotates the rendered document." }),

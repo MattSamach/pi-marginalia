@@ -3017,6 +3017,22 @@ try {
 					assert.equal(await polishPage.evaluate((before) => window.__cardResizes > before, resizesBeforeToggle), true, "The resolved toggle dispatches marginalia:cards-resized.");
 					await polishPage.click('.thread-card[data-anchor-start="2"] [data-resolved-toggle]');
 					assert.equal(await polishPage.$eval('.thread-card[data-anchor-start="2"] .resolved-detail', (detail) => detail.hidden), true, "A second click compacts the resolved card again.");
+					// Keyboard path: ⇧e cycles resolved cards onto their compact-row
+					// toggle, Enter expands the history, Tab lands on Reopen, and Enter
+					// reopens the thread — no mouse anywhere.
+					assert.match(await polishPage.$eval("[data-shortcuts-overlay]", (overlay) => overlay.textContent), /\u21e7e\s*Next resolved thread/, "The shortcuts guide documents \u21e7e.");
+					await polishPage.keyboard.press("E");
+					assert.equal(await polishPage.evaluate(() => document.activeElement === document.querySelector('.thread-card[data-anchor-start="2"] [data-resolved-toggle]')), true, "\u21e7e must scroll to the resolved card and focus its compact-row toggle.");
+					await polishPage.keyboard.press("E");
+					assert.equal(await polishPage.evaluate(() => document.activeElement === document.querySelector('.thread-card[data-anchor-start="2"] [data-resolved-toggle]')), true, "\u21e7e cycles: with one resolved thread it wraps back to the same toggle.");
+					await polishPage.keyboard.press("Enter");
+					await polishPage.waitForFunction(() => document.querySelector('.thread-card[data-anchor-start="2"] .resolved-detail')?.hidden === false, { polling: 100 });
+					assert.equal(await polishPage.$eval('.thread-card[data-anchor-start="2"] .resolved-detail [data-thread-resolve]', (button) => button.textContent + "|" + (button.offsetParent !== null)), "Reopen|true", "Keyboard expand exposes the Reopen control inside the detail.");
+					await polishPage.keyboard.press("Tab");
+					assert.equal(await polishPage.evaluate(() => document.activeElement === document.querySelector('.thread-card[data-anchor-start="2"] [data-thread-resolve]')), true, "Tab from the focused toggle lands on the Reopen button.");
+					await polishPage.keyboard.press("Enter");
+					await polishPage.waitForFunction(() => { const card = document.querySelector('.thread-card[data-anchor-start="2"]'); return card && !card.classList.contains("resolved"); }, { polling: 100 });
+					assert.equal(await polishPage.$eval('.thread-card[data-anchor-start="2"] [data-thread-resolve]', (button) => button.textContent), "Resolve", "Keyboard reopen returns the thread to open with its Resolve control back.");
 					await polishPage.close();
 				} finally {
 					await polishServer.close();

@@ -342,6 +342,7 @@ export function renderReviewHtml(review, nonce, session = { round: 1, currentRou
 <tr><td><kbd>n</kbd></td><td>Next thread awaiting you</td></tr>
 <tr><td><kbd>⇧n</kbd></td><td>Previous thread awaiting you</td></tr>
 <tr><td><kbd>e</kbd></td><td>Resolve the current thread</td></tr>
+<tr><td><kbd>⇧e</kbd></td><td>Next resolved thread</td></tr>
 ${planMode ? "" : "<tr><td><kbd>x</kbd></td><td>Toggle viewed on the current file</td></tr>"}
 <tr><td><kbd>Esc</kbd></td><td>Leave the text box / close this guide</td></tr>
 <tr><td><kbd>⌘⏎</kbd></td><td>Post the comment or reply being typed</td></tr>

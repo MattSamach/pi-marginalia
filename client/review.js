@@ -67,6 +67,7 @@
   let nextHighlightId = 1;
   let draft;
   let navIndex = -1;
+  let resolvedNavIndex = -1;
   let currentThreadId;
   const overviewSection = reviewRoot.querySelector('[data-review-overview]');
   let showingOverview = Boolean(overviewSection);
@@ -199,6 +200,7 @@
   };
   const threadNumber = (thread) => Number(thread.id.split('-t')[1]) || 0;
   const orderedAwaiting = () => [...threads.values()].filter(isAwaiting).sort((left, right) => sectionIndexOf(left) - sectionIndexOf(right) || threadNumber(left) - threadNumber(right));
+  const orderedResolved = () => [...threads.values()].filter((thread) => thread.status === 'resolved').sort((left, right) => sectionIndexOf(left) - sectionIndexOf(right) || threadNumber(left) - threadNumber(right));
   const commentaryThreadFor = (file, commentaryId) => [...threads.values()].find((thread) => thread.source === 'commentary' && thread.file === file && thread.commentaryId === commentaryId);
 
   // Navigation ---------------------------------------------------------------
@@ -1377,7 +1379,7 @@
       summaryRow.type = 'button';
       summaryRow.className = 'resolved-summary';
       summaryRow.dataset.resolvedToggle = thread.id;
-      summaryRow.title = 'Show or hide the resolved conversation';
+      summaryRow.title = 'Show or hide the resolved conversation (\u21e7e cycles resolved threads)';
       const chipLabel = anchorChipLabel(thread);
       if (chipLabel) {
         const chip = document.createElement('span');
@@ -1814,6 +1816,21 @@
   };
   const navigateNext = () => navigateStep(1);
   const navigatePrev = () => navigateStep(-1);
+  // Shift+e visits resolved threads, which n's awaiting-you inbox never
+  // surfaces. Focus lands on the compact row's toggle (without re-scrolling
+  // past revealThread's placement) so Enter expands the history there and Tab
+  // walks on to the Reopen button inside the expanded detail.
+  const navigateResolved = () => {
+    const resolved = orderedResolved();
+    if (!resolved.length) {
+      setStatus('No resolved threads.');
+      return;
+    }
+    resolvedNavIndex = (resolvedNavIndex + 1) % resolved.length;
+    const thread = resolved[resolvedNavIndex];
+    revealThread(thread);
+    document.querySelector('[data-resolved-toggle="' + thread.id + '"]')?.focus({ preventScroll: true });
+  };
   const resolveCurrent = () => {
     const thread = threads.get(currentThreadId);
     if (!thread) {
@@ -2160,6 +2177,9 @@
     } else if (event.key === 'N') {
       event.preventDefault();
       navigatePrev();
+    } else if (event.key === 'E') {
+      event.preventDefault();
+      navigateResolved();
     } else if (event.key === 'e') {
       event.preventDefault();
       resolveCurrent();

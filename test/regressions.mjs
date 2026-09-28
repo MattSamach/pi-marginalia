@@ -1820,16 +1820,18 @@ try {
 			await page.keyboard.press("o");
 			await page.waitForFunction(() => document.querySelector("[data-review-overview]")?.hidden === false);
 			assert.equal(await page.$('.nav-cursor'), null, "Leaving the file clears the hunk focus ring.");
+			// The anchor click above seated the navigation cursor on the new-file
+			// note, so n continues from it instead of restarting the queue.
 			await page.keyboard.press("n");
 			await page.waitForFunction(() => document.querySelector('[data-review-file="0"]')?.hidden === false);
-			assert.ok(await page.$('.agent-note.thread-flash[data-commentary-id="new-file"]'), "n must reach unresolved Pi notes when no thread awaits.");
-			await page.waitForFunction(() => document.querySelectorAll('tr.anchor-flash').length > 0, { polling: 100 });
-			assert.equal(await page.evaluate(() => document.querySelectorAll('tr.anchor-flash').length), 2, "Thread navigation lands the code on the anchored lines and flashes them.");
+			assert.ok(await page.$('.agent-note.thread-flash[data-commentary-id="second-note"]'), "n continues from the clicked card: the next note, not the clicked one.");
 			await page.keyboard.press("n");
-			assert.ok(await page.$('.agent-note.thread-flash[data-commentary-id="second-note"]'), "n must cycle through the remaining unresolved notes.");
-			assert.equal(await page.$('.agent-note.thread-flash[data-commentary-id="new-file"]'), null, "Only the current navigation target should be highlighted.");
+			await page.waitForFunction(() => document.querySelectorAll("tr.anchor-flash").length > 0, { polling: 100 });
+			assert.ok(await page.$('.agent-note.thread-flash[data-commentary-id="new-file"]'), "n wraps back around to the clicked note.");
+			assert.equal(await page.evaluate(() => document.querySelectorAll('tr.anchor-flash').length), 2, "Thread navigation lands the code on the anchored lines and flashes them.");
+			assert.equal(await page.$('.agent-note.thread-flash[data-commentary-id="second-note"]'), null, "Only the current navigation target should be highlighted.");
 			await page.keyboard.press("N");
-			assert.ok(await page.$('.agent-note.thread-flash[data-commentary-id="new-file"]'), "Shift+n must step backwards through the awaiting queue.");
+			assert.ok(await page.$('.agent-note.thread-flash[data-commentary-id="second-note"]'), "Shift+n steps backwards from the cursor.");
 			await page.click('[data-overview-nav]');
 			await page.click('details.reference-files > summary');
 			const referenceIndex = await page.$eval('details.reference-files [data-file-nav]', (item) => Number(item.dataset.fileNav));
@@ -1878,10 +1880,16 @@ try {
 			assert.equal(await page.$eval('[data-file-nav="0"] [data-unread-badge]', (badge) => badge.hidden), false, "Sidebar files must show awaiting-you thread counts.");
 			assert.equal(await page.$eval('[data-file-nav="0"] [data-unread-badge]', (badge) => badge.textContent), "3");
 			await page.click('[data-overview-nav]');
-			await page.keyboard.press("n");
-			await page.keyboard.press("n");
+			// Navigation continues from the cursor (wherever earlier interactions
+			// seated it), so the live thread must be reached within one full cycle.
+			let reachedLive = false;
+			for (let presses = 0; presses < 3 && !reachedLive; presses++) {
+				await page.keyboard.press("n");
+				await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+				reachedLive = (await page.$(`[data-thread-card="${liveThreadId}"].thread-flash`)) !== null;
+			}
 			await page.waitForFunction(() => document.querySelector('[data-review-file="0"]')?.hidden === false);
-			assert.ok(await page.$(`[data-thread-card="${liveThreadId}"].thread-flash`), "Pressing n must jump to the next thread awaiting the reviewer.");
+			assert.ok(reachedLive, "Pressing n must reach the thread awaiting the reviewer within one cycle.");
 			assert.ok(await page.$('[data-thread-accept-resolve]'), "Pi's resolution proposal should render an accept control.");
 			await page.keyboard.press("?");
 			assert.equal(await page.$eval('[data-shortcuts-overlay]', (overlay) => overlay.hidden), false, "? must open the shortcuts guide from navigation focus.");
@@ -3277,6 +3285,71 @@ try {
 				await quietPage.close();
 			} finally {
 				await quietServer.close();
+			}
+			// A crowded next round places every carried card without collisions:
+			// bands bind the priority card and both yield sweeps, and aligned
+			// rails drop the flow-era Carried-threads heading (it orphans when
+			// packing moves its cards).
+			{
+				const crowdedMd = (v) => ["## Alpha", "", ...Array.from({ length: 6 }, (_, i) => `Alpha point ${i} ${v}.`), "", "## Beta", "", ...Array.from({ length: 6 }, (_, i) => `Beta point ${i} ${v}.`), "", "## Gamma", "", ...Array.from({ length: 6 }, (_, i) => `Gamma point ${i} ${v}.`)].join("\n");
+				const crowded1 = buildPlanReview({ title: "Crowded", markdown: crowdedMd("one") });
+				const crowdedServer = await createCodeReviewServer(crowded1, { onThreadPost: async () => ({ queued: false }), onFinishPass: async () => ({ stale: false }) });
+				const crowdedPage = await browser.newPage();
+				try {
+					await crowdedPage.setViewport({ width: 1500, height: 900 });
+					await crowdedPage.goto(crowdedServer.url, { waitUntil: "domcontentloaded" });
+					await crowdedPage.waitForFunction(() => document.querySelector("[data-finish]"), { polling: 100 });
+					const crowdedCookie = (await crowdedPage.cookies()).map((entry) => `${entry.name}=${entry.value}`).join("; ");
+					const crowdedOrigin = new URL(crowdedServer.url).origin;
+					const crowdedHeaders = { cookie: crowdedCookie, "content-type": "application/json", origin: crowdedOrigin };
+					const crowdedSections = [["alpha", 3], ["beta", 12], ["gamma", 21]];
+					const crowdedPosted = [];
+					for (let i = 0; i < 16; i++) {
+						const [file, base] = crowdedSections[i % 3];
+						const line = base + (i % 3) * 2;
+						const posted = await (await fetch(`${crowdedOrigin}/__pi_code_review_post__`, { method: "POST", headers: crowdedHeaders, body: JSON.stringify({ source: "selection", file, side: "new", newStart: line, newEnd: line, highlight: "point", body: `Question ${i} with enough words that the card occupies realistic vertical space in a crowded rail.` }) })).json();
+						assert.ok(posted.thread, `Crowded post ${i} must land.`);
+						crowdedPosted.push(posted.thread);
+						if (i % 2 === 0) crowdedServer.postPiReply(posted.thread.id, `Answer ${i}, long enough to give the carried copy body height in the next round's rail as well.`, i % 4 === 0);
+					}
+					await fetch(`${crowdedOrigin}/__pi_code_review_finish__`, { method: "POST", headers: crowdedHeaders, body: "{}" });
+					const crowded2 = buildPlanReview({ title: "Crowded", markdown: crowdedMd("two") });
+					const crowdedResponses = crowdedPosted.filter((_, i) => i % 2 === 1).map((thread) => ({ respondsTo: thread.id, resolution: "addressed", body: "Folded in, with prose long enough to size the carried card realistically.", file: thread.file, startLine: crowdedSections.find(([name]) => name === thread.file)[1], side: "new" }));
+					assert.equal(crowdedServer.addRound(crowded2, crowded1.id, crowdedResponses).round, 2, "The crowded next round opens.");
+					await crowdedPage.waitForFunction(() => document.body.dataset.round === "2", { polling: 100, timeout: 15_000 });
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 1200));
+					for (let presses = 0; presses < 3; presses++) { await crowdedPage.keyboard.press("n"); await new Promise((resolvePromise) => setTimeout(resolvePromise, 500)); }
+					const crowdedAudit = await crowdedPage.evaluate(() => {
+						const outers = [...document.querySelectorAll("[data-carried-thread], .thread-card")].filter((el) => !el.closest("[data-carried-thread]") || el.matches("[data-carried-thread]")).map((el) => { const r = el.getBoundingClientRect(); return { id: el.dataset.carriedThread || el.dataset.threadCard, top: r.top + scrollY, height: r.height }; });
+						const furniture = [...document.querySelectorAll(".carried-threads h3, .user-comments")].map((el) => { const r = el.getBoundingClientRect(); return { top: r.top + scrollY, height: r.height, visible: r.height > 0 && getComputedStyle(el).display !== "none" }; });
+						const collide = (a, b) => Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top) > 4;
+						let cardOverlaps = 0;
+						for (let i = 0; i < outers.length; i++) for (let j = i + 1; j < outers.length; j++) if (collide(outers[i], outers[j])) cardOverlaps++;
+						let furnitureOverlaps = 0;
+						for (const f of furniture) if (f.visible) for (const c of outers) if (collide(f, c)) furnitureOverlaps++;
+						const alignedHeadings = [...document.querySelectorAll(".rail-aligned .carried-threads h3")].filter((el) => getComputedStyle(el).display !== "none").length;
+						return { cards: outers.length, cardOverlaps, furnitureOverlaps, alignedHeadings };
+					});
+					assert.equal(crowdedAudit.cards, 16, "Every carried thread renders a card in the crowded round.");
+					assert.equal(crowdedAudit.cardOverlaps, 0, "No two cards overlap after navigation reveals.");
+					assert.equal(crowdedAudit.furnitureOverlaps, 0, "No card sits on rail furniture — bands bind the priority and yield sweeps too.");
+					assert.equal(crowdedAudit.alignedHeadings, 0, "Aligned rails hide the flow-era Carried-threads heading.");
+					// Clicking a card seats the navigation cursor: n continues from it.
+					const navCheck = await crowdedPage.evaluate(() => {
+						const cards = [...document.querySelectorAll("[data-carried-thread]")];
+						const target = cards[2];
+						target.scrollIntoView({ block: "center" });
+						target.querySelector(".thread-turn, [data-carried-host]")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+						return { clicked: target.dataset.carriedThread, order: cards.map((card) => card.dataset.carriedThread) };
+					});
+					await crowdedPage.keyboard.press("n");
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+					const revealed = await crowdedPage.evaluate(() => document.querySelector(".thread-flash")?.dataset.threadCard ?? document.querySelector(".thread-flash")?.dataset.carriedThread);
+					assert.ok(revealed !== undefined && revealed !== navCheck.clicked, "n after a click reveals a different thread than the clicked one (revealed: " + revealed + ").");
+				} finally {
+					await crowdedPage.close();
+					await crowdedServer.close();
+				}
 			}
 			// Closing a session flips the open page to a terminal banner with the
 			// reason, and locks composing exactly like approval.

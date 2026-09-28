@@ -67,7 +67,6 @@
   const highlights = new Map();
   let nextHighlightId = 1;
   let draft;
-  let navIndex = -1;
   let resolvedNavIndex = -1;
   let currentThreadId;
   const overviewSection = reviewRoot.querySelector('[data-review-overview]');
@@ -796,8 +795,16 @@
       // their anchors. On equal positions anchorless leads, then DOM order.
       for (const entry of entries) entry.target = entry.anchor === undefined ? entry.stackY : entry.anchor;
       entries.sort((left, right) => (left.target - right.target) || ((left.anchor === undefined) === (right.anchor === undefined) ? left.order - right.order : left.anchor === undefined ? -1 : 1));
+      bands.sort((left, right) => left.start - right.start);
       const clearBands = (top, height) => {
         for (const band of bands) if (top < band.end + RAIL_GAP && top + height > band.start - RAIL_GAP) top = band.end + RAIL_GAP;
+        return top;
+      };
+      const clearBandsUp = (top, height) => {
+        for (let index = bands.length - 1; index >= 0; index--) {
+          const band = bands[index];
+          if (top < band.end + RAIL_GAP && top + height > band.start - RAIL_GAP) top = band.start - RAIL_GAP - height;
+        }
         return top;
       };
       let cursor = -Infinity;
@@ -814,12 +821,12 @@
         // the minimum gap (moving the priority card only when there is
         // genuinely no room), and successors re-approach their own anchors.
         const stackFloor = Math.min(...entries.map((entry) => entry.stackY));
-        tops[priorityIndex] = exact;
+        tops[priorityIndex] = clearBands(exact, entries[priorityIndex].height);
         for (let index = priorityIndex - 1; index >= 0; index--) {
-          tops[index] = Math.max(stackFloor, Math.min(tops[index], tops[index + 1] - RAIL_GAP - entries[index].height));
+          tops[index] = Math.max(stackFloor, clearBandsUp(Math.min(tops[index], tops[index + 1] - RAIL_GAP - entries[index].height), entries[index].height));
         }
         for (let index = 1; index <= priorityIndex; index++) {
-          tops[index] = Math.max(tops[index], tops[index - 1] + entries[index - 1].height + RAIL_GAP);
+          tops[index] = Math.max(tops[index], clearBands(tops[index - 1] + entries[index - 1].height + RAIL_GAP, entries[index].height));
         }
         let after = tops[priorityIndex] + entries[priorityIndex].height + RAIL_GAP;
         for (let index = priorityIndex + 1; index < entries.length; index++) {
@@ -1722,9 +1729,11 @@
       setStatus('Nothing awaiting you.');
       return;
     }
-    if (direction > 0) navIndex = (navIndex + 1) % awaiting.length;
-    else navIndex = navIndex < 0 ? awaiting.length - 1 : (navIndex - 1 + awaiting.length) % awaiting.length;
-    revealThread(awaiting[navIndex]);
+    const at = awaiting.findIndex((thread) => thread.id === currentThreadId);
+    const next = direction > 0
+      ? (at + 1) % awaiting.length
+      : at < 0 ? awaiting.length - 1 : (at - 1 + awaiting.length) % awaiting.length;
+    revealThread(awaiting[next]);
   };
   const revealThread = (thread) => {
     currentThreadId = thread.id;
@@ -2081,9 +2090,21 @@
     });
   });
   inbox?.addEventListener('click', navigateNext);
-  // Clicking anywhere inside a rail card makes it the alignment priority.
+  // Clicking anywhere inside a rail card makes it the alignment priority
+  // and the navigation cursor: n continues from the card you clicked.
   reviewRoot.addEventListener('click', (event) => {
-    if (event.target instanceof Element) setPriorityRailItem(event.target);
+    if (!(event.target instanceof Element)) return;
+    setPriorityRailItem(event.target);
+    const card = event.target.closest('[data-thread-card], [data-carried-thread], .agent-note');
+    if (!card) return;
+    let threadId = card.dataset.threadCard || card.dataset.carriedThread;
+    if (threadId === undefined && card.dataset.commentaryId !== undefined) {
+      threadId = commentaryThreadFor(card.closest('[data-review-file]')?.dataset.path, card.dataset.commentaryId)?.id;
+    }
+    if (threadId !== undefined) {
+      currentThreadId = threadId;
+      rememberThreadLocation(threadId);
+    }
   });
   shortcutsOverlay?.addEventListener('click', (event) => {
     if (event.target === shortcutsOverlay) shortcutsOverlay.hidden = true;

@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
@@ -9,6 +10,7 @@ import { createReviewMessageQueue } from "./shared/delivery-queue.js";
 import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "./shared/feedback.js";
 import { createCodeReviewServer } from "./shared/server.js";
 import { buildDiagramReview, buildPlanReview, resolvePlanResponses } from "./shared/plan-review.js";
+import { BOOT_HEAL_MAX_AGE_MS, deleteSession, isClaimed, listSessions, saveSession, sweepSessions } from "./shared/persistence.js";
 
 type ReviewThreadTurn = { author: "user" | "pi"; body: string; ts: number; seq?: number; delivered?: boolean };
 type ReviewThread = {
@@ -33,6 +35,20 @@ type ReviewThread = {
 	turns: ReviewThreadTurn[];
 };
 type ReviewThreadSummary = { open: number; awaitingUser: number; awaitingPi: number; resolved: number };
+type SessionNotice = { title: string; kind: string; round: number; open: number; ageMinutes: number; url?: string };
+type SessionNoticeDetails = { mode: "resumed" | "resumable"; sessions: SessionNotice[] };
+
+const SESSION_NOTICE_TYPE = "marginalia-sessions";
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+const formatAge = (minutes: number) => (minutes < 1 ? "active just now" : minutes < 60 ? `active ${minutes}m ago` : `active ${Math.round(minutes / 60)}h ago`);
+
+function formatSessionNoticeXml({ mode, sessions }: SessionNoticeDetails): string {
+	const describe = (s: SessionNotice) => `"${s.title}" (${s.kind}, round ${s.round}, ${s.open} open thread(s), last active ${s.ageMinutes}m ago${s.url ? `, ${s.url}` : ""})`;
+	const list = sessions.map(describe).join(" · ");
+	return mode === "resumed"
+		? `<marginalia-sessions resumed="${sessions.length}">Marginalia resumed ${sessions.length} review session(s) from before the restart: ${list}. Open browser tabs reconnect on their own; the links mint fresh entry tokens if a tab was closed.</marginalia-sessions>`
+		: `<marginalia-sessions resumable="${sessions.length}">Marginalia found ${sessions.length} resumable review session(s) on disk (bootHeal is off): ${list}. Open the next round with previousRoundId to resume one.</marginalia-sessions>`;
+}
 
 const commentarySchema = Type.Object({
 	id: Type.String({ minLength: 1, maxLength: 20_000, description: "Stable ID unique within this file; used to identify user replies." }),
@@ -184,23 +200,141 @@ async function openBrowser(url: string): Promise<void> {
 export default function piCodeReview(pi: ExtensionAPI): void {
 	const servers = new Set<ReviewServer>();
 	const queue = createReviewMessageQueue((messages: string[]) => pi.sendUserMessage(messages.join("\n\n")));
+	// The freshest tool/event context, for sessions healed from disk that have
+	// no originating tool call to borrow idle-state and notifications from.
+	let lastCtx: ExtensionContext | undefined;
+	type PersistedSession = {
+		id: string;
+		kind?: string;
+		title?: string;
+		root?: string;
+		scopePath?: string;
+		lastActive?: number;
+		pid?: number;
+		port?: number;
+		phase?: string;
+		rounds: { number: number; review: { id: string; title?: string }; store: { threads: { status: string }[] } }[];
+	};
+	const persistState = async (state: { id: string; phase?: string }) => {
+		if (state.phase === "approved" || state.phase === "closed") await deleteSession(state.id);
+		else await saveSession(state);
+	};
 
 	type ReviewRound = { number: number; review: { id: string; root: string } };
 	// Optional appearance defaults from ~/.pi/agent/marginalia.json ({"theme","scheme"}).
 	// Read per session open so edits apply to the next review without a restart;
 	// invalid or missing values fall back to the built-in defaults, and a
 	// reviewer's in-browser picker choice still wins over both.
-	const loadAppearance = async (): Promise<{ theme?: string; scheme?: string } | undefined> => {
+	const loadAppearance = async (): Promise<{ theme?: string; scheme?: string; bootHeal?: boolean } | undefined> => {
 		try {
 			const parsed = JSON.parse(await readFile(resolve(homedir(), ".pi/agent/marginalia.json"), "utf8"));
-			if (parsed && typeof parsed === "object") return { theme: parsed.theme, scheme: parsed.scheme };
+			if (parsed && typeof parsed === "object") return { theme: parsed.theme, scheme: parsed.scheme, bootHeal: parsed.bootHeal };
 		} catch {}
 		return undefined;
 	};
+	const buildCallbacks = (kind: string | undefined, getCtx: () => ExtensionContext | undefined) => {
+		const noun = kind === "plan" ? "Plan" : "Review";
+		const idleNow = () => {
+			const ctx = getCtx();
+			try {
+				return ctx ? ctx.isIdle() : false;
+			} catch {
+				return false;
+			}
+		};
+		const notify = (text: string) => {
+			try {
+				getCtx()?.ui.notify(text, "info");
+			} catch {}
+		};
+		return {
+			isTurnActive: () => {
+				const ctx = getCtx();
+				try {
+					return ctx ? !ctx.isIdle() : false;
+				} catch {
+					return false;
+				}
+			},
+			onThreadPost: async (round: ReviewRound, thread: ReviewThread, turns: ReviewThreadTurn[]) => {
+				// Same-thread turns queued during one busy stretch coalesce into a
+				// single envelope at flush; the payload freezes copies at post time
+				// (matching the old pre-formatted-string behavior), and merge keeps
+				// the newest thread attributes with all turns in post order.
+				const queued = queue.post({
+					key: `${round.review.id}:${thread.id}`,
+					payload: { review: round.review, thread: { ...thread }, turns: turns.map((turn) => ({ ...turn })), round: round.number },
+					merge: (prev: { turns: ReviewThreadTurn[] }, next: { turns: ReviewThreadTurn[] }) => ({ ...next, turns: [...prev.turns, ...next.turns] }),
+					render: (payload: { review: ReviewRound["review"]; thread: ReviewThread; turns: ReviewThreadTurn[]; round: number }) => formatThreadMessageXml(payload.review, payload.thread, payload.turns, payload.round),
+				}, idleNow());
+				// The message is accepted once queue.post returns; a notify failure must
+				// not be reported as a delivery failure (the server would requeue an
+				// escalation whose content is already on its way).
+				notify(`${noun} thread ${thread.id}: ${turns.length === 1 ? "new reviewer message" : `${turns.length} reviewer messages`}${queued ? " (queued until Pi settles)" : ""}.`);
+				// The server stamps the thread's reply-state from this verdict: queued
+				// content is sent (awaiting the settle flush), immediate is working.
+				return { queued };
+			},
+			onFinishPass: async (round: ReviewRound, note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
+				// Plans have no worktree to drift from; only code snapshots re-check.
+				let stale = false;
+				if (kind !== "plan") {
+					stale = true;
+					try {
+						stale = (await currentSnapshotId(round.review.root)) !== round.review.id;
+					} catch {}
+				}
+				const queued = queue.post(formatReviewPassXml(round.review, threads, summary, stale, note, round.number), idleNow());
+				notify(`${noun} round ${round.number} pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s)${queued ? " (queued until Pi settles)" : ""}.`);
+				// queued tells the server how to stamp the reply-state of the threads
+				// this pass delivers: sent while the pass waits, working once in context.
+				return { stale, queued };
+			},
+			onApprove: async (round: ReviewRound, message: string, staleNow: boolean) => {
+				const queued = queue.post(formatReviewApprovedXml(round.review, round.number, message, staleNow), idleNow());
+				notify(`${noun} round ${round.number} approved${staleNow ? " (worktree has drifted)" : ""}${queued ? " (queued until Pi settles)" : ""}.`);
+			},
+		};
+	};
+	// Resurrect a persisted session so a previousRoundId or a reconnecting tab
+	// keeps working across pi restarts. The healed server prefers its old port
+	// (the tab's EventSource retry loop then reconnects unaided) and reuses its
+	// persisted cookie material so the reviewer's session stays authenticated.
+	const healFromState = async (state: PersistedSession) => {
+		const kind = state.kind === "plan" ? "plan" : "code";
+		const extras: Record<string, unknown> = kind === "code" && state.root
+			? {
+				staleness: { fingerprint: () => computeWorktreeFingerprint(state.root as string), snapshot: () => currentSnapshotProbe(state.root as string) },
+				contextLines: createPinnedBlobContextReader(),
+			}
+			: {};
+		const server = await createCodeReviewServer(state.rounds[state.rounds.length - 1].review, {
+			appearance: await loadAppearance(),
+			...buildCallbacks(kind, () => lastCtx),
+			...extras,
+			restore: state,
+			preferredPort: state.port,
+			scopePath: state.scopePath,
+			onPersist: persistState,
+		});
+		servers.add(server);
+		return server;
+	};
+	const findSessionWithRound = async (roundId: string) => {
+		const live = [...servers].find((candidate) => candidate.hasRound(roundId));
+		if (live) return live;
+		for (const state of await listSessions()) {
+			if (state.phase === "approved" || state.phase === "closed") continue;
+			if (!state.rounds?.some((round: { review?: { id?: string } }) => round.review?.id === roundId)) continue;
+			if (isClaimed(state)) throw new Error(`Round ${roundId.slice(0, 12)} belongs to a review session live in another pi process.`);
+			return healFromState(state);
+		}
+		return undefined;
+	};
 	const openSession = async (ctx: ExtensionContext, review: { kind?: string; id: string; root: string; title: string; files: { path: string }[] }, previousRoundId: string | undefined, threadResponses: unknown, serverExtras: Record<string, unknown>) => {
-		const noun = review.kind === "plan" ? "Plan" : "Review";
+		lastCtx = ctx;
 		if (previousRoundId) {
-			const server = [...servers].find((candidate) => candidate.hasRound(previousRoundId));
+			const server = await findSessionWithRound(previousRoundId);
 			if (!server) throw new Error(`No open review session contains round ${previousRoundId.slice(0, 12)}. Open a fresh review without previousRoundId.`);
 			const added = server.addRound(review, previousRoundId, threadResponses);
 			if (added.error === "approved") throw new Error("This review session was approved and is closed; open a fresh review without previousRoundId if another unit needs review.");
@@ -214,55 +348,18 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		}
 		for (const stale of [...servers].filter((existing) => existing.root === review.root)) {
 			servers.delete(stale);
+			// A same-root replacement supersedes the old session: its close writes
+			// a final state, then the file is removed so no boot resurrects it.
+			const staleId = stale.serializeSession().id;
 			await stale.close();
+			await deleteSession(staleId);
 		}
-		const appearance = await loadAppearance();
 		const server = await createCodeReviewServer(review, {
-			appearance,
-			// Reply-state honesty on reconnect: with no turn running, a thread still
-			// marked working renders as seen (delivered, turn over, no reply).
-			isTurnActive: () => !ctx.isIdle(),
-			onThreadPost: async (round: ReviewRound, thread: ReviewThread, turns: ReviewThreadTurn[]) => {
-				// Same-thread turns queued during one busy stretch coalesce into a
-				// single envelope at flush; the payload freezes copies at post time
-				// (matching the old pre-formatted-string behavior), and merge keeps
-				// the newest thread attributes with all turns in post order.
-				const queued = queue.post({
-					key: `${round.review.id}:${thread.id}`,
-					payload: { review: round.review, thread: { ...thread }, turns: turns.map((turn) => ({ ...turn })), round: round.number },
-					merge: (prev: { turns: ReviewThreadTurn[] }, next: { turns: ReviewThreadTurn[] }) => ({ ...next, turns: [...prev.turns, ...next.turns] }),
-					render: (payload: { review: ReviewRound["review"]; thread: ReviewThread; turns: ReviewThreadTurn[]; round: number }) => formatThreadMessageXml(payload.review, payload.thread, payload.turns, payload.round),
-				}, ctx.isIdle());
-				// The message is accepted once queue.post returns; a notify failure must
-				// not be reported as a delivery failure (the server would requeue an
-				// escalation whose content is already on its way).
-				try {
-					ctx.ui.notify(`${noun} thread ${thread.id}: ${turns.length === 1 ? "new reviewer message" : `${turns.length} reviewer messages`}${queued ? " (queued until Pi settles)" : ""}.`, "info");
-				} catch {}
-				// The server stamps the thread's reply-state from this verdict: queued
-				// content is sent (awaiting the settle flush), immediate is working.
-				return { queued };
-			},
-			onFinishPass: async (round: ReviewRound, note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
-				// Plans have no worktree to drift from; only code snapshots re-check.
-				let stale = false;
-				if (review.kind !== "plan") {
-					stale = true;
-					try {
-						stale = (await currentSnapshotId(round.review.root)) !== round.review.id;
-					} catch {}
-				}
-				const queued = queue.post(formatReviewPassXml(round.review, threads, summary, stale, note, round.number), ctx.isIdle());
-				ctx.ui.notify(`${noun} round ${round.number} pass finished: ${summary.open} open and ${summary.resolved} resolved thread(s)${queued ? " (queued until Pi settles)" : ""}.`, "info");
-				// queued tells the server how to stamp the reply-state of the threads
-				// this pass delivers: sent while the pass waits, working once in context.
-				return { stale, queued };
-			},
-			onApprove: async (round: ReviewRound, message: string, staleNow: boolean) => {
-				const queued = queue.post(formatReviewApprovedXml(round.review, round.number, message, staleNow), ctx.isIdle());
-				ctx.ui.notify(`${noun} round ${round.number} approved${staleNow ? " (worktree has drifted)" : ""}${queued ? " (queued until Pi settles)" : ""}.`, "info");
-			},
+			appearance: await loadAppearance(),
+			...buildCallbacks(review.kind, () => ctx),
 			...serverExtras,
+			scopePath: review.kind === "plan" ? ctx.cwd : review.root,
+			onPersist: persistState,
 		});
 		servers.add(server);
 		try {
@@ -293,7 +390,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		// the empty round-1 context makes a missing first summary an error.
 		let previousFiles: { path: string }[] = [];
 		if (previousRoundId) {
-			const host = [...servers].find((candidate) => candidate.hasRound(previousRoundId));
+			const host = await findSessionWithRound(previousRoundId);
 			if (!host) throw new Error(`No open review session contains round ${previousRoundId.slice(0, 12)}. Open a fresh review without previousRoundId.`);
 			previousFiles = host.roundFiles(previousRoundId) ?? [];
 		}
@@ -612,6 +709,9 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
+		lastCtx = ctx;
+		await bootHealTask;
+		deliverBootAnnouncement(ctx.isIdle());
 		// Pi's turn is over: threads whose delivered reviewer message drew no reply
 		// were seen, not answered. This runs BEFORE the flush below so a message
 		// that only now reaches Pi's context is never marked seen by the very
@@ -631,5 +731,111 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		const active = [...servers];
 		servers.clear();
 		await Promise.all(active.map((server) => server.close()));
+	});
+
+	pi.registerTool({
+		name: "list_review_sessions",
+		label: "List Review Sessions",
+		description: "List marginalia review sessions: live servers in this pi process and resumable persisted sessions on disk, with ports, phases, and ages.",
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params) {
+			const liveIds = new Set<string>();
+			const lines: string[] = [];
+			for (const server of [...servers]) {
+				const state = server.serializeSession() as PersistedSession;
+				liveIds.add(state.id);
+				const open = state.rounds[state.rounds.length - 1].store.threads.filter((thread) => thread.status === "open").length;
+				lines.push(`live  ${state.id.slice(0, 12)}  "${state.title}"  ${state.kind}  round ${state.rounds.length}  ${open} open thread(s)  port ${state.port}  phase ${state.phase}`);
+			}
+			for (const state of await listSessions()) {
+				if (liveIds.has(state.id)) continue;
+				const age = Math.round((Date.now() - (state.lastActive ?? 0)) / 60_000);
+				const claimed = isClaimed(state) ? `claimed by pid ${state.pid}` : "resumable";
+				lines.push(`disk  ${state.id.slice(0, 12)}  "${state.title ?? "untitled"}"  ${state.kind ?? "code"}  round ${state.rounds?.length ?? "?"}  ${claimed}  last active ${age}m ago  phase ${state.phase}`);
+			}
+			return { content: [{ type: "text", text: lines.length ? lines.join("\n") : "No live or persisted review sessions." }], details: { live: liveIds.size } };
+		},
+	});
+
+	// Boot heal: resurrect this project's recent non-terminal sessions at
+	// extension load so an open reviewer tab reconnects on its own, without
+	// touching any pi session. The chat announcement waits for session_start —
+	// the session the user actually resumed — so no message ever conjures a
+	// session at pi boot.
+	pi.registerMessageRenderer<SessionNoticeDetails>(SESSION_NOTICE_TYPE, (message, { expanded, outputPad }, theme) => {
+		const details = message.details;
+		if (!details?.sessions?.length) return undefined;
+		const count = details.sessions.length;
+		const headline = details.mode === "resumed" ? `resumed ${plural(count, "review session")}` : `${plural(count, "resumable review session")} on disk`;
+		const lines = [`${theme.fg("success", "◆")} ${theme.bold("Marginalia")} ${theme.fg("muted", headline)}`];
+		for (const session of details.sessions) {
+			const meta = [session.kind, `round ${session.round}`, plural(session.open, "open thread"), formatAge(session.ageMinutes)].join(" · ");
+			lines.push("", `  ${theme.fg("text", session.title)}`, `  ${theme.fg("dim", meta)}`);
+			if (session.url) lines.push(`  ${theme.fg("mdLinkUrl", session.url)}`);
+		}
+		if (expanded) {
+			const hint = details.mode === "resumed"
+				? "Open tabs reconnect on their own; links mint fresh entry tokens if a tab was closed."
+				: "Boot heal is off. Open the next round with previousRoundId to resume one.";
+			lines.push("", theme.fg("dim", hint));
+		}
+		const greenBg = theme.getColorMode() === "truecolor" ? "\x1b[48;2;22;52;40m" : "\x1b[48;5;22m";
+		const box = new Box(outputPad, 1, (text) => `${greenBg}${text}\x1b[49m`);
+		box.addChild(new Text(lines.join("\n"), 0, 0));
+		return box;
+	});
+
+	let bootAnnouncement: SessionNoticeDetails | undefined;
+	const bootHealTask = (async () => {
+		try {
+			await sweepSessions();
+			const cwd = process.cwd();
+			const scopeMatches = (scopePath?: string) => typeof scopePath === "string" && (cwd.startsWith(scopePath) || scopePath.startsWith(cwd));
+			const resumable = (await listSessions()).filter((state: PersistedSession) =>
+				state.phase !== "approved" && state.phase !== "closed"
+				&& !isClaimed(state)
+				&& Date.now() - (state.lastActive ?? 0) < BOOT_HEAL_MAX_AGE_MS
+				&& scopeMatches(state.scopePath));
+			if (!resumable.length) return;
+			const describe = (state: PersistedSession, url?: string): SessionNotice => ({
+				title: state.title ?? "untitled",
+				kind: state.kind ?? "code",
+				round: state.rounds.length,
+				open: state.rounds[state.rounds.length - 1].store.threads.filter((thread) => thread.status === "open").length,
+				ageMinutes: Math.round((Date.now() - (state.lastActive ?? 0)) / 60_000),
+				url,
+			});
+			if ((await loadAppearance())?.bootHeal === false) {
+				bootAnnouncement = { mode: "resumable", sessions: resumable.map((state: PersistedSession) => describe(state)) };
+				return;
+			}
+			const healed: SessionNotice[] = [];
+			for (const state of resumable) {
+				try {
+					const server = await healFromState(state);
+					healed.push(describe(state, server.entryUrl()));
+				} catch {}
+			}
+			if (healed.length) bootAnnouncement = { mode: "resumed", sessions: healed };
+		} catch {}
+	})();
+	// The notice belongs to a session the user deliberately entered. pi
+	// auto-creates a session at launch (reason "startup") before any human
+	// choice — announcing there conjures a stray session and wakes its agent.
+	const deliverBootAnnouncement = (idle: boolean) => {
+		if (!bootAnnouncement) return;
+		const details = bootAnnouncement;
+		bootAnnouncement = undefined;
+		pi.sendMessage<SessionNoticeDetails>(
+			{ customType: SESSION_NOTICE_TYPE, content: formatSessionNoticeXml(details), display: true, details },
+			idle ? { triggerTurn: true } : { triggerTurn: true, deliverAs: "followUp" },
+		);
+	};
+	pi.on("session_start", async (event, ctx) => {
+		lastCtx = ctx;
+		if (event.reason === "startup") return;
+		// A fast resume must not outrun the async heal and lose the notice.
+		await bootHealTask;
+		deliverBootAnnouncement(true);
 	});
 }

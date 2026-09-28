@@ -15,6 +15,9 @@ import { buildCarriedThreads, buildHeldThreads, buildQuietCarriedThreads, create
 import { createReviewMessageQueue } from "../shared/delivery-queue.js";
 import { buildDiagramReview, buildPlanReview, PLAN_LIMITS, resolvePlanResponses, sectionizePlan } from "../shared/plan-review.js";
 
+// Never let test servers persist sessions into the real user store.
+process.env.PI_MARGINALIA_SESSIONS_DIR ??= await mkdtemp(join(tmpdir(), "marginalia-test-sessions-"));
+
 const exec = promisify(execFile);
 const git = (cwd, ...args) => exec("git", ["-C", cwd, ...args], { encoding: "utf8" });
 const fixture = await mkdtemp(join(tmpdir(), "pi-code-review-"));
@@ -1371,6 +1374,82 @@ try {
 		await staleServer.close();
 	}
 	console.log("Staleness detection flow passed.");
+
+// Session persistence: a serialized session resurrects with its rounds,
+// threads, delivery state, auth material, and port; a reconnecting tab
+// re-syncs over SSE init; an in-flight pass re-queues its captured turns.
+{
+	const persistDir = await mkdtemp(join(tmpdir(), "marginalia-persist-"));
+	const previousSessionsDir = process.env.PI_MARGINALIA_SESSIONS_DIR;
+	process.env.PI_MARGINALIA_SESSIONS_DIR = persistDir;
+	const { saveSession, loadSession, listSessions, deleteSession, sweepSessions, isClaimed } = await import("../shared/persistence.js");
+	const review = buildPlanReview({ title: "Persist", markdown: "## A\n\nBody line here.\n\nSecond line.\n" });
+	const hooks = { onThreadPost: async () => ({ queued: false }), onFinishPass: async () => ({ stale: false }) };
+	let persisted;
+	const first = await createCodeReviewServer(review, { ...hooks, scopePath: "/tmp/demo", onPersist: (state) => { persisted = state; return saveSession(state); } });
+	const entry = await fetch(first.url, { redirect: "manual" });
+	const cookie = (entry.headers.get("set-cookie") ?? "").split(";")[0];
+	const origin = new URL(first.url).origin;
+	const jsonHeaders = { cookie, "content-type": "application/json", origin };
+	const posted = await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ source: "selection", file: "a", side: "new", newStart: 3, newEnd: 3, highlight: "Body", body: "survive me" }) })).json();
+	first.postPiReply(posted.thread.id, "noted", true);
+	await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+	assert.ok(persisted, "Mutations persist the session within the debounce window.");
+	assert.ok(await loadSession(persisted.id), "The persisted session loads from disk.");
+	const oldPort = first.port;
+	await first.close();
+	const state = await loadSession(persisted.id);
+	assert.equal(state.scopePath, "/tmp/demo", "The session records its scope for boot-heal matching.");
+	const second = await createCodeReviewServer(review, { ...hooks, restore: state, preferredPort: state.port });
+	assert.equal(second.port, oldPort, "The healed session binds its old port so the tab's EventSource reconnects.");
+	const survived = await fetch(`${origin}/round/1`, { headers: { cookie } });
+	assert.equal(survived.status, 200, "The reviewer's old cookie stays authenticated after the restart.");
+	const restoredState = second.serializeSession();
+	const thread = restoredState.rounds[0].store.threads.find((entry2) => entry2.id === posted.thread.id);
+	assert.equal(thread.turns.map((turn) => turn.body).join("/"), "survive me/noted", "Thread turns survive the restart in order.");
+	assert.equal(thread.piProposedResolve, true, "Pi's resolution proposal survives the restart.");
+	const reposted = await (await fetch(`${origin}/__pi_code_review_post__`, { method: "POST", headers: jsonHeaders, body: JSON.stringify({ source: "selection", file: "a", side: "new", newStart: 5, newEnd: 5, highlight: "Second", body: "after heal" }) })).json();
+	assert.ok(reposted.thread && reposted.thread.id !== posted.thread.id, "Posting continues after a heal without id collisions.");
+	await second.close();
+	// In-flight pass recovery: turns captured by a dying pass re-queue.
+	let capturedState;
+	const third = await createCodeReviewServer(review, {
+		onThreadPost: async () => ({ queued: false }),
+		onFinishPass: async () => {
+			capturedState = third.serializeSession();
+			return { stale: false };
+		},
+		onPersist: () => {},
+	});
+	const entry3 = await fetch(third.url, { redirect: "manual" });
+	const cookie3 = (entry3.headers.get("set-cookie") ?? "").split(";")[0];
+	const origin3 = new URL(third.url).origin;
+	const headers3 = { cookie: cookie3, "content-type": "application/json", origin: origin3 };
+	const quietPost = await (await fetch(`${origin3}/__pi_code_review_post__`, { method: "POST", headers: headers3, body: JSON.stringify({ source: "selection", file: "a", side: "new", newStart: 3, newEnd: 3, highlight: "Body", body: "captured by the pass", quiet: true }) })).json();
+	await fetch(`${origin3}/__pi_code_review_finish__`, { method: "POST", headers: headers3, body: "{}" });
+	await third.close();
+	assert.ok(capturedState.inFlight?.length, "A pass in flight serializes its captured turn seqs.");
+	const fourth = await createCodeReviewServer(review, { ...hooks, restore: capturedState });
+	const requeued = fourth.serializeSession().rounds[0].store.threads.find((entry2) => entry2.id === quietPost.thread.id);
+	assert.equal(requeued.turns[0].delivered, false, "Turns a dying pass captured re-queue for the next pass.");
+	await fourth.close();
+	// Claims and sweeps: a session claimed by a live pid is skipped; terminal
+	// and ancient sessions age out.
+	assert.equal(isClaimed({ pid: process.pid }), false, "A session claimed by this process is not foreign-claimed.");
+	assert.equal(isClaimed({ pid: 1 }), true, "A session claimed by a living foreign process is claimed (EPERM counts as alive).");
+	assert.equal(isClaimed({ pid: 999999 }), false, "A dead pid releases its claim.");
+	await saveSession({ version: 1, id: "terminal1", phase: "approved", lastActive: Date.now(), rounds: [] });
+	await saveSession({ version: 1, id: "ancient1", phase: "reviewing", lastActive: Date.now() - 15 * 24 * 60 * 60 * 1000, rounds: [] });
+	await saveSession({ version: 1, id: "fresh1", phase: "reviewing", lastActive: Date.now(), rounds: [] });
+	const swept = await sweepSessions();
+	assert.deepEqual(swept.sort(), ["ancient1", "terminal1"], "Sweep removes terminal and ancient sessions only.");
+	assert.equal((await listSessions()).some((entry2) => entry2.id === "fresh1"), true, "Fresh sessions survive the sweep.");
+	await deleteSession("fresh1");
+	await deleteSession(persisted.id);
+	process.env.PI_MARGINALIA_SESSIONS_DIR = previousSessionsDir;
+	await rm(persistDir, { recursive: true, force: true });
+	console.log("Session persistence flow passed.");
+}
 
 	assert.deepEqual(computeIntraline("const limit = 10;", "const limit = 250;"), { del: [14, 16], add: [14, 17] }, "A small replacement emphasizes only the changed token.");
 	assert.deepEqual(computeIntraline("return value", "return values"), { del: [7, 12], add: [7, 13] }, "Mid-word changes expand to whole words.");
@@ -3452,6 +3531,36 @@ try {
 				} finally {
 					await crowdedPage.close();
 					await crowdedServer.close();
+				}
+			}
+			// Tab heal: a page whose server dies reconnects on its own once a healed
+			// server binds the same port with the same cookie material, and the live
+			// SSE channel resumes end to end.
+			{
+				const healReview = buildPlanReview({ title: "Heal", markdown: "## A\n\nBody line here.\n" });
+				const healHooks = { onThreadPost: async () => ({ queued: false }), onFinishPass: async () => ({ stale: false }) };
+				const healFirst = await createCodeReviewServer(healReview, healHooks);
+				const healPage = await browser.newPage();
+				try {
+					await healPage.goto(healFirst.url, { waitUntil: "domcontentloaded" });
+					await healPage.waitForFunction(() => document.querySelector("[data-finish]"), { polling: 100 });
+					const healCookie = (await healPage.cookies()).map((entry) => `${entry.name}=${entry.value}`).join("; ");
+					const healOrigin = new URL(healFirst.url).origin;
+					const healPosted = await (await fetch(`${healOrigin}/__pi_code_review_post__`, { method: "POST", headers: { cookie: healCookie, "content-type": "application/json", origin: healOrigin }, body: JSON.stringify({ source: "selection", file: "a", side: "new", newStart: 3, newEnd: 3, highlight: "Body", body: "pre-restart message" }) })).json();
+					await healPage.waitForFunction(() => document.body.textContent.includes("pre-restart message"), { polling: 100 });
+					const healState = healFirst.serializeSession();
+					await healFirst.close();
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
+					const healSecond = await createCodeReviewServer(healReview, { ...healHooks, restore: healState, preferredPort: healState.port });
+					assert.equal(healSecond.port, healState.port, "The healed server reclaims its port for the waiting tab.");
+					// The page's EventSource retries on its own schedule; the healed
+					// server's reply must reach the untouched tab.
+					healSecond.postPiReply(healPosted.thread.id, "post-restart reply", false);
+					await healPage.waitForFunction(() => document.body.textContent.includes("post-restart reply"), { polling: 200, timeout: 20_000 });
+					assert.ok(await healPage.evaluate(() => document.body.textContent.includes("pre-restart message")), "Pre-restart threads remain on the reconnected page.");
+					await healSecond.close();
+				} finally {
+					await healPage.close();
 				}
 			}
 			// Closing a session flips the open page to a terminal banner with the

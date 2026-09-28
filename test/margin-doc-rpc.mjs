@@ -10,6 +10,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Never let test servers persist sessions into the real user store.
+process.env.PI_MARGINALIA_SESSIONS_DIR ??= await mkdtemp(join(tmpdir(), "marginalia-test-sessions-"));
+
 if (process.platform === "win32") {
 	console.log("margin-doc RPC check is skipped on Windows.");
 	process.exit(0);

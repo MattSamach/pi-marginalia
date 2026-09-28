@@ -93,19 +93,28 @@ export async function createCodeReviewServer(review, options) {
 	// Identity of a file's rendered diff; viewed checkmarks survive a new round
 	// only for files whose diff is byte-identical to the previous one.
 	const diffSignature = (file) => JSON.stringify([file.status, file.oldPath ?? null, file.binary === true, file.omitted === true, file.truncated === true, file.patchBytes ?? 0, file.contentSha256 ?? null, (file.lines ?? []).map((line) => [line.kind, line.content, line.oldLine ?? null, line.newLine ?? null])]);
-	const rounds = [{ number: 1, review, store: createThreadStore(review), viewed: new Set() }];
-	let phase = "reviewing";
-	let closeReason;
-	const entryTokens = new Map();
+	const restore = options.restore;
+	const rounds = restore
+		? restore.rounds.map((round) => ({ number: round.number, review: round.review, store: createThreadStore(round.review, undefined, [], [], round.store), viewed: new Set(round.viewed) }))
+		: [{ number: 1, review, store: createThreadStore(review), viewed: new Set() }];
+	let phase = restore?.phase ?? "reviewing";
+	let closeReason = restore?.closeReason;
+	const entryTokens = new Map(restore?.entryTokens ?? []);
 	const mintToken = () => {
 		const token = randomBytes(24).toString("base64url");
 		entryTokens.set(token, false);
 		return token;
 	};
 	const firstToken = mintToken();
-	const cookieName = `pi_code_review_${randomBytes(8).toString("hex")}`;
-	const cookieValue = randomBytes(24).toString("base64url");
+	const cookieName = restore?.cookieName ?? `pi_code_review_${randomBytes(8).toString("hex")}`;
+	const cookieValue = restore?.cookieValue ?? randomBytes(24).toString("base64url");
 	let port = 0;
+	// A pass that was in flight when the process died never reached Pi: its
+	// captured turns re-queue so the next pass re-delivers them.
+	if (restore?.inFlight) {
+		const round = rounds[rounds.length - 1];
+		round.store.requeue(new Map(restore.inFlight.map(([threadId, seqs]) => [threadId, new Set(seqs)])));
+	}
 	let finishing = false;
 	// While a finish handoff is awaiting, the exact undelivered messages the pass
 	// captured (thread id → Set of turn seqs); addRound consults it so carried
@@ -125,7 +134,38 @@ export async function createCodeReviewServer(review, options) {
 		return undefined;
 	};
 
+	// Persistence: every observable mutation reaches broadcast, so a debounced
+	// serialize behind it keeps the on-disk session current within ~250ms.
+	const serializeSession = () => ({
+		version: 1,
+		id: rounds[0].review.id,
+		kind: rounds[0].review.kind ?? "code",
+		title: current().review.title,
+		root: rounds[0].review.root,
+		scopePath: options.scopePath,
+		lastActive: Date.now(),
+		pid: process.pid,
+		port,
+		phase,
+		closeReason,
+		cookieName,
+		cookieValue,
+		entryTokens: [...entryTokens],
+		inFlight: inFlightCapture ? [...inFlightCapture].map(([threadId, seqs]) => [threadId, [...seqs]]) : undefined,
+		rounds: rounds.map((round) => ({ number: round.number, review: round.review, viewed: [...round.viewed], store: round.store.serialize() })),
+	});
+	let persistTimer;
+	const schedulePersist = () => {
+		if (!options.onPersist) return;
+		clearTimeout(persistTimer);
+		persistTimer = setTimeout(() => {
+			try {
+				options.onPersist(serializeSession());
+			} catch {}
+		}, 250);
+	};
 	const broadcast = (event, data) => {
+		schedulePersist();
 		const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 		for (const client of sseClients) client.write(frame);
 	};
@@ -685,16 +725,25 @@ export async function createCodeReviewServer(review, options) {
 		sockets.add(socket);
 		socket.on("close", () => sockets.delete(socket));
 	});
-	await new Promise((resolvePromise, rejectPromise) => {
+	const listenOn = (candidate) => new Promise((resolvePromise, rejectPromise) => {
 		server.once("error", rejectPromise);
-		server.listen(0, "127.0.0.1", () => {
+		server.listen(candidate, "127.0.0.1", () => {
 			server.off("error", rejectPromise);
 			resolvePromise();
 		});
 	});
+	try {
+		await listenOn(options.preferredPort ?? 0);
+	} catch (error) {
+		if (options.preferredPort === undefined || (error && error.code !== "EADDRINUSE" && error.code !== "EACCES")) throw error;
+		await listenOn(0);
+	}
 	const address = server.address();
 	if (!address || typeof address === "string") throw new Error("Could not determine code review server port.");
 	port = address.port;
+	// The session exists on disk from birth: an untouched review must still
+	// survive a restart, and the persisted port is what lets the tab heal.
+	schedulePersist();
 	return {
 		url: `http://127.0.0.1:${port}/?token=${encodeURIComponent(firstToken)}`,
 		port,
@@ -809,9 +858,18 @@ export async function createCodeReviewServer(review, options) {
 			broadcast("round-ready", { round: round.number, previousRound: active.number });
 			return { round: round.number };
 		},
+		serializeSession,
 		async close() {
 			if (closed) return;
 			closed = true;
+			clearTimeout(persistTimer);
+			// The freshest state lands on disk before shutdown so a restart
+			// resumes exactly where the reviewer left off.
+			if (options.onPersist && phase !== "approved" && phase !== "closed") {
+				try {
+					await options.onPersist(serializeSession());
+				} catch {}
+			}
 			clearInterval(heartbeat);
 			clearInterval(stalenessTimer);
 			for (const client of sseClients) client.end();

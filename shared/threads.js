@@ -220,12 +220,24 @@ export function buildCarriedThreads(responses, previousThreads, nextReview, from
 }
 
 /** Live comment-thread store for one immutable review snapshot. */
-export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads = [], heldThreads = []) {
+export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads = [], heldThreads = [], snapshot = undefined) {
 	const threads = new Map();
 	const files = new Map(review.files.map((file) => [file.path, file]));
 	const commentaryThreadIds = new Map();
-	let counter = 0;
-	const storeSalt = randomBytes(3).toString("hex");
+	let counter = snapshot?.counter ?? 0;
+	const storeSalt = snapshot?.salt ?? randomBytes(3).toString("hex");
+	// A persisted snapshot replaces seeding wholesale: its threads already
+	// contain the seeded commentary, carried copies, and every turn with its
+	// delivery state, so restoring re-runs none of the seeding below.
+	if (snapshot) {
+		for (const stored of snapshot.threads) {
+			const thread = structuredClone(stored);
+			threads.set(thread.id, thread);
+			if (thread.source === "commentary" && thread.commentaryId !== undefined) {
+				commentaryThreadIds.set(`${thread.file}\0${thread.commentaryId}`, thread.id);
+			}
+		}
+	}
 	const mintId = () => `${review.id.slice(0, 8)}-${storeSalt}-t${++counter}`;
 	// Turns carry a per-thread sequence number so amendments target a stable
 	// identity even after a sibling deletion shifts array positions. User turns
@@ -235,7 +247,7 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 
 	// Every commentary note seeds an open thread awaiting the reviewer. Seeds are
 	// exempt from maxThreads, which bounds reviewer-created threads only.
-	for (const file of review.files) {
+	for (const file of snapshot ? [] : review.files) {
 		for (const entry of file.commentary) {
 			const thread = {
 				id: mintId(),
@@ -257,7 +269,7 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 	}
 	// Carried threads keep their round-of-origin ids and are, like seeds, exempt
 	// from maxThreads: the cap bounds reviewer-created threads only.
-	for (const carriedThread of carriedThreads) {
+	for (const carriedThread of snapshot ? [] : carriedThreads) {
 		// Carried turns keep their per-message delivery state (a pending tail the
 		// reviewer wrote just before the round advanced must survive as pending)
 		// AND their original seqs: Pi dedupes on (thread, turn), so compacting the
@@ -284,7 +296,7 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 	// Held threads cross rounds still undelivered (queued). Like carried threads
 	// they keep their id and original seqs, preserve per-turn delivery state, and
 	// are exempt from the reviewer-thread cap (they were budgeted at creation).
-	for (const heldThread of heldThreads) {
+	for (const heldThread of snapshot ? [] : heldThreads) {
 		let maxSeq = 0;
 		const turns = heldThread.turns.map((turn) => {
 			const seq = turn.seq ?? maxSeq + 1;
@@ -543,5 +555,9 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 		return changed;
 	}
 
-	return { postUserTurn, postPiReply, setResolved, getThread, list, summary, markAllDelivered, deliverPending, requeue, amendQueuedTurn, setReplyState, sweepReplyState };
+	// The full mutable state a restart needs: thread objects (turns, delivery
+	// flags, resolutions, carried metadata) plus the id-minting counter and salt
+	// so post-restore threads never collide with persisted ids.
+	const serialize = () => ({ salt: storeSalt, counter, threads: [...threads.values()].map((thread) => structuredClone(thread)) });
+	return { postUserTurn, postPiReply, setResolved, getThread, list, summary, markAllDelivered, deliverPending, requeue, amendQueuedTurn, setReplyState, sweepReplyState, serialize };
 }

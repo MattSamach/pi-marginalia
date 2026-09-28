@@ -64,3 +64,4 @@ No git, no diffs, no staleness badge, no viewed checklist, no expandable context
 
 - On next rounds, respond only to threads AWAITING you (the reviewer spoke after your last reply). Threads where you spoke last carry forward automatically when omitted from threadResponses — no re-justification round after round; respond to one voluntarily only to re-anchor it or add something new.
 - Reviewer-side density: clicking annotated text pulls its card to the click; the Density picker (Auto/Comfortable/Compact) collapses non-working cards to one-line rows past a dozen open threads, and clicking a compact card expands it.
+- Sessions persist across pi restarts: recent non-terminal sessions are healed at boot (announced in chat, open tabs reconnect on their own), previousRoundId resumes persisted sessions from disk, and list_review_sessions shows live and resumable sessions. Set bootHeal:false in ~/.pi/agent/marginalia.json for announce-only.

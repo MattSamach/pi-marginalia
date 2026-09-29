@@ -94,6 +94,14 @@ export function collectDiagramRoles(source) {
 /** Every name an author may tag: palette roles plus the neutral aliases. */
 export const DIAGRAM_VOCABULARY = [...DIAGRAM_ROLES, ...DIAGRAM_NEUTRAL_ROLES];
 
+/** Vocabulary names a source redefines with its own classDef. Roles render
+ * from the theme palette; a hand-written classDef named "service" would ship
+ * one hard-coded color to every theme and scheme. */
+export function shadowedDiagramRoles(source) {
+	const { defined } = collectRoleRefs(source);
+	return [...defined].filter((name) => DIAGRAM_VOCABULARY.includes(name));
+}
+
 /** Referenced class names that are neither author-defined nor vocabulary roles. */
 export function unknownDiagramRoles(source) {
 	const { referenced, defined } = collectRoleRefs(source);

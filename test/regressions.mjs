@@ -239,6 +239,11 @@ try {
 			"An unknown role tag is rejected with the vocabulary.",
 		);
 		buildPlanReview({ title: "T", markdown: "## A\n\n```mermaid\nflowchart LR\n  a[A]:::store --> b[B]:::custom\n  classDef custom fill:#eee\n```" });
+		assert.throws(
+			() => buildPlanReview({ title: "T", markdown: "## A\n\n```mermaid\nflowchart LR\n  a[A]:::service\n  classDef service fill:#7b68ee,color:#fff\n```" }),
+			/defines a classDef named "service", which is a semantic role/,
+			"Shadowing a role with a hand-written classDef is rejected with the reason.",
+		);
 	}
 
 	// Anchoring commentary to a subgraph is the common near-miss: the

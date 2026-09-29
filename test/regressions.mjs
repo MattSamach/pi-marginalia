@@ -1834,7 +1834,7 @@ try {
 			onThreadPost: async (round, thread, turns) => { browserPosts.push({ thread, turn: turns[0] }); },
 			onFinishPass: async (round, note, threadList, summary) => { browserPass = { round: round.number, note, threadList, summary }; return { stale: false }; },
 		});
-		const browser = await puppeteer.launch({ headless: true, executablePath, args: ["--no-sandbox"] });
+		const browser = await puppeteer.launch({ headless: true, protocolTimeout: 120_000, executablePath, args: ["--no-sandbox"] });
 		try {
 			const page = await browser.newPage();
 			await page.goto(browserServer.url, { waitUntil: "domcontentloaded" });
@@ -3618,9 +3618,10 @@ try {
 					for (const thread of [filterPosted[3], filterPosted[4]]) {
 						assert.equal((await fetch(`${filterOrigin}/__pi_code_review_resolve__`, { method: "POST", headers: filterHeaders, body: JSON.stringify({ threadId: thread.id, resolved: true }) })).status, 200);
 					}
-					// Chips count threads by state, live from the SSE updates above.
-					await filterPage.waitForFunction(() => [...document.querySelectorAll("[data-rail-filter]")].map((chip) => chip.textContent).join("|") === "All 6|Awaiting you 2|Open 4|Resolved 2", { polling: 100 });
-					assert.equal(await filterPage.$eval("[data-rail-filters]", (bar) => bar.hidden), false, "The chip row shows once threads exist.");
+					// The dropdown counts threads by state, live from the SSE updates above.
+					await filterPage.waitForFunction(() => [...(document.querySelector("[data-rail-filters]")?.options ?? [])].map((option) => option.textContent).join("|") === "All (6)|Awaiting you (2)|Open (4)|Resolved (2)", { polling: 100 });
+					assert.equal(await filterPage.$eval("[data-rail-filters]", (select) => select.hidden), false, "The filter dropdown shows once threads exist.");
+					const setFilter = (value) => filterPage.$eval("[data-rail-filters]", (select, wanted) => { select.value = wanted; select.dispatchEvent(new Event("change", { bubbles: true })); }, value);
 					const filterAudit = () => filterPage.evaluate(() => {
 						const outers = [...document.querySelectorAll(".thread-card, [data-carried-thread], .agent-note")].filter((el) => !el.parentElement.closest(".thread-card, [data-carried-thread], .agent-note"));
 						const visible = outers.filter((el) => !el.hidden && el.getClientRects().length > 0);
@@ -3631,7 +3632,7 @@ try {
 							total: outers.length,
 							visible: visible.map((el) => el.dataset.threadCard ?? el.dataset.carriedThread ?? `note:${el.dataset.commentaryId}`).sort(),
 							overlaps,
-							activeChip: document.querySelector("[data-rail-filter].active")?.dataset.railFilter,
+							activeChip: document.querySelector("[data-rail-filters]")?.value,
 						};
 					});
 					const everyCard = [...filterPosted.map((thread) => thread.id), "note:note-a"].sort();
@@ -3639,21 +3640,24 @@ try {
 					assert.equal(allState.total, 6, "All six rail items render (five thread cards plus the agent note).");
 					assert.deepEqual(allState.visible, everyCard, "The default All filter hides nothing.");
 					// Resolved hides every open card and the relayout stays collision-free.
-					await filterPage.click('[data-rail-filter="resolved"]');
+					const filterWidthBefore = await filterPage.$eval("[data-rail-filters]", (select) => select.getBoundingClientRect().width);
+					await setFilter("resolved");
 					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+					assert.equal(await filterPage.$eval("[data-rail-filters]", (select) => select.getBoundingClientRect().width), filterWidthBefore, "The filter dropdown keeps its width across states — the topbar never reflows.");
+					assert.equal(await filterPage.$eval("[data-global-status]", (status) => status.textContent.includes("Filter")), false, "Changing the filter posts no status message — the select is the single voice.");
 					const resolvedState = await filterAudit();
 					assert.deepEqual(resolvedState.visible, [filterPosted[3].id, filterPosted[4].id].sort(), "The Resolved chip keeps exactly the two resolved cards.");
 					assert.equal(resolvedState.overlaps, 0, "Relayout after filtering leaves no overlapping cards.");
 					assert.equal(resolvedState.activeChip, "resolved");
 					// Awaiting-you keeps only the threads whose last word is Pi's:
 					// the replied thread card and the unengaged agent note.
-					await filterPage.click('[data-rail-filter="awaiting"]');
+					await setFilter("awaiting");
 					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
 					const awaitingState = await filterAudit();
 					assert.deepEqual(awaitingState.visible, [filterPosted[0].id, "note:note-a"].sort(), "The Awaiting-you chip keeps exactly the two awaiting cards.");
 					assert.equal(awaitingState.overlaps, 0, "The awaiting relayout leaves no overlapping cards.");
 					// n under a hiding filter clears it: the reveal must be visible.
-					await filterPage.click('[data-rail-filter="resolved"]');
+					await setFilter("resolved");
 					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
 					await filterPage.keyboard.press("n");
 					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
@@ -3662,13 +3666,18 @@ try {
 					assert.deepEqual(revealState.visible, everyCard, "Clearing the filter restores every card for the reveal.");
 					assert.equal(await filterPage.$eval("[data-global-status]", (status) => status.textContent), "Filter cleared to show the thread.", "The reviewer is told why the filter reset.");
 					assert.equal(await filterPage.evaluate(() => { const flashed = document.querySelector(".thread-flash"); return Boolean(flashed) && !flashed.hidden; }), true, "The revealed card is visible after the reset.");
-					// Back to All by hand restores everything from a hiding filter too.
-					await filterPage.click('[data-rail-filter="awaiting"]');
+					// f cycles the filter from the keyboard; landing back on All
+					// restores everything from a hiding filter too.
+					await setFilter("awaiting");
 					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
-					await filterPage.click('[data-rail-filter="all"]');
+					await filterPage.keyboard.press("f");
+					await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
+					assert.equal((await filterAudit()).activeChip, "open", "f advances the filter to the next state.");
+					await filterPage.keyboard.press("f");
+					await filterPage.keyboard.press("f");
 					await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
 					const restoredState = await filterAudit();
-					assert.deepEqual(restoredState.visible, everyCard, "The All chip restores every card.");
+					assert.deepEqual(restoredState.visible, everyCard, "Cycling back to All restores every card.");
 					assert.equal(restoredState.overlaps, 0, "The restored layout has no overlapping cards.");
 					assert.equal(restoredState.activeChip, "all");
 				} finally {

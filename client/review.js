@@ -1687,8 +1687,7 @@
   // the active filter — and the outermost rail item decides for everything
   // nested inside it (thread cards under carried shells or agent notes follow
   // their shell). Selection composers are never filtered.
-  const railFilterBar = document.querySelector('[data-rail-filters]');
-  const railFilterButtons = [...document.querySelectorAll('[data-rail-filter]')];
+  const railFilterSelect = document.querySelector('[data-rail-filters]');
   let railFilter = 'all';
   const railFilterAccepts = (thread) => {
     if (railFilter === 'all' || !thread) return true;
@@ -1702,6 +1701,7 @@
     return commentaryThreadFor(item.closest('[data-review-file]')?.dataset.path, item.dataset.commentaryId);
   };
   const RAIL_FILTER_LABELS = { all: 'All', awaiting: 'Awaiting you', open: 'Open', resolved: 'Resolved' };
+  const RAIL_FILTER_ORDER = ['all', 'awaiting', 'open', 'resolved'];
   const applyRailFilter = () => {
     const all = [...threads.values()];
     const counts = {
@@ -1710,11 +1710,12 @@
       open: all.filter((thread) => thread.status === 'open').length,
       resolved: all.filter((thread) => thread.status === 'resolved').length,
     };
-    if (railFilterBar) railFilterBar.hidden = all.length === 0;
-    railFilterButtons.forEach((button) => {
-      button.textContent = RAIL_FILTER_LABELS[button.dataset.railFilter] + ' ' + counts[button.dataset.railFilter];
-      button.classList.toggle('active', button.dataset.railFilter === railFilter);
-    });
+    if (railFilterSelect) {
+      railFilterSelect.hidden = all.length === 0;
+      for (const option of railFilterSelect.options) option.textContent = RAIL_FILTER_LABELS[option.value] + ' (' + counts[option.value] + ')';
+      railFilterSelect.value = railFilter;
+      railFilterSelect.classList.toggle('filtering', railFilter !== 'all');
+    }
     // Filtering hides the card outright: the rail layout skips hidden items,
     // so packing and density see only what the filter keeps.
     document.querySelectorAll('.thread-card, [data-carried-thread], .agent-note').forEach((item) => {
@@ -1723,10 +1724,14 @@
     });
     scheduleRailLayout();
   };
-  railFilterButtons.forEach((button) => button.addEventListener('click', () => {
-    railFilter = button.dataset.railFilter;
+  railFilterSelect?.addEventListener('change', () => {
+    railFilter = railFilterSelect.value;
     applyRailFilter();
-  }));
+  });
+  const cycleRailFilter = () => {
+    railFilter = RAIL_FILTER_ORDER[(RAIL_FILTER_ORDER.indexOf(railFilter) + 1) % RAIL_FILTER_ORDER.length];
+    applyRailFilter();
+  };
   const updateAggregates = () => {
     const all = [...threads.values()];
     const awaiting = orderedAwaiting();
@@ -2336,7 +2341,9 @@
     } else if (event.key === 'b') {
       event.preventDefault();
       setSidebarCollapsed(!sidebarCollapsed());
-      setStatus(sidebarCollapsed() ? 'Navigation pane hidden.' : 'Navigation pane shown.');
+    } else if (event.key === 'f') {
+      event.preventDefault();
+      cycleRailFilter();
     } else if (event.key === 'o') {
       event.preventDefault();
       if (!overviewSection) setStatus('This review has no overview.');

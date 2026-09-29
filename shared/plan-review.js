@@ -6,7 +6,7 @@
 
 import { createHash } from "node:crypto";
 import { elementExists, elementHint, splitElementRef, extractMermaidSources } from "./diagram.js";
-import { shadowedDiagramRoles, unknownDiagramRoles, roleHint } from "./diagram-roles.js";
+import { unknownDiagramRoles, roleHint } from "./diagram-roles.js";
 
 export const PLAN_LIMITS = {
 	maxPlanBytes: 1024 * 1024,
@@ -171,8 +171,6 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS, previousFiles = 
 		for (const source of extractMermaidSources(segment)) {
 			const [unknown] = unknownDiagramRoles(source);
 			if (unknown !== undefined) fail(`Section "${section.title}" tags ":::${unknown}", which is not a semantic role and no classDef in that diagram defines it (${roleHint()}).`);
-			const [shadowed] = shadowedDiagramRoles(source);
-			if (shadowed !== undefined) fail(`Section "${section.title}" defines a classDef named "${shadowed}", which is a semantic role: the theme palette styles it. Drop the classDef, or rename your class.`);
 		}
 		return {
 			path: section.slug,

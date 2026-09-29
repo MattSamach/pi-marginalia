@@ -87,20 +87,17 @@ export function collectRoleRefs(source) {
 
 /** Roles a source uses from the vocabulary (referenced, not author-defined). */
 export function collectDiagramRoles(source) {
-	const { referenced, defined } = collectRoleRefs(source);
-	return new Set([...referenced].filter((name) => !defined.has(name) && DIAGRAM_ROLES.includes(name)));
+	// Vocabulary names always style from the palette, even when the source
+	// carries its own classDef of that name: the engine's classDef is
+	// appended after the author's, and mermaid's last definition wins. A
+	// hand-written "classDef service" would otherwise ship one hard-coded
+	// color to every theme and scheme.
+	const { referenced } = collectRoleRefs(source);
+	return new Set([...referenced].filter((name) => DIAGRAM_ROLES.includes(name)));
 }
 
 /** Every name an author may tag: palette roles plus the neutral aliases. */
 export const DIAGRAM_VOCABULARY = [...DIAGRAM_ROLES, ...DIAGRAM_NEUTRAL_ROLES];
-
-/** Vocabulary names a source redefines with its own classDef. Roles render
- * from the theme palette; a hand-written classDef named "service" would ship
- * one hard-coded color to every theme and scheme. */
-export function shadowedDiagramRoles(source) {
-	const { defined } = collectRoleRefs(source);
-	return [...defined].filter((name) => DIAGRAM_VOCABULARY.includes(name));
-}
 
 /** Referenced class names that are neither author-defined nor vocabulary roles. */
 export function unknownDiagramRoles(source) {

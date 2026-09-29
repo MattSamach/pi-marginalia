@@ -888,7 +888,7 @@
         for (const shorthand of line.matchAll(/:::([A-Za-z0-9_,-]+)/g)) shorthand[1].split(',').forEach((name) => name && referenced.add(name));
       }
       return [...referenced]
-        .filter((name) => !defined.has(name) && DIAGRAM_ROLE_NAMES.includes(name))
+        .filter((name) => DIAGRAM_ROLE_NAMES.includes(name))
         .map((role) => '\nclassDef ' + role + ' fill:' + roleColor(role, 'fill') + ',stroke:' + roleColor(role, 'stroke') + ',color:' + roleColor(role, 'ink'))
         .join('');
     };

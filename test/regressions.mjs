@@ -239,11 +239,8 @@ try {
 			"An unknown role tag is rejected with the vocabulary.",
 		);
 		buildPlanReview({ title: "T", markdown: "## A\n\n```mermaid\nflowchart LR\n  a[A]:::store --> b[B]:::custom\n  classDef custom fill:#eee\n```" });
-		assert.throws(
-			() => buildPlanReview({ title: "T", markdown: "## A\n\n```mermaid\nflowchart LR\n  a[A]:::service\n  classDef service fill:#7b68ee,color:#fff\n```" }),
-			/defines a classDef named "service", which is a semantic role/,
-			"Shadowing a role with a hand-written classDef is rejected with the reason.",
-		);
+		buildPlanReview({ title: "T", markdown: "## A\n\n```mermaid\nflowchart LR\n  a[A]:::service\n  classDef service fill:#7b68ee,color:#fff\n```" });
+		assert.deepEqual([...collectDiagramRoles("flowchart LR\n  a[A]:::service\n  classDef service fill:#7b68ee")], ["service"], "A shadowed role still styles from the palette — the engine's later classDef wins.");
 	}
 
 	// Anchoring commentary to a subgraph is the common near-miss: the
@@ -3074,7 +3071,7 @@ try {
 			{
 				const { DIAGRAM_ROLE_PALETTES } = await import("../shared/diagram-roles.js");
 				const asRgb = (hex) => `rgb(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)})`;
-				const colorPlan = buildPlanReview({ title: "Role colors", markdown: "## Zones\n\n```mermaid\nflowchart LR\n  api[API]:::service --> gate{Review}:::gate\n  api --> plain[Plain]\n```" });
+				const colorPlan = buildPlanReview({ title: "Role colors", markdown: "## Zones\n\n```mermaid\nflowchart LR\n  api[API]:::service --> gate{Review}:::gate\n  api --> plain[Plain]\n  shadowed[Shadowed]:::store\n  classDef store fill:#7b68ee,color:#fff\n```" });
 				const colorServer = await createCodeReviewServer(colorPlan, { onThreadPost: async () => ({ queued: false }), onFinishPass: async () => ({ stale: false }) });
 				const colorPage = await browser.newPage();
 				try {
@@ -3088,6 +3085,7 @@ try {
 					assert.equal(await fillOf("node:api"), asRgb(DIAGRAM_ROLE_PALETTES.slate.light.service.fill), "A service-tagged node fills from the slate light palette.");
 					assert.equal(await fillOf("node:gate"), asRgb(DIAGRAM_ROLE_PALETTES.slate.light.gate.fill), "A gate-tagged decision fills from the palette too.");
 					assert.notEqual(await fillOf("node:plain"), asRgb(DIAGRAM_ROLE_PALETTES.slate.light.service.fill), "Untagged nodes keep the neutral styling.");
+					assert.equal(await fillOf("node:shadowed"), asRgb(DIAGRAM_ROLE_PALETTES.slate.light.store.fill), "An author classDef shadowing a role loses to the palette: the engine's definition lands last.");
 					await colorPage.$eval("[data-theme-picker]", (select) => { select.value = "iris"; select.dispatchEvent(new Event("change", { bubbles: true })); });
 					await colorPage.waitForFunction((wanted) => {
 						const shape = document.querySelector('.diagram-canvas svg [data-el="node:gate"] rect, .diagram-canvas svg [data-el="node:gate"] polygon, .diagram-canvas svg [data-el="node:gate"] path');

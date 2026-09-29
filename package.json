@@ -52,5 +52,8 @@
   },
   "dependencies": {
     "mermaid": "^11.17.2"
+  },
+  "optionalDependencies": {
+    "@mermaid-js/layout-elk": "0.2.3"
   }
 }

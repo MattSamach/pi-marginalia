@@ -13,6 +13,30 @@ const AMEND_PATH = "/__pi_code_review_amend__";
 const SEND_PATH = "/__pi_code_review_send__";
 const EVENTS_PATH = "/__pi_code_review_events__";
 const MERMAID_PATH = "/__pi_code_review_mermaid__.js";
+// ELK layered layout for mermaid, served as ES modules: a small entry that
+// lazily imports its render chunk (and that chunk's shared chunks).
+const ELK_PREFIX = "/__pi_code_review_mermaid_elk__/";
+const ELK_FILE = /^(?:chunks\/mermaid-layout-elk\.esm\.min\/)?[\w.-]+\.mjs$/;
+// The adapter hard-codes its ELK options and graph. As its render chunk is
+// served, its one `elk.layout(graph)` call is routed through
+// `globalThis.__marginaliaElkLayout(elk, graph)` when the client defines it,
+// so the client can adjust the graph before and after layout. The pattern
+// targets the pinned @mermaid-js/layout-elk 0.2.3 (package.json pins it
+// exactly); a chunk that doesn't match exactly once is served as published,
+// with a warning, and the review page's root carries data-elk-hooked="false".
+// Upgrading the adapter means re-checking this pattern against its render
+// chunk.
+// The call is matched with its profiling prologue in runElkLayout, so a
+// same-shaped call elsewhere can't be mistaken for it.
+const ELK_LAYOUT_CALL = /(begin\("layoutCore"\);let (\w+);try\{)\2=await (\w+)\.layout\((\w+)\)/g;
+const withElkLayoutHook = (file, source) => {
+	if (!source.includes('"runElkLayout"')) return source;
+	if ((source.match(ELK_LAYOUT_CALL) ?? []).length !== 1) {
+		console.warn(`marginalia: ${file} no longer matches the ELK layout hook; diagrams use the adapter's default spacing and routing.`);
+		return source;
+	}
+	return source.replace(ELK_LAYOUT_CALL, "$1$2=await (globalThis.__marginaliaElkLayout?.($3,$4)??$3.layout($4))");
+};
 import { computeElementDiff } from "./diagram.js";
 const CONTEXT_PATH = "/__pi_code_review_context__";
 const APPROVE_PATH = "/__pi_code_review_approve__";
@@ -324,6 +348,7 @@ export async function createCodeReviewServer(review, options) {
 	};
 
 	let mermaidSource;
+	const elkSources = new Map();
 	const server = createServer(async (req, res) => {
 		try {
 			const requestUrl = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
@@ -366,6 +391,26 @@ export async function createCodeReviewServer(review, options) {
 					res.end(mermaidSource);
 				} catch {
 					writeText(res, 404, "The mermaid renderer is not installed.");
+				}
+				return;
+			}
+			if (req.method === "GET" && requestUrl.pathname.startsWith(ELK_PREFIX)) {
+				// Optional: without the package the client keeps mermaid's default
+				// layout. Files are served from the installed package and cached.
+				const file = requestUrl.pathname.slice(ELK_PREFIX.length);
+				try {
+					if (!ELK_FILE.test(file)) throw new Error("not an ELK module");
+					if (!elkSources.has(file)) {
+						const { createRequire } = await import("node:module");
+						const { readFile } = await import("node:fs/promises");
+						const { dirname, join } = await import("node:path");
+						const dist = join(dirname(createRequire(import.meta.url).resolve("@mermaid-js/layout-elk/package.json")), "dist");
+						elkSources.set(file, withElkLayoutHook(file, await readFile(join(dist, file), "utf8")));
+					}
+					res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "private, max-age=3600" });
+					res.end(elkSources.get(file));
+				} catch {
+					writeText(res, 404, "The ELK layout is not installed.");
 				}
 				return;
 			}

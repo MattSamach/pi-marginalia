@@ -742,6 +742,27 @@ try {
 		assert.equal(pageResponse.status, 200);
 		assert.match(pageResponse.headers.get("content-security-policy") ?? "", /script-src 'nonce-/);
 		assert.ok(!pageBody.includes(new URL(server.url).searchParams.get("token")), "Bootstrap token must not be embedded in served HTML.");
+		// ELK is optional. Installed, its modules are served from the package
+		// and the render chunk routes its one layout call through the client's
+		// hook; that match is pinned to the installed adapter version.
+		const elkPath = `${origin}/__pi_code_review_mermaid_elk__/`;
+		assert.equal((await fetch(`${elkPath}../package.json`, { headers: { cookie } })).status, 404, "Only allowlisted ELK module names are served.");
+		let elkDist;
+		try {
+			const { createRequire } = await import("node:module");
+			const { dirname } = await import("node:path");
+			elkDist = join(dirname(createRequire(import.meta.url).resolve("@mermaid-js/layout-elk/package.json")), "dist");
+		} catch {}
+		if (elkDist) {
+			const { readdir, readFile } = await import("node:fs/promises");
+			assert.equal((await fetch(`${elkPath}mermaid-layout-elk.esm.min.mjs`, { headers: { cookie } })).status, 200, "The installed ELK entry module is served.");
+			const chunkDir = join(elkDist, "chunks", "mermaid-layout-elk.esm.min");
+			const chunkNames = [];
+			for (const name of (await readdir(chunkDir)).filter((file) => file.endsWith(".mjs"))) if ((await readFile(join(chunkDir, name), "utf8")).includes('"runElkLayout"')) chunkNames.push(name);
+			assert.equal(chunkNames.length, 1, "One ELK render chunk runs the layout.");
+			const chunk = await (await fetch(`${elkPath}chunks/mermaid-layout-elk.esm.min/${chunkNames[0]}`, { headers: { cookie } })).text();
+			assert.equal(chunk.split("globalThis.__marginaliaElkLayout").length - 1, 1, "The served render chunk routes its layout call through the client hook; re-check the pattern when upgrading @mermaid-js/layout-elk.");
+		} else assert.equal((await fetch(`${elkPath}mermaid-layout-elk.esm.min.mjs`, { headers: { cookie } })).status, 404, "Without the optional package the ELK entry 404s and the client keeps dagre.");
 		const postEndpoint = `${origin}/__pi_code_review_post__`;
 		const validPost = { source: "selection", file: "untracked.txt", side: "new", newStart: 1, newEnd: 2, highlight: "A marker", body: "Explain this line." };
 		assert.equal((await fetch(postEndpoint, { method: "POST", headers: { cookie, "content-type": "application/json", origin: "https://example.com" }, body: JSON.stringify(validPost) })).status, 403, "Cross-origin thread posts must be rejected.");

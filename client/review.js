@@ -867,9 +867,35 @@
     // and a variant's) prepended as one directive; themeCSS extends the
     // page's own theme CSS. Mermaid strips directives before parsing, so
     // parse errors still give line numbers in the source the author wrote.
+    const DIAGRAM_ROLE_NAMES = (document.body.dataset.diagramRoles || '').split(' ').filter(Boolean);
+    const roleColor = (role, part) => getComputedStyle(document.documentElement).getPropertyValue('--diagram-role-' + role + '-' + part).trim();
+    // classDef lines for the vocabulary roles a source references (and does
+    // not define itself), from the active theme and scheme. Sequence sources
+    // take no classDefs, and author-defined classes stay the author's.
+    const roleClassDefs = (source) => {
+      if (!DIAGRAM_ROLE_NAMES.length || !/^\s*(flowchart|graph|stateDiagram)/m.test(source)) return '';
+      const referenced = new Set();
+      const defined = new Set();
+      for (const raw of source.split(/\r?\n/)) {
+        const line = raw.replace(/%%.*$/, '').trim();
+        const definition = /^classDef\s+([A-Za-z0-9_,-]+)/.exec(line);
+        if (definition) {
+          definition[1].split(',').forEach((name) => name && defined.add(name));
+          continue;
+        }
+        const statement = /^class\s+[^\s]+\s+([A-Za-z0-9_-]+)\s*$/.exec(line);
+        if (statement) referenced.add(statement[1]);
+        for (const shorthand of line.matchAll(/:::([A-Za-z0-9_,-]+)/g)) shorthand[1].split(',').forEach((name) => name && referenced.add(name));
+      }
+      return [...referenced]
+        .filter((name) => !defined.has(name) && DIAGRAM_ROLE_NAMES.includes(name))
+        .map((role) => '\nclassDef ' + role + ' fill:' + roleColor(role, 'fill') + ',stroke:' + roleColor(role, 'stroke') + ',color:' + roleColor(role, 'ink'))
+        .join('');
+    };
     const configured = (source, config) => {
-      if (!Object.keys(config).length || /^\s*---/.test(source)) return source;
-      return '%%{init: ' + JSON.stringify(config.themeCSS ? { ...config, themeCSS: DIAGRAM_THEME_CSS + config.themeCSS } : config) + '}%%\n' + source;
+      const tagged = source + roleClassDefs(source);
+      if (!Object.keys(config).length || /^\s*---/.test(source)) return tagged;
+      return '%%{init: ' + JSON.stringify(config.themeCSS ? { ...config, themeCSS: DIAGRAM_THEME_CSS + config.themeCSS } : config) + '}%%\n' + tagged;
     };
     // ELK lays flowcharts out with packed, top-aligned containers and
     // orthogonal edges. It is optional: if its modules fail to load, mermaid
@@ -897,6 +923,7 @@
     };
     if (darkQuery.addEventListener) darkQuery.addEventListener('change', () => { initializeMermaid(); renderAll(); });
     document.querySelector('[data-scheme-picker]')?.addEventListener('change', () => { initializeMermaid(); renderAll(); });
+    document.querySelector('[data-theme-picker]')?.addEventListener('change', () => { initializeMermaid(); renderAll(); });
     // Layout variant steps, tried in order after a figure's first render.
     // Each takes the variant accepted so far ({text, config, bands, decision,
     // writtenOrder, rows}), the rendered SVG, its canvas and the parsed

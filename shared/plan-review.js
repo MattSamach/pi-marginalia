@@ -5,7 +5,8 @@
 // unchanged; only rendering swaps the diff table for the rendered document.
 
 import { createHash } from "node:crypto";
-import { elementExists, elementHint, splitElementRef } from "./diagram.js";
+import { elementExists, elementHint, splitElementRef, extractMermaidSources } from "./diagram.js";
+import { unknownDiagramRoles, roleHint } from "./diagram-roles.js";
 
 export const PLAN_LIMITS = {
 	maxPlanBytes: 1024 * 1024,
@@ -167,6 +168,10 @@ export function buildPlanReview(manifest, limits = PLAN_LIMITS, previousFiles = 
 	const files = sections.map((section) => {
 		const segmentLines = lines.slice(section.startLine - 1, section.endLine);
 		const segment = segmentLines.join("\n");
+		for (const source of extractMermaidSources(segment)) {
+			const [unknown] = unknownDiagramRoles(source);
+			if (unknown !== undefined) fail(`Section "${section.title}" tags ":::${unknown}", which is not a semantic role and no classDef in that diagram defines it (${roleHint()}).`);
+		}
 		return {
 			path: section.slug,
 			sectionTitle: section.title,

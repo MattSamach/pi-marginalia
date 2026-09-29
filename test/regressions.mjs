@@ -205,6 +205,40 @@ try {
 	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "One sentence.", changes: ["a", "b"], validation: ["c"], summary: "extra" }, files: [] }), /Unknown key "summary" on the review overview/, "Unknown overview keys are rejected.");
 	assert.throws(() => buildPlanReview({ title: "T", markdown: "## A\n\nBody.", sections: [{ heading: "A", startLine: 2 }] }), /Unknown key "startLine" on manifest section "A"\. Anchors belong inside commentary entries\./, "Misplaced anchors on plan sections name the key and the fix.");
 
+	// Semantic diagram roles: the palette carries its contrast guarantees by
+	// construction, role collection separates vocabulary from author classes,
+	// and an unknown tag is rejected with the vocabulary.
+	{
+		const { DIAGRAM_ROLES, DIAGRAM_ROLE_PALETTES, collectDiagramRoles, unknownDiagramRoles, roleCssVariables } = await import("../shared/diagram-roles.js");
+		const parseHex = (hex) => ({ r: parseInt(hex.slice(1, 3), 16), g: parseInt(hex.slice(3, 5), 16), b: parseInt(hex.slice(5, 7), 16) });
+		const luminance = (color) => {
+			const channel = (value) => { const v = value / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+			return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b);
+		};
+		const contrast = (a, b) => { const [hi, lo] = [luminance(parseHex(a)), luminance(parseHex(b))].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+		const canvases = { light: "#fdfdfc", dark: "#16191d" };
+		for (const [theme, schemes] of Object.entries(DIAGRAM_ROLE_PALETTES)) {
+			for (const [scheme, roles] of Object.entries(schemes)) {
+				assert.deepEqual(Object.keys(roles).sort(), [...DIAGRAM_ROLES].sort(), `${theme}/${scheme} defines every role and nothing else.`);
+				for (const [role, color] of Object.entries(roles)) {
+					assert.ok(contrast(color.ink, color.fill) >= 4.5, `${theme}/${scheme}/${role}: label ink must hit 4.5:1 on the fill (got ${contrast(color.ink, color.fill).toFixed(2)}).`);
+					assert.ok(contrast(color.stroke, canvases[scheme]) >= 3, `${theme}/${scheme}/${role}: stroke must hit 3:1 on the canvas (got ${contrast(color.stroke, canvases[scheme]).toFixed(2)}).`);
+				}
+			}
+		}
+		const roleSource = "flowchart LR\n  db[(Orders)]:::store --> api[Svc]:::service\n  classDef mine fill:#fff\n  x[X]:::mine\n  class api,db gate";
+		assert.deepEqual([...collectDiagramRoles(roleSource)].sort(), ["gate", "service", "store"], "Role collection reads ::: shorthand and class statements, and skips author-defined classes.");
+		assert.deepEqual(unknownDiagramRoles("flowchart LR\n  a[A]:::bogus"), ["bogus"], "An undefined non-vocabulary tag is unknown.");
+		assert.deepEqual(unknownDiagramRoles("flowchart LR\n  a[A]:::mine\n  classDef mine fill:#eee"), [], "An author-defined class is never unknown.");
+		assert.ok(roleCssVariables("iris", "dark").includes("--diagram-role-store-fill:"), "The palette emits custom properties per role.");
+		assert.throws(
+			() => buildPlanReview({ title: "T", markdown: "## A\n\n```mermaid\nflowchart LR\n  a[A]:::bogus --> b[B]\n```" }),
+			/tags ":::bogus", which is not a semantic role .*roles: architecture: person, client, service, store, queue, external/s,
+			"An unknown role tag is rejected with the vocabulary.",
+		);
+		buildPlanReview({ title: "T", markdown: "## A\n\n```mermaid\nflowchart LR\n  a[A]:::store --> b[B]:::custom\n  classDef custom fill:#eee\n```" });
+	}
+
 	// Anchoring commentary to a subgraph is the common near-miss: the
 	// rejection names the container and points at the fix.
 	assert.throws(
@@ -3025,6 +3059,37 @@ try {
 				await dPage.close();
 			} finally {
 				await diagramServer.close();
+			}
+
+			// Semantic role colors render from the active theme's palette,
+			// inline in the SVG, and a theme switch re-renders with the new
+			// theme's colors.
+			{
+				const { DIAGRAM_ROLE_PALETTES } = await import("../shared/diagram-roles.js");
+				const asRgb = (hex) => `rgb(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)})`;
+				const colorPlan = buildPlanReview({ title: "Role colors", markdown: "## Zones\n\n```mermaid\nflowchart LR\n  api[API]:::service --> gate{Review}:::gate\n  api --> plain[Plain]\n```" });
+				const colorServer = await createCodeReviewServer(colorPlan, { onThreadPost: async () => ({ queued: false }), onFinishPass: async () => ({ stale: false }) });
+				const colorPage = await browser.newPage();
+				try {
+					await colorPage.setViewport({ width: 1280, height: 900 });
+					await colorPage.goto(colorServer.url, { waitUntil: "domcontentloaded" });
+					await colorPage.waitForFunction(() => document.querySelector('.diagram-canvas svg [data-el="node:api"]'), { polling: 100, timeout: 20_000 });
+					const fillOf = (id) => colorPage.evaluate((wanted) => {
+						const shape = document.querySelector(`.diagram-canvas svg [data-el="${wanted}"] rect, .diagram-canvas svg [data-el="${wanted}"] polygon, .diagram-canvas svg [data-el="${wanted}"] path`);
+						return shape ? getComputedStyle(shape).fill : undefined;
+					}, id);
+					assert.equal(await fillOf("node:api"), asRgb(DIAGRAM_ROLE_PALETTES.slate.light.service.fill), "A service-tagged node fills from the slate light palette.");
+					assert.equal(await fillOf("node:gate"), asRgb(DIAGRAM_ROLE_PALETTES.slate.light.gate.fill), "A gate-tagged decision fills from the palette too.");
+					assert.notEqual(await fillOf("node:plain"), asRgb(DIAGRAM_ROLE_PALETTES.slate.light.service.fill), "Untagged nodes keep the neutral styling.");
+					await colorPage.$eval("[data-theme-picker]", (select) => { select.value = "iris"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+					await colorPage.waitForFunction((wanted) => {
+						const shape = document.querySelector('.diagram-canvas svg [data-el="node:gate"] rect, .diagram-canvas svg [data-el="node:gate"] polygon, .diagram-canvas svg [data-el="node:gate"] path');
+						return shape && getComputedStyle(shape).fill === wanted;
+					}, { polling: 100, timeout: 20_000 }, asRgb(DIAGRAM_ROLE_PALETTES.iris.light.gate.fill));
+				} finally {
+					await colorPage.close();
+					await colorServer.close();
+				}
 			}
 
 			// Margin-note exact alignment on an uncongested rail: a comment on a

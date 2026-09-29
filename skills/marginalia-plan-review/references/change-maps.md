@@ -17,12 +17,10 @@ flowchart TB
   api --> scorer
   scorer --> db
   scorer --> cache
-  classDef added stroke-width:3px
-  classDef changed stroke-dasharray:6 3
-  class scorer,cache added
+  class scorer,cache new
   class api changed
 ```
 
 - Arrows point from a module to what it depends on: calls, reads, and writes. Draw each dependency the plan names, and only those.
 - Box modules by layer, the way the system is built — interface, services, data — never by change status. Boxes of "added" and "changed" modules split the layers apart and send most edges across boxes.
-- Mark each module's status in its label, `(new)`, `(changed)`, or `(unchanged)`, so the status reads in both schemes and without color. Two `classDef`s with outline styles (a thick stroke for new, a dashed one for changed) make the touched modules stand out.
+- Mark each module's status in its label, `(new)`, `(changed)`, or `(unchanged)`, so the status reads without color, and tag the same modules with the `new`, `changed`, or `removed` role so the palette makes them stand out. Untouched modules stay untagged.

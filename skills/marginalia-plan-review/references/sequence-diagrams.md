@@ -45,3 +45,4 @@ sequenceDiagram
 ```
 
 Participants anchor as `node:<id>` and messages as `edge:<from>-><to>`. The nth message from one participant to the same other one is `edge:<from>-><to>#n`; the first has no suffix.
+- Participants cannot be tagged with roles: mermaid accepts no classes on sequence participants, so sequence diagrams stay neutral.

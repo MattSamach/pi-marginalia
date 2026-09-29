@@ -48,7 +48,7 @@ Most diagrams — architectures, topologies, pipelines, deployments — are flow
 
 Fenced ```mermaid blocks render as live diagrams the reviewer can click: a node or edge click opens a comment thread on that element. Give every meaningful node a stable, semantic id (`api`, `orders_db`) — ids are the anchor contract, and threads follow them across rounds.
 
-- Anchor commentary to an element with `element: "node:<id>"` or `"edge:<from>-><to>"` in `sections[].commentary` — explain a specific box or arrow in the margin beside the diagram.
+- Anchor commentary to an element with `element: "node:<id>"` or `"edge:<from>-><to>"` in `sections[].commentary` — explain a specific box or arrow in the margin beside the diagram. Only nodes and edges are elements — subgraphs/containers are not; anchor to a node inside them.
 - Reviewer threads on elements arrive with an `element` attribute; reply as usual.
 - In `threadResponses`, re-declare `element` (with `file`) when the discussion's element still exists in the new round — renames need the NEW id. Rejections list every element the section's diagrams define.
 - Revising a diagram: change the source in the markdown; never rename ids gratuitously — each rename orphans its threads.

@@ -94,7 +94,7 @@ function normalizeCommentary(entries, section, limits, usedIds, sectionMarkdown)
 		} else if (entry.endLine !== undefined) fail(`Commentary note "${id}" sets endLine without startLine.`);
 		if (entry.element !== undefined) {
 			if (!splitElementRef(entry.element)) fail(`Commentary note "${id}" has an invalid element reference; use "node:id" or "edge:from->to".`);
-			if (!elementExists(entry.element, sectionMarkdown)) fail(`Commentary note "${id}" anchors to element ${entry.element}, which no diagram in "${section.title}" defines (${elementHint(sectionMarkdown)}).`);
+			if (!elementExists(entry.element, sectionMarkdown)) fail(`Commentary note "${id}" anchors to element ${entry.element}, which no diagram in "${section.title}" defines (${elementHint(sectionMarkdown, entry.element)}).`);
 			anchor = { ...anchor, element: entry.element };
 		}
 		return { id, body: entry.body.trim(), side: "new", ...anchor, order: index };

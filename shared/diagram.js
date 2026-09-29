@@ -94,6 +94,9 @@ const parseSequence = (lines, nodes, edges, labels, actors) => {
 export function parseMermaidElements(source) {
 	const nodes = new Set();
 	const edges = new Set();
+	// Subgraph ids: containers are real diagram structure but not commentable
+	// elements, so anchors against them get a targeted rejection.
+	const containers = new Set();
 	// id -> raw shape token ("[Store]", "((Hub))"). Not a clean label: only a
 	// comparable signature, so a label edit is detectable across rounds.
 	const labels = new Map();
@@ -106,12 +109,14 @@ export function parseMermaidElements(source) {
 	// Sequence participants declared as `actor` (drawn as stick figures).
 	const actors = new Set();
 	if (kind === "sequence") parseSequence(lines.slice(start + 1), nodes, edges, labels, actors);
-	if (kind === "other" || kind === "sequence") return { kind, direction, nodes, edges, labels, actors };
+	if (kind === "other" || kind === "sequence") return { kind, direction, nodes, edges, labels, actors, containers };
 	for (let raw of lines.slice(start + 1)) {
 		let line = raw.replace(/%%.*$/, "").trim();
 		if (!line || /^(classDef|class|style|linkStyle|click|direction|subgraph|end\b)/.test(line)) {
 			// Subgraph ids are containers, not clickable nodes; class statements
 			// reference nodes that must already be defined elsewhere.
+			const container = /^subgraph\s+([A-Za-z0-9_-]+)/.exec(line);
+			if (container) containers.add(container[1]);
 			continue;
 		}
 		// Pipe labels are edge prose; strip them before signature capture so
@@ -163,7 +168,7 @@ export function parseMermaidElements(source) {
 			}
 		}
 	}
-	return { kind, direction, nodes, edges, labels, actors };
+	return { kind, direction, nodes, edges, labels, actors, containers };
 }
 
 /** Whether directed [from, to] pairs form a cycle (a self-loop counts). */
@@ -228,12 +233,14 @@ export function computeElementDiff(previousMarkdown, nextMarkdown) {
 export function collectDiagramElements(markdown) {
 	const nodes = new Set();
 	const edges = new Set();
+	const containers = new Set();
 	for (const source of extractMermaidSources(markdown)) {
 		const parsed = parseMermaidElements(source);
 		for (const node of parsed.nodes) nodes.add(node);
 		for (const edge of parsed.edges) edges.add(edge);
+		for (const container of parsed.containers ?? []) containers.add(container);
 	}
-	return { nodes, edges };
+	return { nodes, edges, containers };
 }
 
 /** Validate an element reference against a markdown segment's diagrams. */
@@ -255,11 +262,15 @@ export function splitElementRef(reference) {
 }
 
 /** Reject-with-hints text listing what a segment's diagrams actually define. */
-export function elementHint(markdown) {
-	const { nodes, edges } = collectDiagramElements(markdown);
+export function elementHint(markdown, wanted) {
+	const { nodes, edges, containers } = collectDiagramElements(markdown);
 	if (!nodes.size && !edges.size) return "no diagram elements found in this section";
 	const list = (values, limit) => [...values].slice(0, limit).join(", ") + (values.size > limit ? ", …" : "");
 	const parts = [];
+	// Anchoring to a subgraph is the common near-miss: name it and point at
+	// the fix instead of leaving the author to infer it from the vocabulary.
+	const wantedId = typeof wanted === "string" ? wanted.replace(/^node:/, "") : undefined;
+	if (wantedId !== undefined && containers.has(wantedId)) parts.push(`"${wantedId}" is a container (subgraph) — containers are not commentable; anchor to a node inside it`);
 	if (nodes.size) parts.push(`nodes: ${list(nodes, 20)}`);
 	if (edges.size) parts.push(`edges: ${list(edges, 15)}`);
 	return parts.join("; ");

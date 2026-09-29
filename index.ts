@@ -75,7 +75,7 @@ const planCommentarySchema = Type.Object({
 	body: Type.String({ minLength: 1, maxLength: 20_000, description: "Pi's note on this part of the plan — rationale, tradeoff, open question." }),
 	startLine: Type.Optional(Type.Integer({ minimum: 1, description: "Absolute 1-based source line in the plan markdown this note anchors to; must fall inside its section." })),
 	endLine: Type.Optional(Type.Integer({ minimum: 1 })),
-	element: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Diagram element this note anchors to: \"node:<id>\" or \"edge:<from>-><to>\" from a mermaid fence in the same section. May accompany or replace a line anchor." })),
+	element: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Diagram element this note anchors to: \"node:<id>\" or \"edge:<from>-><to>\" from a mermaid fence in the same section. Only nodes and edges are elements — subgraphs/containers are not; anchor to a node inside them. May accompany or replace a line anchor." })),
 }, { additionalProperties: false });
 const planSectionSchema = Type.Object({
 	heading: Type.String({ minLength: 1, maxLength: 500, description: "Exact heading text of a plan section (case-insensitive match)." }),

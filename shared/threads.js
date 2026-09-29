@@ -196,7 +196,7 @@ export function buildCarriedThreads(responses, previousThreads, nextReview, from
 			if (response.element !== undefined) {
 				if (!splitElementRef(response.element)) throw new Error(`Thread response ${origin.id} has an invalid element reference; use "node:id" or "edge:from->to".`);
 				if (typeof file.markdown !== "string" || !elementExists(response.element, file.markdown)) {
-					throw new Error(`Thread response ${origin.id} anchors to element ${response.element}, which no diagram in ${response.file} defines (${typeof file.markdown === "string" ? elementHint(file.markdown) : "not a document section"}).`);
+					throw new Error(`Thread response ${origin.id} anchors to element ${response.element}, which no diagram in ${response.file} defines (${typeof file.markdown === "string" ? elementHint(file.markdown, response.element) : "not a document section"}).`);
 				}
 				anchor.element = response.element;
 			}

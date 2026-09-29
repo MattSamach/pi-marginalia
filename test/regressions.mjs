@@ -205,6 +205,14 @@ try {
 	assert.throws(() => applyReviewManifest(snapshot, { overview: { intent: "One sentence.", changes: ["a", "b"], validation: ["c"], summary: "extra" }, files: [] }), /Unknown key "summary" on the review overview/, "Unknown overview keys are rejected.");
 	assert.throws(() => buildPlanReview({ title: "T", markdown: "## A\n\nBody.", sections: [{ heading: "A", startLine: 2 }] }), /Unknown key "startLine" on manifest section "A"\. Anchors belong inside commentary entries\./, "Misplaced anchors on plan sections name the key and the fix.");
 
+	// Anchoring commentary to a subgraph is the common near-miss: the
+	// rejection names the container and points at the fix.
+	assert.throws(
+		() => buildPlanReview({ title: "T", markdown: "## A\n\n```mermaid\nflowchart LR\n  subgraph zone[Zone]\n    a[One] --> b[Two]\n  end\n```", sections: [{ heading: "A", commentary: [{ id: "x", body: "note", element: "node:zone" }] }] }),
+		/"zone" is a container \(subgraph\) — containers are not commentable; anchor to a node inside it/,
+		"A container anchor gets the targeted teach, not just the vocabulary list.",
+	);
+
 	// Plan commentary carries across rounds while a section's content stays
 	// byte-identical: unlisted sections and entries without a commentary value
 	// inherit the previous round's notes; an explicit commentary value (even

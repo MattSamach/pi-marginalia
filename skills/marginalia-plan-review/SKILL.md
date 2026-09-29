@@ -28,7 +28,23 @@ Use `open_plan_review` to hand the reviewer a rendered plan they can annotate. T
 
 Routing: when the user wants to iterate on diagrams themselves — a topology, a presentation figure, no surrounding prose — use `open_diagram_review` (named diagrams + optional captions; same session engine, same threads and rounds). Use this tool with inline mermaid fences when diagrams accompany a written plan.
 
-Readability guardrails: the document column is ~760px and diagrams never scale down (wide ones pan). Prefer `flowchart TB` for chains longer than ~4 nodes; split anything beyond ~12 nodes into multiple diagrams; keep node and edge labels to a few words — many labeled edges converging on one node overlap. On bidirectional pairs (A to B and back), label at most one direction — mermaid collides the two labels. Diagrams render on their own contrast-guaranteed background matched to the viewer's light/dark scheme, so never hand-pick colors for contrast; use semantic classes if color matters.
+Readability guardrails — the document column is ~760px; oversized diagrams shrink only down to 12px text, and beyond that the reviewer must pan:
+
+- **Direction:** prefer `flowchart TB` for chains longer than ~4 nodes; keep at most ~4 nodes side by side in any row.
+- **Size:** at most ~12 nodes per diagram. Split larger systems into several diagrams, one concern each; repeat a node's id where diagrams meet.
+- **Grouping:** a flowchart with more than ~8 nodes puts most of them in a few `subgraph id["Title"]` boxes — tiers, trust boundaries, regions, or pipeline stages — the way architecture diagrams frame each layer. Leave shared entry points (users, clients, DNS) outside the boxes, and keep box titles to one to three words. A back-and-forth exchange between two parties stays unboxed: boxes around it force every reply to route around them.
+- **Coverage:** draw every actor, component, and relationship the prose relies on, failure and return paths included; if that exceeds ~12 nodes, split per **Size**. Reviewers check diagrams against the prose, so a missing box reads as a missing decision.
+- **Return paths:** in a boxed flowchart, a retry or rollback edge points back to the gate between boxes where the flow resumes, not into an earlier box: an edge up into an earlier box can reverse the layout, drawing later stages above earlier ones.
+- **Syntax:** quote every label that contains punctuation (parentheses, slashes, colons, `#`, `&`), or mermaid may fail to parse: `store[("Cache (read-through)")]`.
+- **Labels:** keep node and edge labels to a few words; many labeled edges converging on one node overlap. Write edge labels as `a -->|label| b` (dotted: `a -.->|label| b`); the inline `a -. label .-> b` form can drop characters. On bidirectional pairs (A to B and back), label at most one direction — mermaid collides the two labels.
+- **Color:** diagrams render on their own background matched to the viewer's light/dark scheme, and the renderer picks label ink for contrast, so never hand-pick colors for legibility; use semantic classes only if color carries meaning.
+
+Most diagrams — architectures, topologies, pipelines, deployments — are flowcharts and need nothing beyond these guardrails. Four narrower kinds have a reference file; read one only when the diagram you are about to draw is that kind:
+
+- `references/sequence-diagrams.md`: a request flow, where the point is the order of messages passed between a few parties.
+- `references/decision-flows.md`: a decision procedure, questions a person answers in turn, each answer ending in an outcome or leading to the next question. Checks a system runs on its own are an ordinary flowchart.
+- `references/change-maps.md`: a change map, which modules a plan adds or changes among the ones it leaves alone.
+- `references/state-machines.md`: a lifecycle, the states one thing moves through and the events that move it.
 
 Fenced ```mermaid blocks render as live diagrams the reviewer can click: a node or edge click opens a comment thread on that element. Give every meaningful node a stable, semantic id (`api`, `orders_db`) — ids are the anchor contract, and threads follow them across rounds.
 

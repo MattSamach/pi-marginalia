@@ -299,7 +299,156 @@
   // gain data-el identities (node:x / edge:a->b) so clicks open the selection
   // composer refined to the element; zoom is ctrl/cmd-wheel plus buttons.
   const diagramElementIn = (section, reference) => section && section.querySelector('.diagram-canvas [data-el="' + (window.CSS && CSS.escape ? CSS.escape(reference) : reference) + '"]');
+  const SEQUENCE_MESSAGE_LINES = '.messageLine0[data-from], .messageLine1[data-from]';
+  // Mermaid draws each sequence message as its text lines (.messageText),
+  // then its line or self-message loop, then, when numbered, a zero-length
+  // line carrying the number circle as a marker and the number itself.
+  const messageTexts = (message) => {
+    const texts = [];
+    for (let text = message.previousElementSibling; text?.matches('.messageText'); text = text.previousElementSibling) texts.unshift(text);
+    return texts;
+  };
+  const messageNumber = (message) => {
+    const text = message.nextElementSibling?.nextElementSibling;
+    return text?.matches('.sequenceNumber') ? { text, circle: message.nextElementSibling } : null;
+  };
+  // Sizes mermaid draws through markers, in the SVG's own units: a marker
+  // scales with its line's stroke unless it is in user space.
+  const markerOf = (element, attribute) => {
+    const id = /url\(#([^)]+)\)/.exec(element?.getAttribute(attribute) ?? '')?.[1];
+    return id ? element.ownerSVGElement?.getElementById(id) : null;
+  };
+  const markerScale = (marker, element) => (marker.getAttribute('markerUnits') === 'userSpaceOnUse' ? 1 : parseFloat(getComputedStyle(element).strokeWidth) || 1);
+  const numberRadius = (circleLine) => {
+    const marker = markerOf(circleLine, 'marker-start');
+    const circle = marker?.querySelector('circle');
+    return circle ? Number(circle.getAttribute('r')) * markerScale(marker, circleLine) : 0;
+  };
+  // How far an end marker reaches back along its line from the end point.
+  const arrowheadLength = (line) => {
+    const marker = markerOf(line, 'marker-end');
+    const head = marker?.querySelector('path');
+    return head ? (Number(marker.getAttribute('refX')) - head.getBBox().x) * markerScale(marker, line) : 0;
+  };
+  // Mermaid centers message text between the two lifelines, over the number
+  // circle at the sending end once gaps are tight, and a self-message's text
+  // over its own number. Numbers are centred on their circle. A numbered
+  // message's text starts just past its number, reading away from it, when
+  // it fits before the arrowhead (else it rises clear of the number); a
+  // self-message's text moves beside its loop, right of it when the drawing
+  // has room, else left of the lifeline, clear of the number circle there.
+  const SEQUENCE_TEXT_GAP = 4; // between message text and a number circle, loop, or arrowhead
+  // Placement starts from mermaid's own coordinates (kept on first use), so
+  // running it again gives the same result. A move is kept only when the
+  // moved text stays inside the viewBox and clear of every other message's
+  // text, notes, activation bars, and block frames and their labels;
+  // otherwise mermaid's placement stays. Messages without the expected
+  // text, line and number structure are left alone.
+  const SEQUENCE_OBSTACLES = 'rect.note, .noteText, rect[class*="activation"], line.loopLine, polygon.labelBox, .labelText, .loopText, .sectionTitle';
+  const placeSequenceMessageLabels = (svgRoot) => {
+    const view = svgRoot.viewBox.baseVal;
+    const messages = [...svgRoot.querySelectorAll(SEQUENCE_MESSAGE_LINES)];
+    const textsOf = new Map(messages.map((message) => [message, messageTexts(message)]));
+    // Mermaid's own values, recorded on first use; ABSENT marks an attribute
+    // mermaid didn't set, removed again on reset.
+    const ABSENT = '\u0000';
+    const reset = (texts) => texts.forEach((text) => {
+      for (const [key, name] of [['mermaidX', 'x'], ['mermaidY', 'y'], ['mermaidAnchor', 'text-anchor']]) {
+        if (text.dataset[key] === undefined) text.dataset[key] = text.getAttribute(name) ?? ABSENT;
+        else if (text.dataset[key] === ABSENT) text.removeAttribute(name);
+        else text.setAttribute(name, text.dataset[key]);
+      }
+    });
+    textsOf.forEach(reset);
+    const boxOf = (elements) => elements.map((element) => element.getBBox()).reduce((a, b) => ({ left: Math.min(a.left, b.x), right: Math.max(a.right, b.x + b.width), top: Math.min(a.top, b.y), bottom: Math.max(a.bottom, b.y + b.height) }), { left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity });
+    // Frame lines are thickened to their drawn stroke so text crossing one counts.
+    const obstacles = [...svgRoot.querySelectorAll(SEQUENCE_OBSTACLES)].map((element) => {
+      const box = boxOf([element]);
+      const pad = element.matches('line') ? 2 : 0;
+      return { left: box.left - pad, right: box.right + pad, top: box.top - pad, bottom: box.bottom + pad };
+    });
+    const placed = new Map([...textsOf].filter(([, texts]) => texts.length).map(([message, texts]) => [message, boxOf(texts)]));
+    const overlaps = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1;
+    const clear = (message, box) => box.left >= view.x && box.right <= view.x + view.width && box.top >= view.y && box.bottom <= view.y + view.height
+      && !obstacles.some((other) => overlaps(other, box)) && ![...placed].some(([other, otherBox]) => other !== message && overlaps(otherBox, box));
+    for (const message of messages) {
+      const number = messageNumber(message);
+      const radius = number ? numberRadius(number.circle) : 0;
+      if (number) {
+        number.text.setAttribute('y', number.circle.getAttribute('y1'));
+        number.text.setAttribute('dominant-baseline', 'central');
+      }
+      const texts = textsOf.get(message);
+      if (!texts.length) continue;
+      const width = Math.max(...texts.map((text) => text.getComputedTextLength()));
+      const { top, bottom } = boxOf(texts);
+      const move = (x, anchor, dy = 0) => {
+        texts.forEach((text) => {
+          text.setAttribute('x', String(x));
+          text.setAttribute('text-anchor', anchor);
+          if (dy) text.setAttribute('y', String(Number(text.getAttribute('y')) + dy));
+        });
+        const box = boxOf(texts);
+        if (clear(message, box)) placed.set(message, box);
+        else reset(texts);
+      };
+      if (message.dataset.from === message.dataset.to) {
+        const loop = message.getBBox();
+        const toRight = loop.x + loop.width + SEQUENCE_TEXT_GAP + width <= view.x + view.width;
+        move(toRight ? loop.x + loop.width + SEQUENCE_TEXT_GAP : loop.x - radius - SEQUENCE_TEXT_GAP, toRight ? 'start' : 'end', loop.y + loop.height / 2 - (top + bottom) / 2);
+        continue;
+      }
+      if (!number) continue;
+      const [x1, x2, at] = [Number(message.getAttribute('x1')), Number(message.getAttribute('x2')), Number(number.text.getAttribute('x'))];
+      if (Math.abs(at - x1) > Math.abs(at - x2)) continue;
+      const direction = Math.sign(x2 - x1);
+      const from = at + direction * (radius + SEQUENCE_TEXT_GAP);
+      const centre = Number(texts[0].getAttribute('x'));
+      if ((x2 - direction * (arrowheadLength(message) + SEQUENCE_TEXT_GAP) - from) * direction >= width) move(from, direction > 0 ? 'start' : 'end');
+      else if (Math.abs(centre - at) < width / 2 + radius + SEQUENCE_TEXT_GAP) {
+        // Too long to start past the number: centred, raised clear of it.
+        const lift = bottom + SEQUENCE_TEXT_GAP - (Number(number.circle.getAttribute('y1')) - radius);
+        if (lift > 0) move(centre, 'middle', -lift);
+      }
+    }
+  };
+  let unparsedMessagesWarned = false;
   const annotateDiagram = (svgRoot, parsed) => {
+    // Sequence participants are the named actor shapes;
+    // each message line carries its endpoints, and its text shares the ref.
+    if (parsed.kind === 'sequence') {
+      svgRoot.querySelectorAll('.actor[name], g[name]').forEach((shape) => {
+        const id = shape.getAttribute('name');
+        if (parsed.nodes.has(id) && !shape.matches('line')) (shape.matches('g') ? shape : shape.parentElement).dataset.el = 'node:' + id;
+      });
+      // Messages are drawn in statement order, so the nth line between a pair
+      // is the parser's nth message between it, when both count the pair's
+      // messages alike; a pair they count differently (a message the parser
+      // doesn't recognize) stays unanchored rather than misattributed.
+      const linesOf = new Map();
+      svgRoot.querySelectorAll(SEQUENCE_MESSAGE_LINES).forEach((line) => {
+        const pair = line.dataset.from + '->' + line.dataset.to;
+        linesOf.set(pair, [...(linesOf.get(pair) ?? []), line]);
+      });
+      const parsedCount = new Map();
+      for (const edge of parsed.edges) parsedCount.set(edge.split('#')[0], (parsedCount.get(edge.split('#')[0]) ?? 0) + 1);
+      let missed = 0;
+      for (const [pair, lines] of linesOf) {
+        if (parsedCount.get(pair) !== lines.length) {
+          missed += lines.length;
+          continue;
+        }
+        lines.forEach((line, at) => {
+          const reference = 'edge:' + sequenceEdgeId(line.dataset.from, line.dataset.to, at + 1);
+          [line, ...messageTexts(line)].forEach((element) => { element.dataset.el = reference; });
+        });
+      }
+      if (missed && !unparsedMessagesWarned) {
+        unparsedMessagesWarned = true;
+        console.warn('marginalia: ' + missed + ' sequence message(s) the element parser does not recognize are not clickable.');
+      }
+      return;
+    }
     svgRoot.querySelectorAll('g.node[id]').forEach((node) => {
       const match = /(?:^|-)([A-Za-z0-9_]+)-\d+$/.exec(node.id) || /(?:^|-)([A-Za-z0-9_]+)$/.exec(node.id);
       // Only elements the shared parser found are clickable: annotation and
@@ -325,12 +474,298 @@
       }
       if (fallback) edge.dataset.el = fallback;
     });
+    // State-diagram transition paths carry no endpoint ids, and mermaid's
+    // edge<N> numbering doesn't follow statement order (notes and composite
+    // bodies interleave), so each path is identified by the states its drawn
+    // ends touch: a state box within a few pixels, else the innermost
+    // composite state around the point. It is anchored only when the parser
+    // knows that transition.
+    if (parsed.kind === 'state') {
+      const nodes = [...svgRoot.querySelectorAll('g.node[data-el^="node:"]')].map((node) => ({ id: node.dataset.el.slice('node:'.length), box: boxInRoot(svgRoot, node) }));
+      const composites = [...svgRoot.querySelectorAll('g.statediagram-cluster[data-id]')].map((cluster) => ({ id: cluster.dataset.id, box: boxInRoot(svgRoot, shapeOfGroup(cluster) ?? cluster) }));
+      const gap = (box, point) => Math.max(box.left - point.x, 0, point.x - box.right) + Math.max(box.top - point.y, 0, point.y - box.bottom);
+      const area = ({ box }) => (box.right - box.left) * (box.bottom - box.top);
+      const stateAt = (point) => {
+        const node = nodes.map((candidate) => ({ ...candidate, gap: gap(candidate.box, point) })).sort((x, y) => x.gap - y.gap)[0];
+        if (node && node.gap <= 3) return node.id;
+        return composites.filter((candidate) => gap(candidate.box, point) <= 3).sort((x, y) => area(x) - area(y))[0]?.id;
+      };
+      svgRoot.querySelectorAll('path.transition').forEach((edge) => {
+        const length = edge.getTotalLength?.() ?? 0;
+        if (!length) return;
+        const matrix = toRootMatrix(svgRoot, edge);
+        const [from, to] = [0, length].map((at) => stateAt(edge.getPointAtLength(at).matrixTransform(matrix)));
+        if (from && to && parsed.edges.has(`${from}->${to}`)) edge.dataset.el = `edge:${from}->${to}`;
+      });
+    }
+  };
+  // The renderer owns contrast: author fills (classDef/style) are kept, but
+  // label ink is re-chosen against the painted shape so text stays legible in
+  // both schemes whatever colors the source asks for.
+  // Any CSS color syntax resolves by painting one pixel and reading it back,
+  // so modern notations (oklch, color()) parse too; invalid input is null.
+  const colorProbe = Object.assign(document.createElement('canvas'), { width: 1, height: 1 }).getContext('2d', { willReadFrequently: true });
+  const parseColor = (value) => {
+    if (!value || value === 'none' || /url\(/.test(value) || !(window.CSS && CSS.supports('color', value))) return null;
+    colorProbe.clearRect(0, 0, 1, 1);
+    colorProbe.fillStyle = value;
+    colorProbe.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = colorProbe.getImageData(0, 0, 1, 1).data;
+    return { r, g, b, a: a / 255 };
+  };
+  // Diagram canvas, ink, and theme-override colors live in the stylesheet's
+  // --diagram-* custom properties, read when a diagram renders.
+  const diagramPalette = () => {
+    const root = getComputedStyle(document.documentElement);
+    const raw = (name) => root.getPropertyValue(name).trim();
+    return {
+      canvasLight: parseColor(raw('--diagram-canvas-light')),
+      canvasDark: parseColor(raw('--diagram-canvas-dark')),
+      inkOnLight: parseColor(raw('--diagram-ink-on-light')),
+      inkOnDark: parseColor(raw('--diagram-ink-on-dark')),
+      edgeLabelDark: raw('--diagram-edge-label-dark'),
+      nodeBorderLight: raw('--diagram-node-border-light'),
+      clusterLight: raw('--diagram-cluster-light'),
+      clusterBorderLight: raw('--diagram-cluster-border-light'),
+      nodeLight: raw('--diagram-node-light'),
+      clusterDark: raw('--diagram-cluster-dark'),
+      clusterBorderDark: raw('--diagram-cluster-border-dark'),
+      nodeDark: raw('--diagram-node-dark'),
+    };
+  };
+  // The color behind an element: CSS backgrounds from it up to (not
+  // including) `stopAt`, stacked over `base`. Transparent layers are skipped
+  // and the walk ends at the first opaque one.
+  const stackBackgrounds = (from, stopAt, base) => {
+    const layers = [];
+    for (let current = from; current && current !== stopAt; current = current.parentElement) {
+      const color = parseColor(getComputedStyle(current).backgroundColor);
+      if (!color || color.a === 0) continue;
+      layers.push(color);
+      if (color.a >= 1) break;
+    }
+    return layers.reduceRight((below, color) => composite(color, below, color.a), base);
+  };
+  const LABEL_INK_SELECTOR = ':scope > .label foreignObject *, :scope > .cluster-label foreignObject *, :scope > .label text, :scope > .cluster-label text';
+  // Each label's background stacks its node or cluster fill over the canvas,
+  // then any HTML backgrounds (edge-label backings) between text and object.
+  // Sequence text sits on a note, a block's keyword tab, a number circle, or
+  // the canvas.
+  const SEQUENCE_TEXT = '.messageText, .noteText, .loopText, .labelText, .sectionTitle, .sequenceNumber, text.actor';
+  const sequenceBackdrop = (text) => (text.matches('.noteText') ? text.parentElement.querySelector(':scope > rect.note')
+    : text.matches('.labelText') ? text.parentElement.querySelector(':scope > polygon.labelBox')
+      : text.matches('.sequenceNumber') ? markerOf(text.previousElementSibling, 'marker-start')?.querySelector('circle')
+        : text.matches('text.actor') ? text.parentElement.querySelector(':scope > rect.actor') : null);
+  const enforceLabelContrast = (svgRoot, canvasColor, palette) => {
+    const over = (shape) => {
+      if (!shape) return canvasColor;
+      const style = getComputedStyle(shape);
+      const fill = parseColor(style.fill);
+      return fill ? composite(fill, canvasColor, fill.a * Number(style.fillOpacity) * Number(style.opacity)) : canvasColor;
+    };
+    const ensureInk = (element, background) => {
+      const html = element.closest('foreignObject');
+      const current = parseColor(getComputedStyle(element)[html ? 'color' : 'fill']);
+      if (current && contrastRatio(composite(current, background, current.a), background) >= 4.5) return;
+      const ink = contrastRatio(palette.inkOnLight, background) >= contrastRatio(palette.inkOnDark, background) ? palette.inkOnLight : palette.inkOnDark;
+      const inkValue = 'rgb(' + ink.r + ',' + ink.g + ',' + ink.b + ')';
+      element.style.setProperty('color', inkValue, 'important');
+      element.style.setProperty('fill', inkValue, 'important');
+    };
+    // On a mid-tone author fill neither ink reaches 4.5:1 on, the label gets
+    // a halo in the opposite ink (text-shadow on HTML labels; a stroke under
+    // SVG text, which ignores text-shadow). Only where no ink reaches even
+    // 3:1 is the fill itself shaded toward black or white, and never more
+    // than MAX_SHADE of the way, so the author's color stays recognisable.
+    const MAX_SHADE = 0.35;
+    const best = (color) => Math.max(contrastRatio(palette.inkOnLight, color), contrastRatio(palette.inkOnDark, color));
+    const shadeForInk = (group, base) => {
+      const shaded = [{ r: 0, g: 0, b: 0 }, { r: 255, g: 255, b: 255 }].map((toward) => {
+        for (let weight = 0.05; weight <= MAX_SHADE + 1e-9; weight += 0.05) {
+          const color = composite(toward, base, weight);
+          if (best(color) >= 3) return { color, weight };
+        }
+        return { color: composite(toward, base, MAX_SHADE), weight: Infinity };
+      }).sort((x, y) => x.weight - y.weight)[0].color;
+      const value = 'rgb(' + Math.round(shaded.r) + ',' + Math.round(shaded.g) + ',' + Math.round(shaded.b) + ')';
+      [...group.querySelectorAll(SHAPE_SELECTOR)].filter((part) => !part.closest('.label') && parseColor(getComputedStyle(part).fill)?.a).forEach((part) => part.style.setProperty('fill', value, 'important') ?? part.style.setProperty('fill-opacity', '1', 'important'));
+      return shaded;
+    };
+    const addHalo = (element, base) => {
+      const halo = contrastRatio(palette.inkOnLight, base) >= contrastRatio(palette.inkOnDark, base) ? palette.inkOnDark : palette.inkOnLight;
+      const color = 'rgb(' + halo.r + ',' + halo.g + ',' + halo.b + ')';
+      if (element.closest('foreignObject')) element.style.setProperty('text-shadow', '0 0 2px ' + color + ', 0 0 2px ' + color);
+      else Object.entries({ stroke: color, 'stroke-width': '3px', 'paint-order': 'stroke', 'stroke-linejoin': 'round' }).forEach(([name, value]) => element.style.setProperty(name, value, 'important'));
+    };
+    svgRoot.querySelectorAll('g.node, g.cluster, g.edgeLabel').forEach((group) => {
+      let base = over(group.matches('.edgeLabel') ? null : shapeOfGroup(group));
+      if (group.matches('.node') && best(base) < 3) base = shadeForInk(group, base);
+      group.querySelectorAll(LABEL_INK_SELECTOR).forEach((element) => {
+        const html = element.closest('foreignObject');
+        ensureInk(element, html ? stackBackgrounds(element, html, base) : base);
+        if (best(base) < 4.5) addHalo(element, base);
+      });
+    });
+    if (svgRoot.getAttribute('aria-roledescription') === 'sequence') {
+      svgRoot.querySelectorAll(SEQUENCE_TEXT).forEach((text) => {
+        const background = over(sequenceBackdrop(text));
+        [text, ...text.querySelectorAll('tspan')].forEach((element) => ensureInk(element, background));
+      });
+    }
+    // Node outlines: when neither fill nor stroke separates a node from the
+    // canvas (3:1), the stroke is blended toward the contrasting ink until
+    // it does, keeping the author's hue as far as possible.
+    const ink = contrastRatio(palette.inkOnLight, canvasColor) >= contrastRatio(palette.inkOnDark, canvasColor) ? palette.inkOnLight : palette.inkOnDark;
+    svgRoot.querySelectorAll('g.node').forEach((group) => {
+      const parts = [...group.querySelectorAll(SHAPE_SELECTOR)].filter((part) => !part.closest('.label'));
+      const separation = (part, property) => {
+        const color = parseColor(getComputedStyle(part)[property]);
+        return color && color.a > 0 ? contrastRatio(composite(color, canvasColor, color.a), canvasColor) : 1;
+      };
+      if (!parts.length || parts.some((part) => separation(part, 'fill') >= 3 || separation(part, 'stroke') >= 3)) return;
+      const stroke = parseColor(getComputedStyle(parts[0]).stroke) ?? canvasColor;
+      for (let weight = 0.1; weight <= 1; weight += 0.1) {
+        const mixed = composite(ink, stroke, weight);
+        if (contrastRatio(mixed, canvasColor) < 3 && weight < 0.95) continue;
+        const value = 'rgb(' + Math.round(mixed.r) + ',' + Math.round(mixed.g) + ',' + Math.round(mixed.b) + ')';
+        parts.forEach((part) => part.style.setProperty('stroke', value, 'important'));
+        break;
+      }
+    });
+  };
+  // Diagrams that overflow the canvas shrink to fit it, but never so far that
+  // their smallest text reads below DIAGRAM_MIN_TEXT_PX: 12px is the size of
+  // the review page's own secondary text (captions, rail notes), so a fitted
+  // diagram never reads smaller than the page around it. Anything still
+  // larger pans. The fitted size is
+  // the zoom baseline, and the fit re-runs from the natural size on resize.
+  const DIAGRAM_FONT_PX = 16;
+  // Layout sizes (px, at DIAGRAM_FONT_PX type), chosen for legibility:
+  const DIAGRAM_LAYOUT = {
+    // ELK spacing. The adapter hard-codes 40 at the root and 30 in
+    // containers (its layers then sit 40 apart, two and a half text lines).
+    elkNodeSpacing: 30, // nodes side by side in a layer: room for an edge label between them
+    elkContainerNodeSpacing: 24, // tighter inside a container, whose border already sets it apart
+    elkLayerSpacing: 8 + 12, // gap between node layers: an 8px arrowhead on a 12px visible shaft (an edge label gets a layer of its own)
+    elkEdgeLayerSpacing: 10, // an edge bend clears the node it passes
+    elkEdgeEdgeSpacing: 8, // parallel edge runs: several stroke widths apart, so each stays traceable
+    elkContainerPadding: 12, // ELK's own container inset, kept so title bands line up with it
+    dagreCompact: { nodeSpacing: 30, rankSpacing: 40 }, // dagre fallback for diagrams that would pan
+    // Sequence diagrams: participants drawn once, at the top, in boxes 120px
+    // wide and 32px apart (mermaid's defaults are 150 and 50; a box still
+    // grows to fit its label, and message labels widen a gap as needed). A
+    // diagram taller than the canvas pans; mermaid's repeated row of
+    // participants at the bottom would only lengthen it, and clicking a
+    // participant works on the top row.
+    sequence: { mirrorActors: false, diagramMarginX: 8, diagramMarginY: 16, width: 120, height: 44, actorMargin: 32, boxMargin: 8, messageMargin: 32 },
+    // Mermaid reserves the configured height for every participant before
+    // drawing, but draws a stick figure (`actor`) 60 units tall with its
+    // label on a line below; a diagram with one reserves that much instead.
+    // Mermaid has one participant height per diagram, so every box in it
+    // grows to match.
+    sequenceActorHeight: 60 + DIAGRAM_FONT_PX * 1.5,
+    // Decision-chain labels may wrap at this width: a diamond's side grows
+    // with its label's width plus height, so a question on two or three short
+    // lines draws a much smaller diamond than on one long line.
+    decisionLabelPx: 120,
+    // A chosen layout variant is reused while the canvas width stays in the
+    // same bucket: resizes within it skip the variant search, at the cost of
+    // a variant chosen near a bucket edge fitting slightly worse.
+    variantWidthBucketPx: 40,
+  };
+  const DIAGRAM_MIN_TEXT_PX = 12;
+  const smallestTextPx = (svgRoot) => {
+    let smallest = Infinity;
+    svgRoot.querySelectorAll('foreignObject *, text').forEach((element) => {
+      if (!element.textContent.trim()) return;
+      const px = parseFloat(getComputedStyle(element).fontSize);
+      if (px > 0) smallest = Math.min(smallest, px);
+    });
+    return Number.isFinite(smallest) ? smallest : DIAGRAM_FONT_PX;
+  };
+  const canvasRoom = (canvas) => {
+    const style = getComputedStyle(canvas);
+    return {
+      width: canvas.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+      height: parseFloat(style.maxHeight) - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom) || Infinity,
+    };
+  };
+  const fittedScale = (width, height, minTextPx, room) => Math.min(1, Math.max(DIAGRAM_MIN_TEXT_PX / minTextPx, Math.min(room.width / width, room.height / height)));
+  const naturalSize = (svgRoot) => {
+    svgRoot.dataset.naturalWidth ??= svgRoot.getAttribute('width') ?? '';
+    svgRoot.dataset.naturalHeight ??= svgRoot.getAttribute('height') ?? '';
+    svgRoot.dataset.minTextPx ??= String(smallestTextPx(svgRoot));
+    return { width: parseFloat(svgRoot.dataset.naturalWidth), height: parseFloat(svgRoot.dataset.naturalHeight), minTextPx: Number(svgRoot.dataset.minTextPx) };
+  };
+  // How far the fitted diagram still exceeds the canvas along each axis
+  // (px), and the scale it is fitted at.
+  const overflowAtMinScale = (svgRoot, canvas) => {
+    const { width, height, minTextPx } = naturalSize(svgRoot);
+    const room = canvasRoom(canvas);
+    const scale = fittedScale(width, height, minTextPx, room);
+    return room.width > 0 ? { x: Math.max(0, width * scale - room.width), y: Math.max(0, height * scale - room.height), scale } : { x: 0, y: 0, scale };
+  };
+  // A render's mermaid settings are plain data, merged step by step (nested
+  // sections key by key, themeCSS appended) and prepended to the source as
+  // one init directive. Mermaid applies directives in order, so an author's
+  // own directive still wins; a source with frontmatter keeps its own
+  // settings, since nothing may precede frontmatter.
+  const mergeConfig = (a = {}, b = {}) => Object.fromEntries([...new Set([...Object.keys(a), ...Object.keys(b)])].map((key) => [key, key === 'themeCSS' ? (a[key] ?? '') + (b[key] ?? '') : a[key] && typeof a[key] === 'object' && b[key] ? { ...a[key], ...b[key] } : b[key] ?? a[key]]));
+  // `parsed` is the figure's parseMermaidElements result, computed once.
+  const isHorizontalFlowchart = (parsed) => parsed.kind === 'flowchart' && (parsed.direction === 'LR' || parsed.direction === 'RL');
+  // ELK padding for a container with a title band: `left` 0 adds a band
+  // along the bottom one title line deep, else a band of that width (SVG
+  // user units) down the left side.
+  const titleBandPadding = (left, inset = DIAGRAM_LAYOUT.elkContainerPadding) => `[top=${inset},left=${inset + left},bottom=${inset + (left ? 0 : TITLE.band)},right=${inset}]`;
+  const fitDiagram = (svgRoot, canvas) => {
+    const { width, height, minTextPx } = naturalSize(svgRoot);
+    const room = canvasRoom(canvas);
+    const previous = parseFloat(svgRoot.getAttribute('width'));
+    if (!(width > 0 && height > 0 && room.width > 0)) return 1;
+    const scale = fittedScale(width, height, minTextPx, room);
+    svgRoot.setAttribute('width', String(width * scale));
+    svgRoot.setAttribute('height', String(height * scale));
+    return previous > 0 ? (width * scale) / previous : 1;
+  };
+  // Geometry-dependent layout needs a displayed diagram; one rendered while
+  // hidden (collapsed or unfocused section) is laid out once it gets a size.
+  const layoutDiagram = (svgRoot, canvas) => {
+    if (!svgRoot.dataset.laidOut && svgRoot.getBoundingClientRect().width && svgRoot.getScreenCTM()) {
+      if (svgRoot.getAttribute('aria-roledescription') === 'sequence') placeSequenceMessageLabels(svgRoot);
+      placeEdgeLabels(svgRoot);
+      placeClusterTitles(svgRoot);
+      svgRoot.dataset.laidOut = '1';
+    }
+    return fitDiagram(svgRoot, canvas);
   };
   let diagramPanConsumedClick = false;
   const diagramViews = new Map();
-  // Bring an element into its canvas viewport: scroll the canvas at natural
-  // size, shift the transform when zoomed. Anchors are element identities
-  // with live nodes, so visibility is pure geometry.
+  // One observer for every canvas, attached once per figure: re-renders swap
+  // the SVG inside an already-observed canvas.
+  const diagramResizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
+    for (const { target } of entries) {
+      const svg = target.querySelector(':scope > .diagram-inner > svg');
+      const wired = diagramViews.get(target);
+      // Rendered while hidden: mermaid could not measure text and the sizing
+      // decisions had no room, so render again now that it is displayed.
+      if (target.dataset.renderedHidden && canvasRoom(target).width > 0 && wired) {
+        delete target.dataset.renderedHidden;
+        wired.rerender();
+        continue;
+      }
+      // A refit rescales the zoom baseline; the pan offset scales with it so
+      // the same part of the diagram stays in view.
+      const ratio = svg ? layoutDiagram(svg, target) : 1;
+      if (wired && ratio !== 1) {
+        wired.view.x *= ratio;
+        wired.view.y *= ratio;
+      }
+      wired?.apply();
+    }
+  }) : undefined;
+  // Bring an element into its canvas viewport: scroll the canvas at zoom 1
+  // (the fitted size), shift the transform when zoomed. Everything is read
+  // from live client rects, so fitted and natural sizes need no special case.
   const revealDiagramElement = (element) => {
     const canvas = element.closest('.diagram-canvas');
     if (!canvas) return;
@@ -348,6 +783,53 @@
       wired.apply();
     }
   };
+  // The layout options of the render in flight, null between renders. The
+  // ELK graph the hook receives carries no render id, so options can't be
+  // keyed per render; instead every mermaid render goes through
+  // renderDiagram, one at a time, and the options always belong to the
+  // layout layoutElkGraph is running.
+  let layoutInFlight = null;
+  let renderQueue = Promise.resolve();
+  let mermaidRender;
+  // Every render of a sequence diagram with a stick figure reserves its height.
+  const actorRoom = (parsed) => (parsed.actors?.size && DIAGRAM_LAYOUT.sequenceActorHeight > DIAGRAM_LAYOUT.sequence.height ? { sequence: { height: DIAGRAM_LAYOUT.sequenceActorHeight } } : {});
+  const renderDiagram = (id, text, layout = {}) => {
+    const run = renderQueue.then(async () => {
+      layoutInFlight = layout;
+      try {
+        return await mermaidRender(id, text);
+      } finally {
+        layoutInFlight = null;
+      }
+    });
+    renderQueue = run.catch(() => {});
+    return run;
+  };
+  // Set once the served ELK adapter routes a layout through the hook.
+  let elkHooked = false;
+  // Every ELK layout runs through here (the server routes the adapter's
+  // layout call to it): DIAGRAM_LAYOUT spacing, network-simplex node
+  // placement (straighter, shorter edges than the adapter's Brandes-Köpf
+  // default), Coffman-Graham layering (which bounds how many nodes share a
+  // layer), the render's title bands, and antiparallel edges across
+  // containers laid out beside each other (see transformElkGraph); the
+  // decision variant re-lays out a chain of questions (layoutDecisionChain).
+  const layoutElkGraph = async (elk, graph) => {
+    elkHooked = true;
+    if (!layoutInFlight) console.warn('marginalia: an ELK layout ran outside renderDiagram; it uses default options.');
+    const { bands = {}, decision = false, rows = 0, writtenOrder = false } = layoutInFlight ?? {};
+    const flipped = transformElkGraph(graph, {
+      rootOptions: { 'spacing.baseValue': DIAGRAM_LAYOUT.elkNodeSpacing, 'elk.layered.spacing.nodeNodeBetweenLayers': DIAGRAM_LAYOUT.elkLayerSpacing, 'elk.layered.spacing.edgeNodeBetweenLayers': DIAGRAM_LAYOUT.elkEdgeLayerSpacing, 'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX', 'elk.spacing.edgeEdge': DIAGRAM_LAYOUT.elkEdgeEdgeSpacing, 'elk.layered.spacing.edgeEdgeBetweenLayers': DIAGRAM_LAYOUT.elkEdgeEdgeSpacing, 'elk.layered.layering.strategy': 'COFFMAN_GRAHAM', ...(rows || writtenOrder ? { 'elk.layered.cycleBreaking.strategy': 'MODEL_ORDER' } : {}), ...(rows ? { 'elk.layered.wrapping.strategy': 'MULTI_EDGE', 'elk.aspectRatio': String(rows) } : {}) },
+      containerOptions: { 'spacing.baseValue': DIAGRAM_LAYOUT.elkContainerNodeSpacing },
+      containerExtra: (id) => (Object.hasOwn(bands, id) ? { 'elk.padding': titleBandPadding(Number(bands[id]) || 0) } : undefined),
+      balance: true,
+    });
+    const result = restoreElkResult(await elk.layout(graph), flipped);
+    if (decision) layoutDecisionChain(result, { rowGap: DIAGRAM_LAYOUT.elkLayerSpacing, sideGap: DIAGRAM_LAYOUT.elkNodeSpacing, edgeClearance: DIAGRAM_LAYOUT.elkContainerPadding });
+    return result;
+  };
+  const STALE_RENDER = Symbol('stale render');
+  const layoutVariants = new WeakMap();
   const setupDiagrams = async () => {
     const figures = [...document.querySelectorAll('[data-diagram]')];
     if (!figures.length) return;
@@ -359,31 +841,236 @@
       });
       return;
     }
-    // Diagrams render at natural size with legible type and NEVER scale
-    // down — wide ones pan/scroll instead. The mermaid theme follows the
-    // page's effective scheme so dark pages get dark diagrams.
+    // Diagrams render at natural size unless they overflow the column (see
+    // fitDiagram). The mermaid theme follows the page's effective scheme so
+    // dark pages get dark diagrams.
     const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : { matches: false };
     const effectiveDark = () => {
       const scheme = document.documentElement.dataset.scheme;
       return scheme === 'dark' || (scheme !== 'light' && darkQuery.matches);
     };
-    const initializeMermaid = () => window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: effectiveDark() ? 'dark' : 'neutral', fontFamily: 'system-ui, sans-serif', themeVariables: { fontSize: '16px' }, flowchart: { useMaxWidth: false }, state: { useMaxWidth: false }, er: { useMaxWidth: false }, sequence: { useMaxWidth: false } });
+    // Theme overrides that lift stock mermaid colors to WCAG targets: dark
+    // edge labels keep 4.5:1 text (the stock gray backing gives ~4.4), and
+    // light node borders reach 3:1 against the canvas (stock #999 is ~2.8).
+    // Sequence participants are drawn as nodes and notes as containers (a
+    // tinted panel with a boundary-grade border), so they share those
+    // colors; lifelines use the container border, quieter than messages.
+    const themeVariables = (palette) => effectiveDark()
+      ? { fontSize: DIAGRAM_FONT_PX + 'px', edgeLabelBackground: palette.edgeLabelDark, clusterBkg: palette.clusterDark, clusterBorder: palette.clusterBorderDark, mainBkg: palette.nodeDark, actorBkg: palette.nodeDark, actorBorder: palette.clusterBorderDark, actorLineColor: palette.clusterBorderDark, noteBkgColor: palette.clusterDark, noteBorderColor: palette.clusterBorderDark }
+      : { fontSize: DIAGRAM_FONT_PX + 'px', nodeBorder: palette.nodeBorderLight, clusterBkg: palette.clusterLight, clusterBorder: palette.clusterBorderLight, mainBkg: palette.nodeLight, actorBkg: palette.nodeLight, actorBorder: palette.nodeBorderLight, actorLineColor: palette.clusterBorderLight, noteBkgColor: palette.clusterLight, noteBorderColor: palette.clusterBorderLight };
+    // Containers read as boundaries (dashed, rounded) and nodes as
+    // components (softly rounded), as in conventional architecture diagrams;
+    // sequence lifelines are dotted guides, quieter than the messages, and
+    // step numbers sit two sizes below the text, two digits to a circle.
+    const DIAGRAM_THEME_CSS = '.cluster rect{stroke-dasharray:6 4;rx:10px;ry:10px}.node rect{rx:4px;ry:4px}.actor-line{stroke-dasharray:3 3}.sequenceNumber{font-size:' + (DIAGRAM_FONT_PX - 2) + 'px}';
+    // The source a render draws: its settings (the figure's base settings
+    // and a variant's) prepended as one directive; themeCSS extends the
+    // page's own theme CSS. Mermaid strips directives before parsing, so
+    // parse errors still give line numbers in the source the author wrote.
+    const configured = (source, config) => {
+      if (!Object.keys(config).length || /^\s*---/.test(source)) return source;
+      return '%%{init: ' + JSON.stringify(config.themeCSS ? { ...config, themeCSS: DIAGRAM_THEME_CSS + config.themeCSS } : config) + '}%%\n' + source;
+    };
+    // ELK lays flowcharts out with packed, top-aligned containers and
+    // orthogonal edges. It is optional: if its modules fail to load, mermaid
+    // keeps its default dagre layout.
+    const elkLayout = await import('/__pi_code_review_mermaid_elk__/mermaid-layout-elk.esm.min.mjs')
+      .then((module) => {
+        window.mermaid.registerLayoutLoaders(module.default);
+        return true;
+      })
+      .catch(() => false);
+    if (elkLayout) window.__marginaliaElkLayout = layoutElkGraph;
+    // Every mermaid render on the page goes through the queue, so no render
+    // can run while another's layout options are in flight. Installed once:
+    // a second setup must not wrap the wrapper.
+    if (!mermaidRender) {
+      mermaidRender = window.mermaid.render.bind(window.mermaid);
+      window.mermaid.render = (id, text) => renderDiagram(id, text);
+    }
+    const initializeMermaid = () => window.mermaid.initialize({ ...(elkLayout ? { layout: 'elk' } : {}), startOnLoad: false, securityLevel: 'strict', theme: effectiveDark() ? 'dark' : 'neutral', fontFamily: 'system-ui, sans-serif', themeVariables: themeVariables(diagramPalette()), themeCSS: DIAGRAM_THEME_CSS, flowchart: { useMaxWidth: false }, state: { useMaxWidth: false }, er: { useMaxWidth: false }, sequence: { useMaxWidth: false, ...DIAGRAM_LAYOUT.sequence }, block: { useMaxWidth: false } });
     initializeMermaid();
     let renderEpoch = 0;
-    const renderAll = () => renderEpoch++ && figures.forEach((figure, index) => renderFigure(figure, index));
+    const renderAll = () => {
+      renderEpoch++;
+      figures.forEach((figure, index) => renderFigure(figure, index));
+    };
     if (darkQuery.addEventListener) darkQuery.addEventListener('change', () => { initializeMermaid(); renderAll(); });
     document.querySelector('[data-scheme-picker]')?.addEventListener('change', () => { initializeMermaid(); renderAll(); });
+    // Layout variant steps, tried in order after a figure's first render.
+    // Each takes the variant accepted so far ({text, config, bands, decision,
+    // writtenOrder, rows}), the rendered SVG, its canvas and the parsed
+    // source, and returns null when it doesn't apply or
+    // { suffix, variant, measure, accept }: the variant is kept when
+    // accept(measure(before), measure(after)) holds; every step but titled
+    // (which counts crossed titles) measures with layoutState and accepts
+    // with improves.
+    // Measured once per rendered SVG: a rejected variant leaves the same SVG
+    // to be compared again by the next step.
+    const layoutStates = new WeakMap();
+    const layoutState = (canvas) => (root) => {
+      if (!layoutStates.has(root)) {
+        const { width, height } = naturalSize(root);
+        layoutStates.set(root, { ...overflowAtMinScale(root, canvas), crossings: edgeCrossings(root), area: width * height });
+      }
+      return layoutStates.get(root);
+    };
+    // The one comparison for structural variants: a variant layout is kept
+    // when it pans no further and crosses no more edges than the layout it
+    // replaces, and pans less, crosses fewer edges, or takes noticeably
+    // less room.
+    const improves = (before, after) => {
+      const [was, now] = [before.x + before.y, after.x + after.y];
+      return now <= was + 0.5 && after.crossings <= before.crossings && (now < was - 0.5 || after.crossings < before.crossings || after.area < before.area * 0.95);
+    };
+    const pans = ({ x, y }) => x + y > 0.5;
+    // Dagre: compact spacing for a flowchart that would pan (ELK ignores
+    // mermaid's spacing options).
+    const compactVariant = (current, svg, canvas, parsed) => (!elkLayout && parsed.kind === 'flowchart' && pans(overflowAtMinScale(svg, canvas))
+      ? { suffix: '-compact', variant: { ...current, config: mergeConfig(current.config, { flowchart: DIAGRAM_LAYOUT.dagreCompact }) }, measure: layoutState(canvas), accept: improves }
+      : null);
+    // Crossed container titles: a band per crossed title (bottom if the edges
+    // leaving the container clear it, else left; layoutElkGraph pads them).
+    // Kept if fewer titles are crossed, sideways pan doesn't grow, and
+    // vertical pan grows by at most one band as displayed (TITLE.band in SVG
+    // units times the fitted scale), which is the band's own height.
+    const titledVariant = (current, svg, canvas) => {
+      if (!elkLayout || !elkHooked) return null;
+      const state = (root) => ({ crossed: planClusterTitles(root).filter((spot) => spot.crossed), overflow: overflowAtMinScale(root, canvas) });
+      // Mermaid prefixes a container's DOM id with the diagram's.
+      const containerId = (cluster) => cluster.id.slice(cluster.id.startsWith(svg.id + '-') ? svg.id.length + 1 : 0);
+      const bands = Object.fromEntries(state(svg).crossed.filter((spot) => spot.cluster.id).map((spot) => [containerId(spot.cluster), spot.bottomWouldClear ? 0 : Math.ceil(spot.width) + TITLE.gap]));
+      if (!Object.keys(bands).length) return null;
+      const accept = (before, after) => after.crossed.length < before.crossed.length && after.overflow.x <= before.overflow.x + 0.5 && after.overflow.y <= before.overflow.y + 0.5 + TITLE.band * after.overflow.scale;
+      return { suffix: '-titled', variant: { ...current, bands }, measure: state, accept };
+    };
+    // A sequence diagram too wide: message and note text wrapped to the gaps
+    // between participants; kept if that improves.
+    const wrappedVariant = (current, svg, canvas, parsed) => {
+      if (parsed.kind !== 'sequence' || overflowAtMinScale(svg, canvas).x <= 0.5) return null;
+      return { suffix: '-wrapped', variant: { ...current, config: mergeConfig(current.config, { sequence: { wrap: true } }) }, measure: layoutState(canvas), accept: improves };
+    };
+    // A top-down flowchart with questions (diamonds): laid out as a decision
+    // chain when its graph is one (layoutDecisionChain); kept if it improves
+    // on ELK's own layout.
+    // (Rendered only when the source, without containers, is one:
+    // isDecisionChain.)
+    const decisionVariant = (current, svg, canvas, parsed) => (elkLayout && elkHooked && parsed.kind === 'flowchart' && /^T[BD]$/.test(parsed.direction) && !svg.querySelector('g.cluster') && isDecisionChain(parsed)
+      ? { suffix: '-decision', variant: { ...current, decision: true }, measure: layoutState(canvas), accept: improves }
+      : null);
+    // A decision chain laid out: again with its labels wrapped narrower
+    // (DIAGRAM_LAYOUT.decisionLabelPx), kept if that improves on it.
+    const decisionWrappedVariant = (current, svg, canvas) => (current.decision
+      ? { suffix: '-decision-wrapped', variant: { ...current, config: mergeConfig(current.config, { flowchart: { wrappingWidth: DIAGRAM_LAYOUT.decisionLabelPx } }) }, measure: layoutState(canvas), accept: improves }
+      : null);
+    // A flowchart too wide for the canvas: its run of layers wrapped into as
+    // few rows as fit the width, along the author's direction (ELK aims at
+    // that many rows through the drawing's aspect ratio), with cycles broken
+    // in source order so the rows follow the order the author wrote the flow
+    // in; kept if it improves on the unwrapped layout.
+    const rowsVariant = (current, svg, canvas, parsed) => {
+      const fit = overflowAtMinScale(svg, canvas);
+      if (!elkLayout || !elkHooked || parsed.kind !== 'flowchart' || !isHorizontalFlowchart(parsed) || fit.x <= 0.5) return null;
+      const { width, height } = naturalSize(svg);
+      const count = Math.ceil((width * fit.scale) / canvasRoom(canvas).width);
+      return { suffix: '-rows', variant: { ...current, rows: width / count / (height * count) }, measure: layoutState(canvas), accept: improves };
+    };
+    // A flowchart with loops and no containers: cycles broken in source
+    // order, so of the edges closing a loop the one pointing back at a node
+    // written earlier (a retry, a rollback) is the one that runs backward.
+    // (With containers the adapter lists them ahead of every node, so source
+    // order is lost.) Kept if it improves on ELK's default cycle breaking.
+    const writtenOrderVariant = (current, svg, canvas, parsed) => (elkLayout && elkHooked && parsed.kind === 'flowchart' && !svg.querySelector('g.cluster') && hasCycle(parsed)
+      ? { suffix: '-written', variant: { ...current, writtenOrder: true }, measure: layoutState(canvas), accept: improves }
+      : null);
+    // Steps' preconditions leave at most two for any figure: compact alone
+    // under dagre; wrapped alone for a sequence diagram; for a flowchart,
+    // decision and its wrapped retry (top down, a chain: no loop, no
+    // containers), or written order (a loop, no containers) then rows (left
+    // to right, too wide), or rows then titled (containers with a crossed
+    // title). MAX_VARIANT_RENDERS enforces that bound and warns if a step is
+    // ever skipped for it, which would mean the bound above no longer holds.
+    const MAX_VARIANT_RENDERS = 2;
+    const VARIANT_STEPS = [compactVariant, decisionVariant, decisionWrappedVariant, writtenOrderVariant, rowsVariant, wrappedVariant, titledVariant];
     const renderFigure = async (figure, index) => {
       const source = figure.querySelector('.diagram-source').textContent;
+      const parsed = parseMermaidElements(source);
+      const base = actorRoom(parsed);
       const canvas = figure.querySelector('[data-diagram-canvas]');
+      const renderId = 'picr-mmd-' + renderEpoch + '-' + index + '-' + figure.dataset.mdLine;
+      figure.querySelector('.diagram-notice')?.remove();
       try {
         const epoch = renderEpoch;
-        const { svg } = await window.mermaid.render('picr-mmd-' + renderEpoch + '-' + index + '-' + figure.dataset.mdLine, source);
+        let svg;
+        let autoQuoted = false;
+        let rendered = source;
+        // A figure re-rendered at the same source and width (a theme change)
+        // renders its chosen layout variant directly.
+        const variantKey = source + '\0' + Math.round(canvasRoom(canvas).width / DIAGRAM_LAYOUT.variantWidthBucketPx);
+        const cached = layoutVariants.get(figure)?.key === variantKey ? layoutVariants.get(figure) : undefined;
+        try {
+          if (cached) {
+            ({ svg } = await renderDiagram(renderId, configured(cached.variant.text, mergeConfig(base, cached.variant.config)), cached.variant));
+            ({ rendered, autoQuoted } = cached);
+          } else ({ svg } = await renderDiagram(renderId, configured(source, base)));
+        } catch (error) {
+          // Unquoted punctuation in labels is the commonest parse failure;
+          // retry once with those labels quoted before reporting the error.
+          const quoted = quoteMermaidLabels(source);
+          if (quoted === source) throw error;
+          document.getElementById('d' + renderId)?.remove();
+          // A failed retry reports the original error: its positions refer
+          // to the source the author wrote.
+          ({ svg } = await renderDiagram(renderId + '-quoted', configured(quoted, base)).catch(() => { throw error; }));
+          autoQuoted = true;
+          rendered = quoted;
+        }
         if (epoch !== renderEpoch) return;
         const inner = document.createElement('div');
         inner.className = 'diagram-inner';
         inner.innerHTML = svg;
         canvas.replaceChildren(inner);
+        // tryVariant renders a variant and keeps it if accept holds; the choice
+        // is cached per figure, source and width bucket. The search runs only
+        // when a figure renders (load, scheme change, first display); resizing
+        // refits the rendered SVG without searching again.
+        const svgNow = () => inner.querySelector('svg');
+        let chosen = { text: rendered };
+        const tryVariant = async (suffix, variant, measure, accept) => {
+          const result = await renderDiagram(renderId + suffix, configured(variant.text, mergeConfig(base, variant.config)), variant).catch(() => document.getElementById('d' + renderId + suffix)?.remove());
+          if (epoch !== renderEpoch) return STALE_RENDER;
+          if (!result) return false;
+          // The kept SVG is swapped back as the same node, so its measurements
+          // (and memoized title plan) stay valid.
+          const before = [...inner.childNodes];
+          const measured = measure(svgNow());
+          inner.innerHTML = result.svg;
+          if (accept(measured, measure(svgNow()))) {
+            chosen = variant;
+            return true;
+          }
+          inner.replaceChildren(...before);
+          return false;
+        };
+        if (canvasRoom(canvas).width <= 0) canvas.dataset.renderedHidden = '1';
+        else if (!cached && svgNow()) {
+          let renders = 0;
+          for (const step of VARIANT_STEPS) {
+            const next = step(chosen, svgNow(), canvas, parsed);
+            if (!next) continue;
+            if (renders++ >= MAX_VARIANT_RENDERS) { console.warn('marginalia: layout variant ' + next.suffix + ' skipped: the figure already tried ' + MAX_VARIANT_RENDERS + '.'); continue; }
+            if ((await tryVariant(next.suffix, next.variant, next.measure, next.accept)) === STALE_RENDER) return;
+          }
+          // Cached only once the search completes: a search a re-render
+          // interrupted leaves no entry, so the next render searches again.
+          layoutVariants.set(figure, { key: variantKey, rendered, autoQuoted, variant: chosen });
+        }
+        if (autoQuoted) {
+          const notice = document.createElement('div');
+          notice.className = 'diagram-notice';
+          notice.textContent = 'Rendered after quoting labels mermaid could not parse; quote them in the source so other renderers accept it.';
+          figure.append(notice);
+        }
         // The rendered diagram replaces the source pre and changes the
         // section's height; reseat the margin rail against the new anchors.
         scheduleRailLayout();
@@ -392,7 +1079,10 @@
         const svgRoot = inner.querySelector('svg');
         if (svgRoot) {
           svgRoot.removeAttribute('style');
-          if (typeof parseMermaidElements === 'function') annotateDiagram(svgRoot, parseMermaidElements(source));
+          layoutDiagram(svgRoot, canvas);
+          annotateDiagram(svgRoot, parsed);
+          const palette = diagramPalette();
+          enforceLabelContrast(svgRoot, stackBackgrounds(canvas, null, effectiveDark() ? palette.canvasDark : palette.canvasLight), palette);
           // Round diff: elements the server marked changed glow persistently.
           const changedRefs = figure.closest('[data-review-file]')?.dataset.changedElements;
           if (changedRefs) {
@@ -422,7 +1112,10 @@
           if (target) target.style.transform = 'translate(' + view.x + 'px,' + view.y + 'px) scale(' + view.scale + ')';
           updateCursor();
         };
-        diagramViews.set(canvas, { view, apply });
+        diagramViews.set(canvas, { view, apply, rerender: () => renderFigure(figure, index) });
+        diagramResizeObserver?.observe(canvas);
+        // Zooming out below the fitted size is an explicit overview gesture,
+        // so it is exempt from the fit's minimum text size.
         const zoomBy = (factor) => { view.scale = Math.min(4, Math.max(0.5, view.scale * factor)); if (view.scale === 1) { view.x = 0; view.y = 0; } apply(); };
         const controls = document.createElement('div');
         controls.className = 'diagram-zoom';
@@ -447,7 +1140,7 @@
         // Capture starts only after real movement: capturing on pointerdown
         // would retarget the click and kill element commenting while zoomed.
         let pan;
-        // At natural size dragging scrolls the canvas (macOS hides the
+        // At zoom 1 (the fitted size) dragging scrolls the canvas (macOS hides the
         // scrollbars, so an overflowing diagram would otherwise feel stuck);
         // zoomed, dragging moves the transform.
         canvas.addEventListener('pointerdown', (event) => {
@@ -486,12 +1179,22 @@
         figure.querySelector('.diagram-error').hidden = false;
         figure.querySelector('.diagram-source').hidden = false;
         scheduleRailLayout();
-        // Mermaid leaves its failed scratch element behind; drop it.
-        document.querySelectorAll('[id^="dpicr-mmd-"]').forEach((scratch) => scratch.remove());
+        // Mermaid leaves its failed scratch elements behind; drop this
+        // figure's own, never another figure's in-flight render.
+        ['d' + renderId, 'd' + renderId + '-quoted'].forEach((id) => document.getElementById(id)?.remove());
       }
     };
     for (const [index, figure] of figures.entries()) {
       await renderFigure(figure, index);
+    }
+    // One diagnostic for the served ELK patch: if the adapter laid out a
+    // flowchart or state diagram (the parser's two non-"other" kinds, both
+    // laid out by ELK) without routing through layoutElkGraph, it no longer matches
+    // the hook (see shared/server.js) and diagrams lose the spacing, reply
+    // routing and title bands.
+    if (elkLayout && figures.some((figure) => figure.querySelector('.diagram-canvas svg') && !['other', 'sequence'].includes(parseMermaidElements(figure.querySelector('.diagram-source').textContent).kind))) {
+      document.documentElement.dataset.elkHooked = String(elkHooked);
+      if (!elkHooked) console.warn('marginalia: the ELK layout hook did not run; diagrams use the adapter defaults.');
     }
     // Restored element drafts predate the async renders: mark them now.
     if (draft && draft.element && !draft.elementTarget) {

@@ -2944,7 +2944,9 @@ try {
 					try {
 						await widePage.setViewport({ width: 1100, height: 800 });
 						await widePage.goto(wideServer.url, { waitUntil: "domcontentloaded" });
-						await widePage.waitForFunction(() => document.querySelector(".diagram-canvas svg"), { polling: 100, timeout: 15_000 });
+						// Annotation runs in the same task that wires panning, after any
+						// second (compact) render, so it marks the canvas as ready.
+						await widePage.waitForFunction(() => document.querySelector('.diagram-canvas svg [data-el="node:w13"]'), { polling: 100, timeout: 15_000 });
 						const scrolled = await widePage.evaluate(() => {
 							const canvas = document.querySelector(".diagram-canvas");
 							if (canvas.scrollWidth <= canvas.clientWidth) return "no-overflow";

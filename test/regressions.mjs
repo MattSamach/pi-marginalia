@@ -229,6 +229,8 @@ try {
 		const roleSource = "flowchart LR\n  db[(Orders)]:::store --> api[Svc]:::service\n  classDef mine fill:#fff\n  x[X]:::mine\n  class api,db gate";
 		assert.deepEqual([...collectDiagramRoles(roleSource)].sort(), ["gate", "service", "store"], "Role collection reads ::: shorthand and class statements, and skips author-defined classes.");
 		assert.deepEqual(unknownDiagramRoles("flowchart LR\n  a[A]:::bogus"), ["bogus"], "An undefined non-vocabulary tag is unknown.");
+		assert.deepEqual(unknownDiagramRoles("flowchart LR\n  a[A (unchanged)]:::unchanged"), [], "unchanged is a neutral alias, accepted and unstyled.");
+		assert.deepEqual([...collectDiagramRoles("flowchart LR\n  a[A]:::unchanged")], [], "Neutral aliases collect no styling.");
 		assert.deepEqual(unknownDiagramRoles("flowchart LR\n  a[A]:::mine\n  classDef mine fill:#eee"), [], "An author-defined class is never unknown.");
 		assert.ok(roleCssVariables("iris", "dark").includes("--diagram-role-store-fill:"), "The palette emits custom properties per role.");
 		assert.throws(

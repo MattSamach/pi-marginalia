@@ -16,6 +16,12 @@ export const DIAGRAM_ROLE_GROUPS = {
 	change: ["new", "changed", "removed"],
 };
 
+// Roles that are valid to write but render neutral, exactly like an untagged
+// element. "unchanged" exists because the change-map labels are (new),
+// (changed) and (unchanged) — a vocabulary that names two of the three as
+// roles invites the third.
+export const DIAGRAM_NEUTRAL_ROLES = ["unchanged"];
+
 export const DIAGRAM_ROLES = Object.values(DIAGRAM_ROLE_GROUPS).flat();
 
 // Concrete hex per theme x scheme x role. fill carries the label ink, stroke
@@ -85,13 +91,16 @@ export function collectDiagramRoles(source) {
 	return new Set([...referenced].filter((name) => !defined.has(name) && DIAGRAM_ROLES.includes(name)));
 }
 
+/** Every name an author may tag: palette roles plus the neutral aliases. */
+export const DIAGRAM_VOCABULARY = [...DIAGRAM_ROLES, ...DIAGRAM_NEUTRAL_ROLES];
+
 /** Referenced class names that are neither author-defined nor vocabulary roles. */
 export function unknownDiagramRoles(source) {
 	const { referenced, defined } = collectRoleRefs(source);
-	return [...referenced].filter((name) => !defined.has(name) && !DIAGRAM_ROLES.includes(name));
+	return [...referenced].filter((name) => !defined.has(name) && !DIAGRAM_VOCABULARY.includes(name));
 }
 
 /** The teaching half of an unknown-role rejection. */
 export function roleHint() {
-	return `roles: ${Object.entries(DIAGRAM_ROLE_GROUPS).map(([group, roles]) => `${group}: ${roles.join(", ")}`).join("; ")} — or define your own classDef of that name`;
+	return `roles: ${Object.entries(DIAGRAM_ROLE_GROUPS).map(([group, roles]) => `${group}: ${roles.join(", ")}`).join("; ")}; neutral: ${DIAGRAM_NEUTRAL_ROLES.join(", ")} — or define your own classDef of that name`;
 }

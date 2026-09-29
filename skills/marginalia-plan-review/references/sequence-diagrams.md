@@ -46,4 +46,4 @@ sequenceDiagram
 
 Participants anchor as `node:<id>` and messages as `edge:<from>-><to>`. The nth message from one participant to the same other one is `edge:<from>-><to>#n`; the first has no suffix.
 - Participants cannot be tagged with roles: mermaid accepts no classes on sequence participants, so sequence diagrams stay neutral.
-- A protocol, login flow, or any request/response exchange over time is a sequence diagram even though sequences take no roles. Never trade the right type for taggability.
+- The message exchange of a protocol or login flow is a sequence diagram even though sequences take no roles — never trade the right type for taggability. Components and their standing relationships stay a flowchart; only the messages over time belong here.

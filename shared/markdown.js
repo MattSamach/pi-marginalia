@@ -9,6 +9,7 @@
 
 const TOKEN_OPEN = "\uE000";
 const TOKEN_CLOSE = "\uE001";
+const LIST_ITEM = /^(\s{0,12})([-*]|\d{1,3}[.)])\s+(.*)$/;
 
 function escapeHtml(value) {
 	return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -176,8 +177,8 @@ export function renderMarkdown(source, options) {
 			html.push("<table" + blockAttrs(tableStart, tableStart + 1 + bodyRows.length) + ">" + head + body + "</table>");
 			continue;
 		}
-		const listItem = /^(\s*)([-*]|\d{1,3}[.)])\s+(.*)$/.exec(line);
-		if (listItem && listItem[1].length <= 12) {
+		const listItem = LIST_ITEM.exec(line);
+		if (listItem) {
 			flushParagraph(lineNumber - 1);
 			const type = /[-*]/.test(listItem[2]) ? "ul" : "ol";
 			const indent = listItem[1].length;
@@ -212,6 +213,15 @@ export function renderMarkdown(source, options) {
 		}
 		if (!line.trim()) {
 			flushParagraph(lineNumber - 1);
+			// Blank-separated items belong to the same list; other blocks end it.
+			if (listStack.length) {
+				let next = index + 1;
+				while (next < lines.length && !lines[next].trim()) next++;
+				if (next < lines.length && LIST_ITEM.test(lines[next])) {
+					index = next - 1;
+					continue;
+				}
+			}
 			flushList();
 			continue;
 		}

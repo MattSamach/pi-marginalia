@@ -1247,7 +1247,7 @@
     textarea.value = '';
     composer.querySelector('[data-selection-add]').disabled = true;
     window.getSelection()?.removeAllRanges();
-    textarea.focus();
+    textarea.focus({ preventScroll: true });
     saveSelectionDraft('');
     syncDraftDot();
     setStatus('Comment on ' + draft.highlight + '.');
@@ -1405,7 +1405,7 @@
   };
   // Plan documents anchor on rendered markdown blocks instead of diff rows;
   // each block carries its absolute source-line range.
-  const planBlockAt = (section, line) => [...section.querySelectorAll('[data-md-line]')].find((block) => Number(block.dataset.mdLine) <= line && line <= Number(block.dataset.mdEnd));
+  const planBlockAt = (section, line) => anchorTargets(section, 'new', line, line)[0];
   // Rail alignment: every card with a resolvable anchor sits beside the
   // content it annotates, GitHub-review style, in code mode and plan mode
   // alike. The pass positions cards absolutely inside the relative rail —
@@ -1616,8 +1616,11 @@
   };
   const closestBlock = (node) => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('[data-md-line]');
   const selectedBlocks = (range) => {
-    const startBlock = closestBlock(range.startContainer);
-    const endBlock = closestBlock(range.endContainer);
+    // Range endpoints can sit between spans or just after a trailing newline.
+    const segments = rangeSegments(range).filter(({ node, start, end }) => node.data.slice(start, end).trim());
+    if (!segments.length) return undefined;
+    const startBlock = closestBlock(segments[0].node);
+    const endBlock = closestBlock(segments[segments.length - 1].node);
     const startSection = startBlock?.closest('[data-review-file]');
     const endSection = endBlock?.closest('[data-review-file]');
     if (!startBlock || !endBlock || !startSection || startSection !== endSection) return undefined;
@@ -1707,7 +1710,7 @@
     textarea.value = '';
     composer.querySelector('[data-selection-add]').disabled = true;
     selection.removeAllRanges();
-    textarea.focus();
+    textarea.focus({ preventScroll: true });
     saveSelectionDraft('');
     syncDraftDot();
     setStatus(planMode ? 'Add feedback for the highlighted plan text.' : 'Add feedback for the highlighted diff.');
@@ -2024,7 +2027,7 @@
     row.className = 'composer-actions';
     row.append(cancel, save);
     entry.append(author, textarea, row);
-    if (focus) textarea.focus();
+    if (focus) textarea.focus({ preventScroll: true });
     scheduleRailLayout();
   };
   const threadHost = (thread) => {
@@ -2349,7 +2352,7 @@
       composer.append(affordance, textarea, sendRow);
       detail.append(composer);
       if (hadFocus) {
-        textarea.focus();
+        textarea.focus({ preventScroll: true });
         try { textarea.setSelectionRange(previousSelection[0], previousSelection[1]); } catch {}
       }
     }
@@ -2751,7 +2754,11 @@
   // The lines a note's anchor names: rendered blocks in plan mode, diff rows
   // in code mode (side-aware).
   const anchorTargets = (section, side, start, end) => {
-    if (planMode) return [...section.querySelectorAll('[data-md-line]')].filter((block) => Number(block.dataset.mdEnd) >= start && Number(block.dataset.mdLine) <= end);
+    if (planMode) {
+      const blocks = [...section.querySelectorAll('[data-md-line]')].filter((block) => Number(block.dataset.mdEnd) >= start && Number(block.dataset.mdLine) <= end);
+      // Prefer precise code-line anchors over their enclosing fence.
+      return blocks.filter((block, index) => !blocks[index + 1] || !block.contains(blocks[index + 1]));
+    }
     const key = side === 'old' ? ['oldLine'] : side === 'new' ? ['newLine'] : ['oldLine', 'newLine'];
     return [...section.querySelectorAll('tr.diff-line')].filter((row) => key.some((name) => {
       const value = Number(row.dataset[name]);

@@ -1,7 +1,7 @@
 // Minimal sanitizing markdown renderer for review bodies and plan documents.
 // Security model: every character of input is HTML-escaped before any
 // transformation, and the output vocabulary is a fixed whitelist (p, br, ul,
-// ol, li, strong, em, code, pre, a, h1-h6, blockquote, hr, table, thead,
+// ol, li, strong, em, code, pre, span, a, h1-h6, blockquote, hr, table, thead,
 // tbody, tr, th, td). Raw HTML never passes through; links allow only
 // http(s) and always carry rel="noopener noreferrer". This file is also
 // served verbatim to the browser with the export keyword stripped, so it must
@@ -86,6 +86,12 @@ export function renderMarkdown(source, options) {
 		if (paragraph.length) html.push("<p" + blockAttrs(paragraphStart, endLine) + ">" + paragraph.join("<br>") + "</p>");
 		paragraph = [];
 	};
+	const renderCode = (content, start, end) => {
+		const body = content.map((line, index) => sourceLines
+			? "<span" + blockAttrs(start + index + 1) + ">" + line + "</span>"
+			: line).join("\n");
+		return "<pre" + blockAttrs(start, end) + "><code>" + body + "</code></pre>";
+	};
 	const renderList = (node) => "<" + node.type + ">" + node.items.map((item) => "<li" + blockAttrs(item.line, item.endLine) + ">" + item.content + item.children.map(renderList).join("") + "</li>").join("") + "</" + node.type + ">";
 	const flushList = () => {
 		if (listStack.length) html.push(renderList(listStack[0]));
@@ -102,7 +108,7 @@ export function renderMarkdown(source, options) {
 					// visible fallback when rendering fails.
 					html.push("<figure class=\"diagram-block\" data-diagram" + blockAttrs(fenceStart, lineNumber) + "><div class=\"diagram-error\" hidden></div><pre class=\"diagram-source\" hidden><code>" + fence.join("\n") + "</code></pre><div class=\"diagram-canvas\" data-diagram-canvas></div></figure>");
 				} else {
-					html.push("<pre" + blockAttrs(fenceStart, lineNumber) + "><code>" + fence.join("\n") + "</code></pre>");
+					html.push(renderCode(fence, fenceStart, lineNumber));
 				}
 				fence = undefined;
 			} else fence.push(line);
@@ -245,6 +251,6 @@ export function renderMarkdown(source, options) {
 	flushParagraph(lines.length);
 	flushList();
 	// An unterminated fence still renders as code rather than vanishing.
-	if (fence) html.push("<pre" + blockAttrs(fenceStart, lines.length) + "><code>" + fence.join("\n") + "</code></pre>");
+	if (fence) html.push(renderCode(fence, fenceStart, lines.length));
 	return html.join("");
 }

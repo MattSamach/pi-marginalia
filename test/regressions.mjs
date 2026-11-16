@@ -1564,7 +1564,7 @@ try {
 	);
 	assert.equal(
 		renderMarkdown("# H\n\npara\ntwo\n\n- a\n  - b\n\n```\ncode\n```", { sourceLines: true }),
-		'<h1 data-md-line="1" data-md-end="1">H</h1><p data-md-line="3" data-md-end="4">para<br>two</p><ul><li data-md-line="6" data-md-end="6">a<ul><li data-md-line="7" data-md-end="7">b</li></ul></li></ul><pre data-md-line="9" data-md-end="11"><code>code</code></pre>',
+		'<h1 data-md-line="1" data-md-end="1">H</h1><p data-md-line="3" data-md-end="4">para<br>two</p><ul><li data-md-line="6" data-md-end="6">a<ul><li data-md-line="7" data-md-end="7">b</li></ul></li></ul><pre data-md-line="9" data-md-end="11"><code><span data-md-line="10" data-md-end="10">code</span></code></pre>',
 		"sourceLines maps every block back to its 1-based source range.",
 	);
 	assert.doesNotMatch(renderMarkdown("# H\n\n- a"), /data-md-line/, "Without the option no source attributes are emitted — thread bodies stay unchanged.");
@@ -2705,6 +2705,46 @@ try {
 				await ctxServer.close();
 			}
 
+			// Selecting a diff line far down the page opens its comment box in place:
+			// the page never jumps to the rail's top and back while the user types.
+			const scrollRepo = await mkdtemp(join(tmpdir(), "marginalia-browser-scroll-"));
+			await git(scrollRepo, "init", "-q");
+			await git(scrollRepo, "config", "user.email", "test@example.com");
+			await git(scrollRepo, "config", "user.name", "Test");
+			await writeFile(join(scrollRepo, "long.txt"), "seed\n");
+			await git(scrollRepo, "add", "long.txt");
+			await git(scrollRepo, "commit", "-qm", "base");
+			await writeFile(join(scrollRepo, "long.txt"), Array.from({ length: 300 }, (_, index) => "long line " + (index + 1)).join("\n") + "\n");
+			const scrollServer = await createCodeReviewServer(applyReviewManifest(await collectReviewSnapshot(scrollRepo), { files: [] }), {
+				onThreadPost: async () => {},
+				onFinishPass: async () => ({ stale: false }),
+			});
+			const scrollPage = await browser.newPage();
+			try {
+				await scrollPage.setViewport({ width: 1400, height: 800 });
+				await scrollPage.goto(scrollServer.url, { waitUntil: "domcontentloaded" });
+				await scrollPage.evaluate(() => document.querySelector('.diff-line[data-new-line="200"]').scrollIntoView({ block: "center" }));
+				const frames = () => scrollPage.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+				await frames();
+				const beforeScroll = await scrollPage.evaluate(() => window.scrollY);
+				assert.ok(beforeScroll > 1000, "The fixture starts far down the page.");
+				const cell = await scrollPage.$eval('.diff-line[data-new-line="200"] .diff-code', (code) => { const box = code.getBoundingClientRect(); return { x: box.left + 4, y: box.top + box.height / 2 }; });
+				await scrollPage.mouse.move(cell.x, cell.y);
+				await scrollPage.mouse.down();
+				await scrollPage.mouse.move(cell.x + 60, cell.y, { steps: 5 });
+				await scrollPage.mouse.up();
+				await scrollPage.waitForFunction(() => document.activeElement?.matches("[data-selection-feedback]"));
+				await frames();
+				assert.ok(Math.abs(await scrollPage.evaluate(() => window.scrollY) - beforeScroll) < 2, "Selecting a diff line does not scroll the page.");
+				await scrollPage.keyboard.type("Feedback typed in place.");
+				await frames();
+				assert.ok(Math.abs(await scrollPage.evaluate(() => window.scrollY) - beforeScroll) < 2, "Typing in the new comment box does not scroll the page.");
+			} finally {
+				await scrollPage.close();
+				await scrollServer.close();
+				await rm(scrollRepo, { recursive: true, force: true });
+			}
+
 			// Plan review: rendered markdown sections host selection threads anchored
 			// on absolute source lines, section commentary replies, and block nav.
 			const planPosts = [];
@@ -2870,6 +2910,80 @@ try {
 				await planPage.close();
 			} finally {
 				await planServer.close();
+			}
+
+			const engineCode = "type EngineAssessment = {\n  findings: Finding[];\n  review_decision: 'pass' | 'escalate';\n  edits: ProposedEdit[];\n  after_text: TextSnapshot | null;\n};";
+			const codeMarkdown = "## Public success contract\n\n```ts\n" + Array.from({ length: 65 }, (_, index) => "type Earlier" + index + " = { id: string };").join("\n") + "\n\n" + engineCode + "\n\ntype CompletedResult = { assessment: EngineAssessment };\n```\n\n" + Array(40).fill("After the code block.").join("\n\n");
+			const engineStart = codeMarkdown.split("\n").indexOf("type EngineAssessment = {") + 1;
+			const engineEnd = engineStart + engineCode.split("\n").length - 1;
+			const codePosts = [];
+			const codePlan = buildPlanReview({ title: "Code selection", markdown: codeMarkdown, sections: [{ heading: "Public success contract", commentary: [{ id: "engine", body: "Check this type.", startLine: engineStart, endLine: engineEnd }] }] });
+			const codeServer = await createCodeReviewServer(codePlan, {
+				onThreadPost: async (_round, thread) => { codePosts.push(thread); },
+				onFinishPass: async () => ({ stale: false }),
+			});
+			const codePage = await browser.newPage();
+			try {
+				await codePage.setViewport({ width: 1400, height: 850 });
+				await codePage.goto(codeServer.url, { waitUntil: "domcontentloaded" });
+				for (const boundaryEndpoints of [false, true]) {
+					const beforeSelection = await codePage.evaluate(async (boundaryEndpoints) => {
+						await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+						const code = document.querySelector(".plan-doc pre code");
+						const start = code.textContent.indexOf("type EngineAssessment");
+						const end = code.textContent.indexOf("\n};", start) + 3;
+						const pointAt = (offset) => {
+							const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+							let node;
+							while ((node = walker.nextNode())) {
+								if (offset <= node.length) return [node, offset];
+								offset -= node.length;
+							}
+							throw new Error("Offset outside code");
+						};
+						const range = document.createRange();
+						if (boundaryEndpoints) {
+							const first = [...code.children].find((line) => line.textContent === "type EngineAssessment = {");
+							const last = first.nextElementSibling.nextElementSibling.nextElementSibling.nextElementSibling.nextElementSibling;
+							range.setStartBefore(first);
+							range.setEndAfter(last);
+						} else {
+							range.setStart(...pointAt(start));
+							range.setEnd(...pointAt(end));
+						}
+						window.scrollBy(0, range.getBoundingClientRect().top - 200);
+						const selection = window.getSelection();
+						selection.removeAllRanges();
+						selection.addRange(range);
+						const before = { scroll: window.scrollY, top: range.getBoundingClientRect().top };
+						code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+						return before;
+					}, boundaryEndpoints);
+					await codePage.waitForFunction(() => document.activeElement.matches("[data-selection-feedback]"));
+					await codePage.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+					const afterSelection = await codePage.$eval("[data-selection-composer]", (composer) => ({ scroll: window.scrollY, top: composer.getBoundingClientRect().top, start: Number(composer.dataset.anchorStart), end: Number(composer.dataset.anchorEnd), quote: composer.querySelector("[data-selection-quote]").textContent }));
+					assert.ok(Math.abs(afterSelection.scroll - beforeSelection.scroll) < 2, "Selecting low in a code block never scrolls back to its top.");
+					assert.ok(Math.abs(afterSelection.top - beforeSelection.top) < 2, "The composer aligns with the selected code lines.");
+					assert.deepEqual([afterSelection.start, afterSelection.end, afterSelection.quote], [engineStart, engineEnd, engineCode], "Text-node and element-boundary selections both anchor on the selected source lines.");
+					if (!boundaryEndpoints) await codePage.$eval("[data-selection-cancel]", (button) => button.click());
+				}
+				await codePage.type("[data-selection-feedback]", "Check these fields.");
+				await codePage.$eval("[data-selection-add]", (button) => button.click());
+				await codePage.waitForFunction(() => document.querySelector("[data-selection-composer]").hidden);
+				assert.deepEqual([codePosts[0].newStart, codePosts[0].newEnd], [engineStart, engineEnd], "Posted code comments retain the precise source range.");
+				await codePage.$eval(".agent-note-anchor", (button) => button.click());
+				await codePage.waitForFunction((line) => {
+					const target = document.querySelector(".plan-doc .nav-cursor");
+					return target?.dataset.mdLine === String(line) && target.getBoundingClientRect().top >= 80 && target.getBoundingClientRect().top <= 160;
+				}, {}, engineStart);
+				await codePage.goto(`${new URL(codeServer.url).origin}/#loc=public-success-contract:L${engineStart}`, { waitUntil: "domcontentloaded" });
+				await codePage.waitForFunction((line) => {
+					const target = document.querySelector(".plan-doc .nav-cursor");
+					return target?.tagName === "SPAN" && target.dataset.mdLine === String(line) && target.getBoundingClientRect().top >= 100 && target.getBoundingClientRect().bottom <= window.innerHeight - 100;
+				}, {}, engineStart);
+			} finally {
+				await codePage.close();
+				await codeServer.close();
 			}
 
 			// Diagram review end to end: the vendored renderer serves, mermaid

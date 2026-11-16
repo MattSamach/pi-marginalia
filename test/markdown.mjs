@@ -17,4 +17,17 @@ for (const block of ["## Heading", "---", "> Quote", "```\ncode\n```", "| A |\n|
 	assert.equal(prefix, "<ol><li>first</li></ol>" + renderMarkdown(block), "A block after a blank line ends the list: " + block);
 }
 
-console.log("Markdown list regressions passed.");
+assert.equal(
+	renderMarkdown("```ts\r\nx < y\r\n\r\nz\r\n```", { sourceLines: true, lineOffset: 5 }),
+	'<pre data-md-line="6" data-md-end="10"><code><span data-md-line="7" data-md-end="7">x &lt; y</span>\n<span data-md-line="8" data-md-end="8"></span>\n<span data-md-line="9" data-md-end="9">z</span></code></pre>',
+	"Fenced code retains whitespace and escaping while mapping each content line to its source.",
+);
+assert.equal(
+	renderMarkdown("```\na\nb", { sourceLines: true }),
+	'<pre data-md-line="1" data-md-end="3"><code><span data-md-line="2" data-md-end="2">a</span>\n<span data-md-line="3" data-md-end="3">b</span></code></pre>',
+	"Unterminated code fences also have per-line anchors.",
+);
+assert.equal(renderMarkdown("```\nx < y\n```"), "<pre><code>x &lt; y</code></pre>", "Thread code blocks remain plain when source mapping is disabled.");
+assert.doesNotMatch(renderMarkdown("```mermaid\nflowchart LR\n  a --> b\n```", { sourceLines: true }), /<span/, "Mermaid source stays intact for diagram rendering.");
+
+console.log("Markdown regressions passed.");

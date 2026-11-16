@@ -1,21 +1,31 @@
 ---
 name: marginalia-code-review
-description: Open a Pi-led browser review of the current uncommitted Git changes. Use when the user asks to review, walk through, or explain the agent's current code changes interactively.
+description: Open a Pi-led browser review of uncommitted Git changes or an explicit pair of commits. Use when the user asks to review, walk through, or explain code changes interactively.
 ---
 
 # Guided code review
 
 Use `open_code_review` to present the current changes in the order that makes them fastest to understand. By default it reviews the session working directory’s repository; pass `repoPath` to review a different repository (any directory inside it works). Every round of one session must use the same repository.
 
+## Committed ranges
+
+To review existing commits, supply both `baseRef` and `headRef` to `open_code_review`. Refs resolve to pinned SHAs; the comparison is base-to-head, not merge-base-to-head. Include the normal overview and ordered file manifest. Use `proposedApprovalNote`, not `proposedCommitMessage`, for this mode.
+
+- Honor the user's requested commit range; do not split or rewrite its history to fit worktree commit-unit guidance. Dirty files, the index, and untracked files are excluded. Never checkout, reset, stage, revert, or uncommit anything merely to prepare a historical review.
+- Ground commentary and replies in the exact committed diff. Read old/new source with `git show <base-sha>:<old-path>` and `git show <head-sha>:<path>` rather than assuming current worktree files match those source lines.
+- Repeat both refs on subsequent rounds. Keep the base SHA fixed; advance the head only to separately authorized, committed fixes. Open a fresh session to change the base or switch to worktree review.
+- Approval arrives as `commit-review-approved` with an approval note. It approves the existing commits only and does not authorize creating, amending, rewriting, or pushing commits. Do not apply the worktree approval-and-commit loop to it.
+- Worktree drift checks do not apply to these immutable ranges. Git 2.43+ is required to read diff attributes from the target commit.
+
 ## Commit-sized review units
 
-Treat one browser review as one logical commit candidate: a cohesive behavior change plus the tests, documentation, and supporting refactors required to leave the repository valid. Review foundational units before code that depends on them. Do not split purely by file count, and do not combine unrelated changes merely because they were implemented together.
+For worktree changes, treat one browser review as one logical commit candidate: a cohesive behavior change plus the tests, documentation, and supporting refactors required to leave the repository valid. Review foundational units before code that depends on them. Do not split purely by file count, and do not combine unrelated changes merely because they were implemented together.
 
 The complete worktree snapshot is reviewed, so it must represent only that logical unit. If it mixes multiple units or unrelated user changes, stop and agree on a safe split before reviewing; never silently stash, revert, commit, or absorb changes that are not part of the unit.
 
 ## Workflow
 
-1. Inspect the complete staged, unstaged, and untracked change set against `HEAD`.
+1. Inspect the selected committed range, or the complete staged, unstaged, and untracked change set against `HEAD` when no refs are supplied.
 2. Confirm the snapshot is one coherent, independently valid commit unit. If not, split it safely before opening the review.
 3. Run meaningful validation for that unit.
 4. Choose a logical file order based on behavior and dependencies, not lexical path order.
@@ -102,6 +112,8 @@ A review session is an ordered sequence of immutable rounds served in one browse
 - Between the pass message and opening the next round, the current round is still live — you may still answer straggler threads there.
 
 ## Approval and commit loop
+
+This commit loop applies to worktree reviews only. A `commit-review-approved` message for an existing committed range is review sign-off, never commit authorization.
 
 - The browser has an explicit **Approve** flow: it unlocks only when every thread is resolved, shows the reviewer an editable commit message (prefilled from `proposedCommitMessage`, falling back to the review title — supply a good proposal when opening the review), re-checks worktree drift, and on confirmation closes the session terminally. You receive a `<code-review-approved>` message carrying the reviewer's final commit message and a `stale` flag if the tree had drifted from the approved snapshot.
 - Browser approval is the reviewer's sign-off on the unit as reviewed. Whether that also authorizes a commit is governed by the commit policy of your session — follow it; where the reviewer's approval satisfies that policy, commit using their message. When committing, prefer the reviewer's edited commit message verbatim: it is their reviewed statement of the change.

@@ -230,9 +230,21 @@ function parseCollectedPatch(data, limits, totals = {}) {
 	};
 }
 
-async function collectTrackedPatch(root, file, limits, signal) {
+async function collectTrackedPatch(root, file, limits, signal, commitRange) {
 	const pathspecs = file.oldPath ? [file.oldPath, file.path] : [file.path];
-	return streamGit(root, ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color", "--find-renames", "--unified=3", "HEAD", "--", ...pathspecs], limits.perFilePatchBytes + 1, signal);
+	const refs = commitRange ? [commitRange.base, commitRange.head] : ["HEAD"];
+	const source = commitRange ? [`--attr-source=${commitRange.head}`] : [];
+	return streamGit(root, [...source, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--unified=3", ...(commitRange ? ["--full-index"] : []), ...refs, "--", ...pathspecs], limits.perFilePatchBytes + 1, signal);
+}
+
+async function resolveCommit(root, ref, label, signal) {
+	if (typeof ref !== "string" || !ref.trim() || ref.length > 4096) throw new Error(`${label} must name a single commit.`);
+	try {
+		return (await git(root, ["rev-parse", "--verify", "--end-of-options", `${ref.trim()}^{commit}`], signal)).trim();
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		throw new Error(`${label} does not resolve to a commit: ${ref}`);
+	}
 }
 
 async function fingerprintWorktreePath(root, path, signal) {
@@ -255,7 +267,7 @@ async function fingerprintWorktreePath(root, path, signal) {
 	return { kind: `special:${fileStat.mode}:${fileStat.size}`, sha256: "" };
 }
 
-/** Collect a frozen HEAD-to-worktree snapshot, including staged, unstaged, and untracked files. */
+/** Collect a frozen worktree snapshot, or an immutable two-commit comparison when both refs are supplied. */
 export async function collectReviewSnapshot(cwd, options = {}) {
 	const limits = { ...REVIEW_LIMITS, ...(options.limits ?? {}) };
 	let root;
@@ -265,19 +277,29 @@ export async function collectReviewSnapshot(cwd, options = {}) {
 		throw new Error("Code review requires a Git repository.");
 	}
 	let head;
-	try {
-		head = (await git(root, ["rev-parse", "HEAD"], options.signal)).trim();
-	} catch {
-		throw new Error("Code review requires a repository with an existing HEAD commit.");
+	let commitRange;
+	if (options.baseRef !== undefined || options.headRef !== undefined) {
+		if (options.baseRef === undefined || options.headRef === undefined) throw new Error("Both baseRef and headRef are required for a commit-range review.");
+		const base = await resolveCommit(root, options.baseRef, "baseRef", options.signal);
+		head = await resolveCommit(root, options.headRef, "headRef", options.signal);
+		commitRange = { base, head };
+	} else {
+		try {
+			head = (await git(root, ["rev-parse", "HEAD"], options.signal)).trim();
+		} catch {
+			throw new Error("Code review requires a repository with an existing HEAD commit.");
+		}
 	}
-	const tracked = parseNameStatus(await git(root, ["diff", "--name-status", "-z", "--find-renames", "HEAD", "--"], options.signal));
+	const refs = commitRange ? [commitRange.base, commitRange.head] : ["HEAD"];
+	const source = commitRange ? [`--attr-source=${commitRange.head}`] : [];
+	const tracked = parseNameStatus(await git(root, [...source, "diff", "--no-ext-diff", "--no-textconv", "--name-status", "-z", "--find-renames", ...refs, "--"], options.signal));
 	const trackedPaths = new Set(tracked.flatMap((file) => [file.path, file.oldPath].filter(Boolean)));
-	const untrackedPaths = (await git(root, ["ls-files", "--others", "--exclude-standard", "-z"], options.signal))
+	const untrackedPaths = commitRange ? [] : (await git(root, ["ls-files", "--others", "--exclude-standard", "-z"], options.signal))
 		.split("\0").filter(Boolean).filter((path) => !trackedPaths.has(path));
 	const records = [...tracked, ...untrackedPaths.map((path) => ({ path, status: "untracked", statusCode: "?" }))];
-	if (!records.length) throw new Error("No staged, unstaged, or untracked changes found against HEAD.");
+	if (!records.length) throw new Error(commitRange ? `No changes found between commits ${commitRange.base} and ${commitRange.head}.` : "No staged, unstaged, or untracked changes found against HEAD.");
 
-	const fingerprint = createHash("sha256").update(`head\0${head}\0`);
+	const fingerprint = createHash("sha256").update(commitRange ? `commits\0${root}\0${commitRange.base}\0${commitRange.head}\0` : `head\0${head}\0`);
 	const files = [];
 	for (const record of records) {
 		let binary = false;
@@ -305,23 +327,25 @@ export async function collectReviewSnapshot(cwd, options = {}) {
 				parsed = parseCollectedPatch(patchData, limits, synthetic);
 			}
 		} else {
-			const patchData = await collectTrackedPatch(root, record, limits, options.signal);
+			const patchData = await collectTrackedPatch(root, record, limits, options.signal, commitRange);
 			const patchSample = patchData.sample.toString("utf8");
 			binary = /(?:^|\n)Binary files .* differ(?:\n|$)/.test(patchSample) || /(?:^|\n)GIT binary patch(?:\n|$)/.test(patchSample);
 			fingerprint.update(`file\0${record.statusCode}\0${record.oldPath ?? ""}\0${record.path}\0patch\0`).update(Buffer.from(patchData.sha256, "hex"));
 			contentSha256 = patchData.sha256;
 			if (binary) {
-				const worktree = await fingerprintWorktreePath(root, record.path, options.signal);
-				fingerprint.update(`\0worktree\0${worktree.kind}\0`).update(worktree.sha256 ? Buffer.from(worktree.sha256, "hex") : Buffer.alloc(0));
-				// The textual diff of a binary change is a constant marker; only the
-				// worktree hash tracks the actual content.
-				contentSha256 = `${patchData.sha256}:${worktree.kind}:${worktree.sha256}`;
+				if (!commitRange) {
+					const worktree = await fingerprintWorktreePath(root, record.path, options.signal);
+					fingerprint.update(`\0worktree\0${worktree.kind}\0`).update(worktree.sha256 ? Buffer.from(worktree.sha256, "hex") : Buffer.alloc(0));
+					// A binary worktree diff needs the actual content hash; committed
+					// diffs already include full blob IDs for both sides.
+					contentSha256 = `${patchData.sha256}:${worktree.kind}:${worktree.sha256}`;
+				}
 				parsed = { lines: [], truncated: false, patchBytes: patchData.totalBytes, totalDiffLines: 0, renderedBytes: 0 };
 			} else parsed = parseCollectedPatch(patchData, limits);
 		}
 		files.push({ ...record, binary, omitted: false, contentSha256, ...parsed });
 	}
-	return { root, head, id: fingerprint.digest("hex"), files };
+	return { root, head, ...(commitRange ? { commitRange } : {}), id: fingerprint.digest("hex"), files };
 }
 
 /** Bounds for lazily revealed unchanged context around diff hunks. */
@@ -398,8 +422,8 @@ export async function readHeadBlobLines(root, head, path, options = {}) {
 }
 
 /**
- * Context reader serving gap lines from blobs pinned at each round's HEAD
- * commit. Blobs are immutable, so the bounded cache can never go stale;
+ * Context reader serving gap lines from each round's old-side commit
+ * (the base of a commit range, or HEAD for a worktree review). Blobs are immutable, so the bounded cache can never go stale;
  * renamed files resolve through their HEAD-side path. Concurrent requests for
  * one blob share a single read; failed reads are not cached so a later click
  * retries.
@@ -408,10 +432,11 @@ export function createPinnedBlobContextReader(cacheSize = 8) {
 	const cache = new Map();
 	return async (review, file, oldStart, oldEnd) => {
 		const blobPath = file.oldPath ?? file.path;
-		const key = `${review.head}:${blobPath}`;
+		const base = review.commitRange?.base ?? review.head;
+		const key = `${review.root}:${base}:${blobPath}`;
 		let pending = cache.get(key);
 		if (!pending) {
-			pending = readHeadBlobLines(review.root, review.head, blobPath);
+			pending = readHeadBlobLines(review.root, base, blobPath);
 			if (cache.size >= cacheSize) cache.delete(cache.keys().next().value);
 			cache.set(key, pending);
 		}
@@ -630,8 +655,11 @@ export function applyReviewManifest(snapshot, manifest = {}, limits = REVIEW_LIM
 		}
 	}
 	if (anchorFailures.length) throw new Error(anchorFailures.join("\n"));
-	const title = manifest.title === undefined ? "Code review" : assertString(manifest.title, "Review title");
-	const proposedCommitMessage = manifest.proposedCommitMessage === undefined ? undefined : assertString(manifest.proposedCommitMessage, "Proposed commit message");
+	const title = manifest.title === undefined ? (snapshot.commitRange ? "Commit review" : "Code review") : assertString(manifest.title, "Review title");
+	if (snapshot.commitRange && manifest.proposedCommitMessage !== undefined) throw new Error("Commit-range reviews use proposedApprovalNote, not proposedCommitMessage.");
+	if (!snapshot.commitRange && manifest.proposedApprovalNote !== undefined) throw new Error("Worktree reviews use proposedCommitMessage, not proposedApprovalNote.");
+	const proposal = snapshot.commitRange ? manifest.proposedApprovalNote : manifest.proposedCommitMessage;
+	const proposedCommitMessage = proposal === undefined ? undefined : assertString(proposal, snapshot.commitRange ? "Proposed approval note" : "Proposed commit message");
 	return { ...snapshot, title, overview, proposedCommitMessage, files: capped, renderedBytes: totalBytes, renderedLines: totalLines };
 }
 

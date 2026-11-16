@@ -232,7 +232,7 @@ export async function createCodeReviewServer(review, options) {
 		// Drift while Pi is revising is expected, not signal; the check resumes
 		// with the phase. force serves the approval flow, which re-checks after
 		// locking the phase.
-		if (!options.staleness || closed || (!force && phase !== "reviewing")) return stale;
+		if (current().review.commitRange || !options.staleness || closed || (!force && phase !== "reviewing")) return stale;
 		if (staleCheckInFlight) {
 			// Periodic ticks skip while a probe runs; the approval path needs the
 			// freshest verdict, so it waits the in-flight probe out instead of
@@ -736,7 +736,7 @@ export async function createCodeReviewServer(review, options) {
 				}
 				const message = typeof body?.message === "string" && body.message.trim() && body.message.length <= THREAD_LIMITS.maxFieldLength ? body.message.trim() : undefined;
 				if (message === undefined) {
-					writeText(res, 400, "Approval requires a non-empty commit message.");
+					writeText(res, 400, current().review.kind === "plan" || current().review.commitRange ? "Approval requires a non-empty approval note." : "Approval requires a non-empty commit message.");
 					return;
 				}
 				const round = current();
@@ -852,6 +852,8 @@ export async function createCodeReviewServer(review, options) {
 				}
 				return { error: "unknown-round" };
 			}
+			if (nextReview.root !== active.review.root) return { error: "wrong-root" };
+			if (Boolean(nextReview.commitRange) !== Boolean(active.review.commitRange) || nextReview.commitRange?.base !== active.review.commitRange?.base) return { error: "wrong-comparison" };
 			// An identical snapshot has nothing to re-anchor: threads stay live in the
 			// existing round, so the response contract deliberately does not apply and
 			// any supplied responses are ignored in favor of in-place replies.
@@ -863,7 +865,6 @@ export async function createCodeReviewServer(review, options) {
 				resetStaleness();
 				return { identical: true, round: active.number };
 			}
-			if (nextReview.root !== active.review.root) return { error: "wrong-root" };
 			let carried;
 			try {
 				carried = buildCarriedThreads(threadResponses, active.store.list(), nextReview, active.number);

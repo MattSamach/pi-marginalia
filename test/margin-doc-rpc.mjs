@@ -4,7 +4,7 @@
 // (latest-response) variant is exercised for its graceful empty-branch path;
 // producing a real assistant message would require a model call.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -37,6 +37,29 @@ await writeFile(join(codeRepo, "app.txt"), "one\n");
 await sh("git init -q && git -c user.email=t@t -c user.name=t add -A && git -c user.email=t@t -c user.name=t commit -qm base");
 await writeFile(join(codeRepo, "app.txt"), "one\ntwo\n");
 
+// Capture tool definitions and injected messages without making model calls.
+const testExtension = join(root, "test-extension.ts");
+await writeFile(testExtension, `import marginalia from ${JSON.stringify(join(repo, "index.ts"))};
+export default function(pi) {
+  const tools = new Map();
+  const messages = [];
+  marginalia({ ...pi,
+    registerTool(tool) { tools.set(tool.name, tool); pi.registerTool(tool); },
+    sendUserMessage(message) { messages.push(message); },
+  });
+  pi.registerCommand('margin-test-tool', { description: 'Test the code review tool', handler: async (args, ctx) => {
+    try {
+      const result = await tools.get('open_code_review').execute('test-tool', JSON.parse(args), undefined, undefined, ctx);
+      ctx.ui.notify('TEST_TOOL ' + JSON.stringify(result.details), 'info');
+    } catch (error) {
+      ctx.ui.notify('TEST_TOOL_ERROR ' + error.message, 'error');
+    }
+  } });
+  pi.registerCommand('margin-test-messages', { description: 'Read captured review messages', handler: async (_args, ctx) => {
+    ctx.ui.notify('TEST_MESSAGES ' + JSON.stringify(messages), 'info');
+  } });
+}
+`);
 const child = spawn(join(repo, "node_modules", ".bin", "pi"), [
 	"--mode", "rpc",
 	"--no-session",
@@ -44,7 +67,7 @@ const child = spawn(join(repo, "node_modules", ".bin", "pi"), [
 	"--no-skills",
 	"--no-prompt-templates",
 	"--no-context-files",
-	"--extension", join(repo, "index.ts"),
+	"--extension", testExtension,
 ], {
 	cwd: root,
 	env: { ...process.env, CMUX_WORKSPACE_ID: "margin-doc-test", CMUX_BUNDLED_CLI_PATH: join(bin, "cmux"), PCR_OPEN_LOG: openLog },
@@ -155,6 +178,57 @@ try {
 	const codeHtml = await (await fetch(new URL(codeUrls[codeUrls.length - 1]).origin, { headers: { cookie: codeCookie } })).text();
 	assert.doesNotMatch(codeHtml, /<body[^>]*data-review-kind="plan"/, "The path form opens a code-mode session.");
 	assert.match(codeHtml, /app\.txt/, "The reviewed repo's changed file is served.");
+
+	// Commit ranges work in an off-project repository without checking out or
+	// staging its dirty worktree. Paths with spaces are quoted by the caller.
+	const base = execFileSync("git", ["-C", codeRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+	await sh("git add app.txt && git -c user.email=t@t -c user.name=t commit -qm feature");
+	const head = execFileSync("git", ["-C", codeRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+	await writeFile(join(codeRepo, "app.txt"), "dirty-not-in-range\n");
+	await command(`/margin-code --base ${base} --head ${head} "${codeRepo}"`);
+	await waitFor(async () => notifications.find((event) => event.message?.includes(`commits ${base.slice(0, 12)}..${head.slice(0, 12)}`)), "commit-range notice");
+	const rangeUrls = (await readFile(openLog, "utf8")).trim().split("\n").filter(Boolean);
+	const rangeUrl = rangeUrls.at(-1);
+	const rangeEntry = await fetch(rangeUrl, { redirect: "manual" });
+	const rangeCookie = (rangeEntry.headers.get("set-cookie") ?? "").split(";", 1)[0];
+	const rangeHtml = await (await fetch(new URL(rangeUrl).origin, { headers: { cookie: rangeCookie } })).text();
+	assert.match(rangeHtml, /<body[^>]*data-review-source="commits"/);
+	assert.ok(rangeHtml.includes(`${base} → ${head}`));
+	assert.match(rangeHtml, /<label class="approve-message-label">Approval note<textarea/);
+	assert.doesNotMatch(rangeHtml, /dirty-not-in-range/);
+	assert.equal(await readFile(join(codeRepo, "app.txt"), "utf8"), "dirty-not-in-range\n");
+	// The agent tool accepts the same range and emits non-commit approval messages.
+	await command("/margin-test-tool " + JSON.stringify({
+		repoPath: codeRepo, baseRef: base, headRef: head,
+		proposedApprovalNote: "Reviewed the existing commits.",
+		overview: { intent: "Review existing commits.", changes: ["Adds a second line.", "Excludes dirty files."], validation: ["Fixture content checked."] },
+		files: [{ path: "app.txt", summary: "Adds the second line." }],
+	}));
+	const toolNotice = await waitFor(async () => notifications.find((event) => event.message?.startsWith("TEST_TOOL ")), "tool result notice");
+	const toolResult = JSON.parse(toolNotice.message.slice("TEST_TOOL ".length));
+	assert.deepEqual(toolResult.commitRange, { base, head });
+	await command("/margin-test-tool " + JSON.stringify({ repoPath: codeRepo, previousRoundId: toolResult.snapshot, files: [] }));
+	await waitFor(async () => notifications.find((event) => event.message?.startsWith("TEST_TOOL_ERROR Commit-range reviews must repeat both")), "missing round refs notice");
+	const toolUrls = (await readFile(openLog, "utf8")).trim().split("\n").filter(Boolean);
+	const toolUrl = toolUrls.at(-1);
+	const toolEntry = await fetch(toolUrl, { redirect: "manual" });
+	const toolOrigin = new URL(toolUrl).origin;
+	const toolCookie = (toolEntry.headers.get("set-cookie") ?? "").split(";", 1)[0];
+	const toolHeaders = { cookie: toolCookie, origin: toolOrigin, "content-type": "application/json" };
+	const toolHtml = await (await fetch(toolOrigin, { headers: { cookie: toolCookie } })).text();
+	assert.match(toolHtml, /Reviewed the existing commits\./);
+	assert.equal((await fetch(`${toolOrigin}/__pi_code_review_finish__`, { method: "POST", headers: toolHeaders, body: "{}" })).status, 200);
+	assert.equal((await fetch(`${toolOrigin}/__pi_code_review_resume__`, { method: "POST", headers: toolHeaders, body: "{}" })).status, 200);
+	assert.equal((await fetch(`${toolOrigin}/__pi_code_review_approve__`, { method: "POST", headers: toolHeaders, body: JSON.stringify({ message: "Approved historical change." }) })).status, 200);
+	await command("/margin-test-messages");
+	const injected = await waitFor(async () => notifications.find((event) => event.message?.startsWith("TEST_MESSAGES ")), "review messages notice");
+	const messages = JSON.parse(injected.message.slice("TEST_MESSAGES ".length));
+	assert.ok(messages.some((message) => message.includes("<code-review-pass") && message.includes('comparison="commits"') && message.includes('stale="false"')));
+	assert.ok(messages.some((message) => message.includes("<commit-review-approved") && message.includes("<approval-note>")));
+	assert.ok(!messages.some((message) => message.includes("<code-review-approved") || message.includes("<commit-message>")));
+
+	await command(`/margin-code --base ${base} "${codeRepo}"`);
+	await waitFor(async () => notifications.find((event) => event.notifyType === "error" && event.message?.includes("Both --base and --head")), "incomplete-range error notice");
 
 	// A path outside any repository reports politely.
 	await command("/margin-code " + bin);

@@ -34,7 +34,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node ./test/markdown.mjs && node ./test/regressions.mjs && node ./test/margin-doc-rpc.mjs",
+    "test": "node ./test/markdown.mjs && node ./test/commit-range.mjs && node ./test/regressions.mjs && node ./test/margin-doc-rpc.mjs",
     "check": "npm run typecheck && npm test"
   },
   "peerDependencies": {

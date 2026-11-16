@@ -2874,7 +2874,7 @@
     const confirmButton = event.currentTarget;
     const message = approveMessage?.value.trim();
     if (!message) {
-      setStatus('Approval requires a commit message.', true);
+      setStatus(planMode || document.body.dataset.reviewSource === 'commits' ? 'Approval requires an approval note.' : 'Approval requires a commit message.', true);
       return;
     }
     confirmButton.disabled = true;

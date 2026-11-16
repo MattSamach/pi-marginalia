@@ -7,11 +7,13 @@ import { basename, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 import { applyReviewManifest, collectReviewSnapshot, computeWorktreeFingerprint, createPinnedBlobContextReader, currentSnapshotId, currentSnapshotProbe } from "./shared/git-review.js";
 import { createReviewMessageQueue } from "./shared/delivery-queue.js";
+import { parseCodeReviewArgs } from "./shared/review-args.js";
 import { formatReviewApprovedXml, formatReviewPassXml, formatThreadContextXml, formatThreadMessageXml } from "./shared/feedback.js";
 import { createCodeReviewServer } from "./shared/server.js";
 import { buildDiagramReview, buildPlanReview, resolvePlanResponses } from "./shared/plan-review.js";
 import { BOOT_HEAL_MAX_AGE_MS, deleteSession, isClaimed, listSessions, saveSession, sweepSessions } from "./shared/persistence.js";
 
+type CommitRange = { base: string; head: string };
 type ReviewThreadTurn = { author: "user" | "pi"; body: string; ts: number; seq?: number; delivered?: boolean };
 type ReviewThread = {
 	id: string;
@@ -114,7 +116,10 @@ type OpenDiagramReviewInput = Static<typeof openDiagramReviewSchema>;
 
 const openCodeReviewSchema = Type.Object({
 	title: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
-	proposedCommitMessage: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000, description: "Proposed commit message prefilled on the reviewer's Approve screen; the reviewer may edit it before approving. Omitted next rounds keep the previous proposal." })),
+	proposedCommitMessage: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000, description: "For worktree reviews only: proposed commit message prefilled on the Approve screen. Omitted next rounds keep the previous proposal." })),
+	proposedApprovalNote: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000, description: "For commit-range reviews only: approval note prefilled on the Approve screen. This does not authorize creating or rewriting commits." })),
+	baseRef: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, description: "Old-side commit ref or SHA. Supply together with headRef to review two existing commits instead of the worktree. Resolved and pinned when the review opens; keep this base unchanged across rounds." })),
+	headRef: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, description: "New-side commit ref or SHA, paired with baseRef. Dirty files and the index are excluded. Repeat both refs on subsequent rounds; advance headRef to review committed follow-up fixes." })),
 	overview: reviewOverviewSchema,
 	repoPath: Type.Optional(Type.String({ minLength: 1, maxLength: 4_096, description: "Directory of (or inside) the Git repository to review. Defaults to the session working directory. Rounds of one session must all use the same repository." })),
 	files: Type.Array(reviewFileSchema, { maxItems: 500, description: "Ordered changed files. Any changed files omitted here are appended automatically." }),
@@ -213,14 +218,14 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		pid?: number;
 		port?: number;
 		phase?: string;
-		rounds: { number: number; review: { id: string; title?: string }; store: { threads: { status: string }[] } }[];
+		rounds: { number: number; review: { id: string; title?: string; commitRange?: CommitRange }; store: { threads: { status: string }[] } }[];
 	};
 	const persistState = async (state: { id: string; phase?: string }) => {
 		if (state.phase === "approved" || state.phase === "closed") await deleteSession(state.id);
 		else await saveSession(state);
 	};
 
-	type ReviewRound = { number: number; review: { id: string; root: string } };
+	type ReviewRound = { number: number; review: { id: string; root: string; commitRange?: CommitRange } };
 	// Optional appearance defaults from ~/.pi/agent/marginalia.json ({"theme","scheme"}).
 	// Read per session open so edits apply to the next review without a restart;
 	// invalid or missing values fall back to the built-in defaults, and a
@@ -278,7 +283,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			onFinishPass: async (round: ReviewRound, note: string | undefined, threads: ReviewThread[], summary: ReviewThreadSummary) => {
 				// Plans have no worktree to drift from; only code snapshots re-check.
 				let stale = false;
-				if (kind !== "plan") {
+				if (kind !== "plan" && !round.review.commitRange) {
 					stale = true;
 					try {
 						stale = (await currentSnapshotId(round.review.root)) !== round.review.id;
@@ -304,7 +309,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		const kind = state.kind === "plan" ? "plan" : "code";
 		const extras: Record<string, unknown> = kind === "code" && state.root
 			? {
-				staleness: { fingerprint: () => computeWorktreeFingerprint(state.root as string), snapshot: () => currentSnapshotProbe(state.root as string) },
+				...(state.rounds.at(-1)?.review.commitRange ? {} : { staleness: { fingerprint: () => computeWorktreeFingerprint(state.root as string), snapshot: () => currentSnapshotProbe(state.root as string) } }),
 				contextLines: createPinnedBlobContextReader(),
 			}
 			: {};
@@ -331,7 +336,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		}
 		return undefined;
 	};
-	const openSession = async (ctx: ExtensionContext, review: { kind?: string; id: string; root: string; title: string; files: { path: string }[] }, previousRoundId: string | undefined, threadResponses: unknown, serverExtras: Record<string, unknown>) => {
+	const openSession = async (ctx: ExtensionContext, review: { kind?: string; id: string; root: string; title: string; files: { path: string }[]; commitRange?: CommitRange }, previousRoundId: string | undefined, threadResponses: unknown, serverExtras: Record<string, unknown>) => {
 		lastCtx = ctx;
 		if (previousRoundId) {
 			const server = await findSessionWithRound(previousRoundId);
@@ -341,6 +346,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			if (added.error === "closed") throw new Error("This review session was closed; open a fresh review without previousRoundId if another unit needs review.");
 			if (added.error === "superseded") throw new Error(`Round ${previousRoundId.slice(0, 12)} is already superseded; the current round is ${added.currentRoundId?.slice(0, 12)} (round ${added.currentRound}).`);
 			if (added.error === "wrong-root") throw new Error("The new snapshot belongs to a different repository than the open review session.");
+			if (added.error === "wrong-comparison") throw new Error("Keep the same review source and base commit across rounds. Commit-range reviews must repeat both baseRef and headRef; open a fresh review to change the base or switch to worktree changes.");
 			if (added.error === "invalid-responses") throw new Error(`Thread responses are invalid: ${added.message}`);
 			if (added.error) throw new Error("Could not open the next review round.");
 			if (server.clientCount() === 0) await openBrowser(server.entryUrl());
@@ -378,9 +384,8 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		if (!probe?.isDirectory()) throw new Error(`${root} is not a directory.`);
 		return root;
 	};
-	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: [] }, signal?: AbortSignal, root?: string) => {
+	const openReview = async (ctx: ExtensionContext, manifest: OpenCodeReviewInput | { title?: string; overview?: undefined; files: []; baseRef?: string; headRef?: string }, signal?: AbortSignal, root?: string) => {
 		const repoPath = "repoPath" in manifest && typeof manifest.repoPath === "string" ? await resolveRepoArg(ctx, manifest.repoPath) : undefined;
-		const snapshot = await collectReviewSnapshot(root ?? repoPath ?? ctx.cwd, { signal });
 		const previousRoundId = "previousRoundId" in manifest ? manifest.previousRoundId : undefined;
 		if (!previousRoundId && "threadResponses" in manifest && manifest.threadResponses !== undefined) {
 			throw new Error("threadResponses requires previousRoundId; fresh reviews have no threads to respond to.");
@@ -392,14 +397,16 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 		if (previousRoundId) {
 			const host = await findSessionWithRound(previousRoundId);
 			if (!host) throw new Error(`No open review session contains round ${previousRoundId.slice(0, 12)}. Open a fresh review without previousRoundId.`);
+			if (host.currentReview().commitRange && (manifest.baseRef === undefined || manifest.headRef === undefined)) throw new Error("Commit-range reviews must repeat both baseRef and headRef on subsequent rounds.");
 			previousFiles = host.roundFiles(previousRoundId) ?? [];
 		}
+		const snapshot = await collectReviewSnapshot(root ?? repoPath ?? ctx.cwd, { signal, baseRef: manifest.baseRef, headRef: manifest.headRef });
 		const review = applyReviewManifest(snapshot, manifest, undefined, previousFiles);
 		return openSession(ctx, review, previousRoundId, "threadResponses" in manifest ? manifest.threadResponses : undefined, {
-			staleness: {
+			...(review.commitRange ? {} : { staleness: {
 				fingerprint: () => computeWorktreeFingerprint(review.root),
 				snapshot: () => currentSnapshotProbe(review.root),
-			},
+			} }),
 			contextLines: createPinnedBlobContextReader(),
 		});
 	};
@@ -445,12 +452,13 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "open_code_review",
 		label: "Open Code Review",
-		description: "Open a frozen browser review of all staged, unstaged, and untracked changes against HEAD. Start with a concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered. On next rounds, files whose content is byte-identical to the previous round carry their summary, classification, and commentary forward when listed without a summary or omitted entirely — re-author only what changed. The reviewer's browser posts live comment threads as code-review-thread messages; answer each with reply_review_thread, and treat the code-review-pass message as the signal that the pass is complete. After a pass, apply the feedback as one batch and call this tool again with previousRoundId set to that pass's snapshot id: the revised changes open as the next round of the same session and the reviewer's browser advances automatically. The next round must include threadResponses: exactly one {respondsTo, resolution, body} per open thread AWAITING you (the reviewer spoke after your last reply), each with an explicitly designated anchor (file plus optional lines) into the new snapshot, or no file only when the anchor is truly gone. Open threads where you spoke last may be omitted entirely: they carry forward automatically with their conversation, proposed-resolve state, and revalidated anchors (moved anchors land in the outdated group); you may still respond to one voluntarily to re-anchor it. Open threads whose content never reached you (still queued/pending drafts) are carried into the new round automatically — do not respond to them. When the reviewer approves the review, a code-review-approved message carries their final commit message and the session closes terminally — no further rounds.",
-		promptSnippet: "Open an ordered, agent-commented browser review of current Git changes",
+		description: "Open a frozen browser review. By default review staged, unstaged, and untracked changes against HEAD; supply both baseRef and headRef to compare two existing commits, excluding the index and worktree. Commit refs are resolved to fixed SHAs and shown in the browser. Committed reviews close with commit-review-approved and an approval note, never a commit instruction. Repeat both refs across rounds and keep the base fixed. Start with a concise review overview, then supply every changed file in the most logical review order with a concise file summary, review/reference classification, and optional line-anchored commentary. Reference files stay inspectable in a collapsed sidebar group. Omitted changed files are appended automatically; binary contents and oversized diffs are not rendered. On next rounds, files whose content is byte-identical to the previous round carry their summary, classification, and commentary forward when listed without a summary or omitted entirely — re-author only what changed. The reviewer's browser posts live comment threads as code-review-thread messages; answer each with reply_review_thread, and treat the code-review-pass message as the signal that the pass is complete. After a pass, apply the feedback as one batch and call this tool again with previousRoundId set to that pass's snapshot id: the revised changes open as the next round of the same session and the reviewer's browser advances automatically. The next round must include threadResponses: exactly one {respondsTo, resolution, body} per open thread AWAITING you (the reviewer spoke after your last reply), each with an explicitly designated anchor (file plus optional lines) into the new snapshot, or no file only when the anchor is truly gone. Open threads where you spoke last may be omitted entirely: they carry forward automatically with their conversation, proposed-resolve state, and revalidated anchors (moved anchors land in the outdated group); you may still respond to one voluntarily to re-anchor it. Open threads whose content never reached you (still queued/pending drafts) are carried into the new round automatically — do not respond to them. When a worktree review is approved, code-review-approved carries the final commit message. For a committed range, commit-review-approved carries an approval note and does not authorize any commit. Approval closes the session terminally — no further rounds.",
+		promptSnippet: "Open an ordered, agent-commented browser review of worktree changes or two commits",
 		promptGuidelines: [
-			"Use open_code_review when the user asks to be walked through or interactively review the agent's current code changes.",
+			"Use open_code_review when the user asks to be walked through or interactively review code changes, including an explicit pair of commits.",
 			"Keep the open_code_review overview concise: under 500 words, one-sentence intent, two to four outcome bullets, one or two validation bullets, and only material optional review focus or risks.",
 			"Use open_code_review reviewMode='reference' conservatively for visible files that do not merit focused review, such as binaries or deterministic generated artifacts; never use it to hide substantive source changes.",
+			"For committed changes, supply both baseRef and headRef. Repeat both on later rounds and keep the base fixed. Read anchored source at the pinned old/new commits, not the current worktree. Commit-review-approved approves existing commits only; it never authorizes a new commit or history rewrite.",
 			"After a code-review-pass message, apply the feedback as one batch, then reopen with previousRoundId set to that pass's snapshot id so the revised changes appear as the next round in the reviewer's open browser session.",
 			"When opening a next round, answer every open thread from the pass in threadResponses with an honest resolution (addressed, declined, or needs-discussion) and anchor each response to the exact new code that proves it; never anchor somewhere unrelated to close a thread.",
 		],
@@ -467,7 +475,7 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 			}
 			return {
 				content: [{ type: "text", text: `Opened code review ${review.id.slice(0, 12)}${round && round > 1 ? ` as round ${round}; the reviewer's browser advances automatically` : ""} with ${review.files.length} changed file(s). The browser posts live comment threads; reply with reply_review_thread and wait for the reviewer's code-review-pass message.` }],
-				details: { snapshot: review.id, round, files: review.files.map((file: { path: string }) => file.path), url: server.url.replace(/\?.*$/, "") },
+				details: { snapshot: review.id, round, files: review.files.map((file: { path: string }) => file.path), ...(review.commitRange ? { commitRange: review.commitRange } : {}), url: server.url.replace(/\?.*$/, "") },
 			};
 		},
 	});
@@ -655,25 +663,18 @@ export default function piCodeReview(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("margin-code", {
-		description: "Open a static browser review of a repo's staged, unstaged, and untracked changes against HEAD (/margin-code [repo-path])",
+		description: "Open a static review of worktree changes or two commits (/margin-code [repo-path] [--base <ref> --head <ref>])",
 		handler: async (args, ctx) => {
-			const normalized = args.trim();
-			if (normalized === "--help" || normalized === "-h") {
-				ctx.ui.notify("Usage: /margin-code [repo-path]\n\nOpens one frozen unified-diff snapshot of all staged, unstaged, and untracked changes against HEAD.\nBare: reviews the repository at the session's working directory.\nWith a path: reviews the Git repository at (or containing) that directory.\nFor Pi-authored ordering and commentary, ask Pi to use open_code_review.", "info");
-				return;
-			}
-			let root: string | undefined;
-			if (normalized) {
-				try {
-					root = await resolveRepoArg(ctx, normalized);
-				} catch (error) {
-					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			try {
+				const parsed = parseCodeReviewArgs(args);
+				if (parsed.help) {
+					ctx.ui.notify("Usage: /margin-code [repo-path] [--base <ref> --head <ref>]\n\nWithout refs: staged, unstaged, and untracked changes against HEAD.\nWith both refs: compare those existing commits directly, not their merge base. Dirty files and the index are excluded; Git 2.43+ is required.\nRefs resolve to fixed SHAs. Example: /margin-code --base HEAD~1 --head HEAD\nQuote paths or refs containing spaces. For Pi-authored ordering and commentary, ask Pi to use open_code_review.", "info");
 					return;
 				}
-			}
-			try {
-				const { review } = await openReview(ctx, { files: [] }, undefined, root);
-				ctx.ui.notify(`Opened static review ${review.id.slice(0, 12)} (${review.files.length} files${root ? ` in ${root}` : ""}).`, "info");
+				const root = parsed.repoPath ? await resolveRepoArg(ctx, parsed.repoPath) : undefined;
+				const { review } = await openReview(ctx, { files: [], baseRef: parsed.baseRef, headRef: parsed.headRef }, undefined, root);
+				const range = review.commitRange ? `, commits ${review.commitRange.base.slice(0, 12)}..${review.commitRange.head.slice(0, 12)}` : "";
+				ctx.ui.notify(`Opened static review ${review.id.slice(0, 12)} (${review.files.length} files${root ? ` in ${root}` : ""}${range}).`, "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}

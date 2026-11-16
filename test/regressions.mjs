@@ -2745,6 +2745,70 @@ try {
 				await rm(scrollRepo, { recursive: true, force: true });
 			}
 
+			// Existing commits keep their own diff and context while the checkout is dirty.
+			const rangeRepo = await mkdtemp(join(tmpdir(), "marginalia-browser-range-"));
+			await git(rangeRepo, "init", "-q");
+			await git(rangeRepo, "config", "user.email", "test@example.com");
+			await git(rangeRepo, "config", "user.name", "Test");
+			const rangeLines = Array.from({ length: 100 }, (_, index) => "range line " + (index + 1));
+			await writeFile(join(rangeRepo, "range.txt"), rangeLines.join("\n") + "\n");
+			await git(rangeRepo, "add", "range.txt");
+			await git(rangeRepo, "commit", "-qm", "base");
+			const rangeBase = (await git(rangeRepo, "rev-parse", "HEAD")).stdout.trim();
+			rangeLines[39] = "committed range update";
+			await writeFile(join(rangeRepo, "range.txt"), rangeLines.join("\n") + "\n");
+			await git(rangeRepo, "add", "range.txt");
+			await git(rangeRepo, "commit", "-qm", "target");
+			const rangeHead = (await git(rangeRepo, "rev-parse", "HEAD")).stdout.trim();
+			await writeFile(join(rangeRepo, "range.txt"), "dirty checkout must not appear\n");
+			const rangeReview = applyReviewManifest(await collectReviewSnapshot(rangeRepo, { baseRef: rangeBase, headRef: rangeHead }), { files: [], proposedApprovalNote: "Reviewed committed changes." });
+			const rangePosts = [];
+			let rangeApproval;
+			const rangeServer = await createCodeReviewServer(rangeReview, {
+				onThreadPost: async (_round, thread) => { rangePosts.push(thread); },
+				onFinishPass: async () => ({ stale: false }),
+				onApprove: async (round, message, staleNow) => { rangeApproval = formatReviewApprovedXml(round.review, round.number, message, staleNow); },
+				contextLines: createPinnedBlobContextReader(),
+			});
+			const rangePage = await browser.newPage();
+			try {
+				await rangePage.goto(rangeServer.url, { waitUntil: "domcontentloaded" });
+				assert.equal(await rangePage.$eval("body", (body) => body.dataset.reviewSource), "commits");
+				assert.equal(await rangePage.$eval("[data-commit-range]", (label) => label.title), `${rangeBase} → ${rangeHead}`);
+				assert.equal(await rangePage.$("[data-stale-badge]"), null);
+				assert.equal(await rangePage.$eval(".diff-table", (table) => table.textContent.includes("dirty checkout")), false);
+				await rangePage.$eval('.diff-expander [data-expand="down"]', (button) => button.click());
+				await rangePage.waitForFunction(() => document.querySelector('tr[data-kind="expanded"][data-new-line="1"]'));
+				assert.equal(await rangePage.$eval('tr[data-kind="expanded"][data-new-line="1"] .diff-code', (cell) => cell.textContent), "range line 1");
+				await rangePage.evaluate(() => {
+					const code = document.querySelector('.diff-line[data-kind="add"][data-new-line="40"] .diff-code span');
+					const selected = document.createRange();
+					selected.selectNodeContents(code);
+					window.getSelection().removeAllRanges();
+					window.getSelection().addRange(selected);
+					code.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+				});
+				await rangePage.waitForFunction(() => !document.querySelector("[data-selection-composer]").hidden);
+				await rangePage.type("[data-selection-feedback]", "This committed line looks correct.");
+				await rangePage.$eval("[data-selection-add]", (button) => button.click());
+				await rangePage.waitForFunction(() => document.querySelector("[data-thread-card]"));
+				assert.deepEqual([rangePosts[0].newStart, rangePosts[0].newEnd, rangePosts[0].highlight], [40, 40, "committed range update"]);
+				await rangePage.$eval("[data-thread-resolve]", (button) => button.click());
+				await rangePage.waitForFunction(() => document.querySelector("[data-thread-card]").classList.contains("resolved"));
+				await rangePage.$eval("[data-approve]", (button) => button.click());
+				await rangePage.waitForFunction(() => !document.querySelector("[data-approve-overlay]").hidden);
+				assert.match(await rangePage.$eval(".approve-message-label", (label) => label.textContent), /^Approval note/);
+				assert.equal(await rangePage.$eval("[data-approve-message]", (textarea) => textarea.value), "Reviewed committed changes.");
+				await rangePage.click("[data-approve-confirm]");
+				await rangePage.waitForFunction(() => document.body.classList.contains("locked"));
+				assert.match(rangeApproval, /^<commit-review-approved /);
+				assert.doesNotMatch(rangeApproval, /<commit-message>/);
+			} finally {
+				await rangePage.close();
+				await rangeServer.close();
+				await rm(rangeRepo, { recursive: true, force: true });
+			}
+
 			// Plan review: rendered markdown sections host selection threads anchored
 			// on absolute source lines, section commentary replies, and block nav.
 			const planPosts = [];

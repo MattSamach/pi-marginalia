@@ -1,6 +1,6 @@
 # Marginalia (`pi-marginalia`)
 
-A Pi package for agent-guided browser reviews — of local Git changes, and of rendered markdown plans and documents. Pi chooses a logical file order, explains each file and selected line ranges, and then converses with you through live comment threads: each comment you post is delivered to Pi immediately, and Pi's answers stream back into the exact thread in your browser. Reviews iterate in rounds until you approve.
+A Pi package for agent-guided browser reviews — of local Git changes, commit ranges, and rendered markdown plans and documents. Pi chooses a logical file order, explains each file and selected line ranges, and then converses with you through live comment threads: each comment you post is delivered to Pi immediately, and Pi's answers stream back into the exact thread in your browser. Reviews iterate in rounds until you approve.
 
 ![Agent-guided code review: ordered diff, anchored Pi commentary, live comment threads](docs/code-review.png)
 
@@ -26,8 +26,14 @@ For a review without agent commentary:
 ```text
 /margin-code
 /margin-code /path/to/other/repo
+/margin-code --base HEAD~1 --head HEAD
+/margin-code "/path/to/other repo" --base <old-sha> --head <new-sha>
 /margin-code --help
 ```
+
+Supply **both** `--base` and `--head` to compare two existing commits directly, like `git diff <base> <head>` (not a merge-base comparison). Branches, tags, full SHAs, and short SHAs resolve to fixed commit IDs when the review opens. The browser displays those IDs. The collector leaves HEAD, the index, and the worktree untouched; dirty and untracked files are excluded. Commit-range reviews require Git 2.43 or later so diff attributes come from the target commit, not a dirty checkout.
+
+For an agent-guided range review, ask Pi to call `open_code_review` with `baseRef` and `headRef`, alongside its normal overview and file manifest. `proposedApprovalNote` can prefill the approval note; `proposedCommitMessage` is reserved for worktree reviews. Pi should read source at the pinned commit IDs, not assume current files match the reviewed commits.
 
 To review a rendered markdown document without asking Pi to author a manifest — Pi's latest response, or any markdown file on your machine:
 
@@ -41,7 +47,7 @@ To iterate on architecture diagrams without a surrounding document, Pi can call 
 
 Bare `/margin-doc` opens Pi's latest response as a continuous rendered document; with a path it opens that file. Either way you get the full plan-review surface — select text to comment, threads arrive in the session live, Pi answers with `reply_review_thread`, and approval sends a terminal note.
 
-The snapshot contains staged and unstaged changes against `HEAD`, plus untracked files as all-addition diffs. Files omitted from Pi's manifest are appended, so commentary cannot hide changes. Pi may classify binaries and deterministic generated artifacts as `reviewMode: "reference"`; they remain inspectable under a collapsed **Reference files** sidebar group and remain part of the snapshot and commit.
+Without commit refs, the snapshot contains staged and unstaged changes against `HEAD`, plus untracked files as all-addition diffs. Files omitted from Pi's manifest are appended, so commentary cannot hide changes. Pi may classify binaries and deterministic generated artifacts as `reviewMode: "reference"`; they remain inspectable under a collapsed **Reference files** sidebar group and remain part of the reviewed snapshot.
 
 In the browser:
 
@@ -57,9 +63,9 @@ Everything that needs your attention is one uniform queue: every Pi commentary n
 8. Review without the mouse: `j`/`k` walk the active file's hunks with a visible focus ring, `]`/`[` switch files, `o` returns to the overview, and `r` (or `⏎`) jumps to the current thread's reply box — `Esc` leaves the text box (keeping your draft), `e` resolves the current thread or note, `n` continues, `Shift+n` steps backwards, `⇧⌘⏎` quiet-adds in a comment box (elsewhere it opens the send-round confirmation — a keyboard-first modal where `⏎` sends and `Esc` cancels), `x` marks the current file viewed, and `?` (or the header hint) shows the shortcuts guide.
 9. Read formatted commentary: Pi's notes, file summaries, and every thread message render markdown — inline code, fenced blocks, bold/italic, lists, and http(s) links — through a built-in sanitizing renderer (all HTML escaped, link schemes whitelisted, no third-party dependency).
 10. Track progress with the viewed checklist: every file has a **Viewed** checkbox (header or `x`), mirrored as a sidebar checkmark and progress bar. It is reviewer-side bookkeeping only — never sent to Pi — and stays available while Pi revises. A new round keeps a file's checkmark only when its diff is byte-identical to the previous round.
-11. Expand hidden context: gaps between hunks (and above the first or below the last) show a divider with GitHub-style expanders — reveal 20 lines from either end or the whole gap at once. Content comes lazily from the blob pinned at the snapshot's HEAD commit, so it stays true to the frozen review no matter how the worktree has drifted since. Expanded lines are visual context only: comments still anchor to the diff and its original context lines. Untracked, added, deleted, binary, and truncated files have no expandable gaps.
-12. Approve to close: the green **Approve** button tallies open threads (clicking jumps to the first blocker) and unlocks only when every thread — queued and carried included — is resolved. The confirmation screen shows file stats, warns if the repository has drifted from the snapshot, and lets you edit the proposed commit message. Confirming closes the session terminally: Pi receives your final commit message, mutations lock, and pages stay readable.
-13. Trust the topbar drift badge: while the page is open, the server periodically re-checks the repository against the frozen snapshot (a cheap fingerprint gates the full re-collection). If they diverge — edits, staging, or a commit — a **no longer matches this snapshot** badge appears; informational only; reading and commenting stay open, and the badge clears if the tree returns. It is hidden while Pi revises, when drift is expected. The drifted files themselves carry an amber dot in the sidebar, and the badge tooltip lists every drifted path — including files that joined the changeset after the snapshot.
+11. Expand hidden context: gaps between hunks (and above the first or below the last) show a divider with GitHub-style expanders — reveal 20 lines from either end or the whole gap at once. Content comes lazily from the blob pinned at the old-side commit (`HEAD` for worktree reviews, `baseRef` for commit ranges), so it stays true to the frozen review no matter how the worktree has drifted since. Expanded lines are visual context only: comments still anchor to the diff and its original context lines. Untracked, added, deleted, binary, and truncated files have no expandable gaps.
+12. Approve to close: the green **Approve** button tallies open threads (clicking jumps to the first blocker) and unlocks only when every thread — queued and carried included — is resolved. The confirmation screen shows file stats, warns if the repository has drifted from the snapshot, and lets you edit the proposed commit message. Confirming closes the session terminally: Pi receives your final commit message, mutations lock, and pages stay readable. For committed ranges, the screen asks for an **approval note** instead and sends `commit-review-approved`: it approves existing commits, not permission to create, amend, rewrite, or push anything.
+13. For worktree reviews, trust the topbar drift badge: while the page is open, the server periodically re-checks the repository against the frozen snapshot (a cheap fingerprint gates the full re-collection). If they diverge — edits, staging, or a commit — a **no longer matches this snapshot** badge appears; informational only; reading and commenting stay open, and the badge clears if the tree returns. It is hidden while Pi revises, when drift is expected. The drifted files themselves carry an amber dot in the sidebar, and the badge tooltip lists every drifted path — including files that joined the changeset after the snapshot.
 14. Click **Send round to Pi** to hand Pi one summary of the pass. It lists open threads you engaged with; your untouched notes are never echoed back to Pi.
 15. Link to a line: click any line number to put a `#loc=file:L42` permalink in the address bar (old-side lines use `O`); opening one navigates to the file and rings the row — with an honest hint when the target sits in an unexpanded gap. Focused threads already permalink via `#thread=`.
 16. Drafts survive reloads: unfinished comments — selection drafts (anchor and quote included), thread and note replies, overview feedback — persist in the browser's storage keyed by the snapshot, restore when the page reopens, and clear the moment they post.
@@ -87,7 +93,9 @@ Open threads never silently die between rounds. A next round is rejected unless 
 
 Carried threads keep their ids and full conversation history, count as awaiting you, and work with `n`/`e` like any thread; `addressed` responses arrive as one-click resolution proposals. A thread at its 50-turn cap stops accepting replies; resolving it remains available. Each carried card's *from round N* label deep-links to the read-only origin round, scrolled to the thread at its original anchor. Threads you resolved earlier don't carry — they collect in a collapsed **Resolved in earlier rounds** archive on the overview. Your untouched Pi notes also don't carry; fresh rounds bring fresh notes.
 
-If files change during the review, the pass message is marked `stale="true"`. The page never remaps or refreshes annotations; iteration happens in whole rounds.
+Commit-range rounds must retain the same base commit and stay in commit-range mode. Repeat both `baseRef` and `headRef` when opening another round; advance `headRef` to a separately authorized, committed fix. Open a fresh review to change the base or switch between committed and worktree changes. Commit snapshots never acquire a worktree-drift warning, including after restoring a persisted session. Thread/pass messages carry `comparison="commits"` and the pinned `base` and `head` SHAs.
+
+For worktree reviews, if files change during the review, the pass message is marked `stale="true"`. The page never remaps or refreshes annotations; iteration happens in whole rounds.
 
 ## Plan reviews
 

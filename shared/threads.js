@@ -219,8 +219,36 @@ export function buildCarriedThreads(responses, previousThreads, nextReview, from
 	return carried;
 }
 
+const commentaryKey = (file, commentaryId) => `${file}\0${commentaryId}`;
+const sameNote = (left, right) => JSON.stringify([left.id, left.body, left.side, left.startLine, left.endLine, left.element]) === JSON.stringify([right.id, right.body, right.side, right.startLine, right.endLine, right.element]);
+
+/**
+ * Resolved commentary threads a next round keeps: the note is unchanged (same
+ * id, body, and anchor) on a byte-identical file. The reviewer already
+ * settled it, so it stays resolved with its id and history instead of
+ * reseeding as an unread open note. Notes on changed files, or with any
+ * edited field, seed fresh.
+ */
+export function buildInheritedCommentary(previousReview, previousThreads, nextReview) {
+	const previousFiles = new Map(previousReview.files.map((file) => [file.path, file]));
+	const resolved = new Map(previousThreads
+		.filter((thread) => thread.source === "commentary" && thread.commentaryId !== undefined && thread.status === "resolved")
+		.map((thread) => [commentaryKey(thread.file, thread.commentaryId), thread]));
+	const inherited = [];
+	for (const file of nextReview.files) {
+		const previous = previousFiles.get(file.path);
+		if (!previous || previous.contentSha256 !== file.contentSha256) continue;
+		for (const entry of file.commentary ?? []) {
+			const previousEntry = previous.commentary?.find((candidate) => candidate.id === entry.id);
+			const thread = resolved.get(commentaryKey(file.path, entry.id));
+			if (previousEntry && thread && sameNote(previousEntry, entry)) inherited.push(thread);
+		}
+	}
+	return inherited;
+}
+
 /** Live comment-thread store for one immutable review snapshot. */
-export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads = [], heldThreads = [], snapshot = undefined) {
+export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads = [], heldThreads = [], snapshot = undefined, inheritedCommentary = []) {
 	const threads = new Map();
 	const files = new Map(review.files.map((file) => [file.path, file]));
 	const commentaryThreadIds = new Map();
@@ -245,14 +273,18 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 	const stampTurns = (turns, delivered) => turns.map((turn, index) => ({ ...turn, seq: index + 1, ...(turn.author === "user" ? { delivered } : {}) }));
 	const undeliveredTurns = (thread) => thread.turns.filter((turn) => turn.author === "user" && turn.delivered === false);
 
-	// Every commentary note seeds an open thread awaiting the reviewer. Seeds are
-	// exempt from maxThreads, which bounds reviewer-created threads only.
+	// Every commentary note seeds an open thread awaiting the reviewer, unless an
+	// unchanged note was already resolved. Seeds are exempt from maxThreads,
+	// which bounds reviewer-created threads only.
+	const inheritedByNote = new Map(inheritedCommentary.map((thread) => [commentaryKey(thread.file, thread.commentaryId), thread]));
 	for (const file of snapshot ? [] : review.files) {
 		for (const entry of file.commentary) {
+			const inherited = inheritedByNote.get(commentaryKey(file.path, entry.id));
+			const inheritedTurns = inherited?.turns.map((turn) => ({ ...turn }));
 			const thread = {
-				id: mintId(),
-				status: "open",
-				live: false,
+				id: inherited?.id ?? mintId(),
+				status: inherited ? "resolved" : "open",
+				live: inherited?.live === true,
 				piProposedResolve: false,
 				source: "commentary",
 				file: file.path,
@@ -260,11 +292,11 @@ export function createThreadStore(review, limits = THREAD_LIMITS, carriedThreads
 				// The note's anchor travels on the thread so wire messages are
 				// self-contained; a bare commentary-id is never Pi's only context.
 				...(entry.startLine === undefined ? {} : { side: entry.side, startLine: entry.startLine, endLine: entry.endLine }),
-				nextSeq: 2,
-				turns: [{ author: "pi", body: entry.body, ts: Date.now(), seq: 1 }],
+				nextSeq: inheritedTurns ? Math.max(0, ...inheritedTurns.map((turn) => turn.seq ?? 0)) + 1 : 2,
+				turns: inheritedTurns ?? [{ author: "pi", body: entry.body, ts: Date.now(), seq: 1 }],
 			};
 			threads.set(thread.id, thread);
-			commentaryThreadIds.set(`${file.path}\0${entry.id}`, thread.id);
+			commentaryThreadIds.set(commentaryKey(file.path, entry.id), thread.id);
 		}
 	}
 	// Carried threads keep their round-of-origin ids and are, like seeds, exempt

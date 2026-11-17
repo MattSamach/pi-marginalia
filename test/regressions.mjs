@@ -1739,6 +1739,47 @@ try {
 	assert.ok(formatThreadMessageXml(ordered, { id: "cdata-probe", source: "overview", status: "open", turns: [] }, [{ author: "user", seq: 1, body: "prose ]]> and fenced\n```\n]]>\n```" }], 1).includes("prose ]]]]><![CDATA[> and fenced"), "Thread bodies containing ]]> stay CDATA-safe on the wire.");
 	assert.doesNotMatch(formatReviewApprovedXml(ordered, 1, "m", false), / stale=/, "A clean approval carries no stale attribute.");
 
+	// A note the reviewer resolved stays resolved while the next round carries it
+	// unchanged on a byte-identical file; re-authoring the note reopens it fresh.
+	{
+		const inheritServer = await createCodeReviewServer(ordered, { onThreadPost: async () => {}, onFinishPass: async () => ({ stale: false }) });
+		try {
+			const origin = new URL(inheritServer.url).origin;
+			const cookie = ((await fetch(inheritServer.url, { redirect: "manual" })).headers.get("set-cookie") ?? "").split(";", 1)[0];
+			const headers = { cookie, origin, "content-type": "application/json" };
+			const note = (id) => inheritServer.threads().find((thread) => thread.commentaryId === id);
+			const resolvedId = note("new-file").id;
+			assert.equal((await fetch(`${origin}/__pi_code_review_resolve__`, { method: "POST", headers, body: JSON.stringify({ threadId: resolvedId, resolved: true }) })).status, 200);
+			const untouchedId = note("second-note").id;
+			const overview = { intent: "Next round.", changes: ["Keeps the untracked file.", "Changes nothing else."], validation: ["Regression suite."] };
+			const second = applyReviewManifest({ ...snapshot, id: altId(snapshot.id, 50) }, { overview, files: [] }, undefined, inheritServer.roundFiles(ordered.id));
+			assert.equal(inheritServer.addRound(second, ordered.id).round, 2);
+			assert.equal(note("new-file").id, resolvedId, "The carried note keeps its thread id.");
+			assert.equal(note("new-file").status, "resolved", "A resolved note carried unchanged stays resolved.");
+			assert.deepEqual(note("new-file").turns.map((turn) => turn.author), ["pi"], "The resolved note keeps its history.");
+			assert.equal(note("second-note").status, "open", "An unresolved note still awaits the reviewer.");
+			assert.notEqual(note("second-note").id, untouchedId, "Unresolved notes seed fresh, as before.");
+			const summary = inheritServer.threadSummary();
+			assert.equal(summary.resolved, 1, "The kept note counts as resolved.");
+			assert.equal(inheritServer.threads().filter((thread) => thread.source === "commentary" && thread.status === "open").length, 1);
+			const passXml = formatReviewPassXml(second, inheritServer.threads(), summary, false, undefined, 2);
+			assert.match(passXml, /resolved="1" unread-notes="1"/, "Pass counters never count a kept resolved note as unread.");
+			const secondPage = await (await fetch(origin, { headers: { cookie } })).text();
+			assert.ok(!secondPage.includes(`/round/1#thread=${resolvedId}`), "A note still resolved in the current round is not repeated in the archive.");
+
+			const reauthored = (inheritServer.roundFiles(second.id) ?? []).map((file) => file.path === "untracked.txt" ? { path: file.path, summary: file.summary, commentary: file.commentary.map((entry) => entry.id === "new-file" ? { ...entry, body: "Rewritten note." } : entry) } : { path: file.path });
+			const third = applyReviewManifest({ ...snapshot, id: altId(snapshot.id, 51) }, { overview, files: reauthored }, undefined, inheritServer.roundFiles(second.id));
+			assert.equal(inheritServer.addRound(third, second.id).round, 3);
+			assert.equal(note("new-file").status, "open", "A re-authored note opens fresh.");
+			assert.notEqual(note("new-file").id, resolvedId);
+			const thirdPage = await (await fetch(origin, { headers: { cookie } })).text();
+			assert.equal(thirdPage.split(`#thread=${resolvedId}`).length - 1, 1, "The superseded resolution archives once, under its newest earlier round.");
+			assert.ok(thirdPage.includes(`/round/2#thread=${resolvedId}`));
+		} finally {
+			await inheritServer.close();
+		}
+	}
+
 	const approvals = [];
 	let failNextApprove = false;
 	let approveFingerprint = "afp-1";
@@ -2212,7 +2253,9 @@ try {
 				assert.equal(await page.$eval('[data-review-file="0"]', (section) => section.hidden), false, "Navigation lands on the file that now hosts it.");
 				assert.ok(await page.$(`[data-carried-host="${overviewThreadIds[0]}"] [data-thread-resolve]`), "The carried copy is resolvable where navigation landed.");
 			}
-			await page.waitForFunction(() => document.querySelector('[data-inbox]')?.textContent.startsWith("5 awaiting you"), { timeout: 5_000 });
+			// Three carried threads plus the reseeded new-file note; second-note stays resolved.
+			await page.waitForFunction(() => document.querySelector('[data-inbox]')?.textContent.startsWith("4 awaiting you"), { timeout: 5_000 });
+			assert.ok(await page.$('[data-commentary-thread="second-note"] .thread-card.resolved'), "The note resolved last round stays resolved in the browser.");
 			await page.click('[data-file-nav="0"]');
 			await page.waitForFunction((id) => document.querySelector(`[data-carried-host="${id}"] [data-thread-card="${id}"]`), {}, commentaryThreadId);
 			assert.match(await page.$eval(`[data-carried-host="${commentaryThreadId}"]`, (host) => host.textContent), /Kept handwritten; clarified the comment\./, "The resolution commentary renders inside the carried thread.");

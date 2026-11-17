@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { computeContextGaps, CONTEXT_LIMITS, reviewFileDriftKey } from "./git-review.js";
 import { renderReviewHtml } from "./render.js";
-import { buildCarriedThreads, buildQuietCarriedThreads, buildHeldThreads, createThreadStore, THREAD_LIMITS } from "./threads.js";
+import { buildCarriedThreads, buildQuietCarriedThreads, buildHeldThreads, buildInheritedCommentary, createThreadStore, THREAD_LIMITS } from "./threads.js";
 
 const POST_PATH = "/__pi_code_review_post__";
 const RESOLVE_PATH = "/__pi_code_review_resolve__";
@@ -317,13 +317,21 @@ export async function createCodeReviewServer(review, options) {
 	};
 	const renderRound = (round, res) => {
 		const nonce = randomBytes(18).toString("base64");
+		// A resolved note kept into later rounds lists once: in the rail while
+		// this round still holds it, otherwise under its newest earlier round.
+		const listed = new Set(round.store.list().map((thread) => thread.id));
 		const archive = rounds
 			.filter((candidate) => candidate.number < round.number)
+			.reverse()
 			.map((candidate) => ({
 				round: candidate.number,
-				resolved: candidate.store.list().filter((thread) => thread.status === "resolved").map((thread) => ({ id: thread.id, source: thread.source, file: thread.file, highlight: thread.highlight, lastBody: thread.turns[thread.turns.length - 1]?.body ?? "" })),
+				resolved: candidate.store.list().filter((thread) => thread.status === "resolved" && !listed.has(thread.id)).map((thread) => {
+					listed.add(thread.id);
+					return { id: thread.id, source: thread.source, file: thread.file, highlight: thread.highlight, lastBody: thread.turns[thread.turns.length - 1]?.body ?? "" };
+				}),
 			}))
-			.filter((entry) => entry.resolved.length > 0);
+			.filter((entry) => entry.resolved.length > 0)
+			.reverse();
 		// Plan rounds mark which sections actually changed since the round they
 		// superseded — the reviewer's convergence scan without a diff view.
 		let changedSections;
@@ -896,7 +904,8 @@ export async function createCodeReviewServer(review, options) {
 			const roundReview = nextReview.proposedCommitMessage === undefined && active.review.proposedCommitMessage !== undefined
 				? { ...nextReview, proposedCommitMessage: active.review.proposedCommitMessage }
 				: nextReview;
-			const round = { number: active.number + 1, review: roundReview, store: createThreadStore(roundReview, THREAD_LIMITS, carried, held), viewed };
+			const inherited = buildInheritedCommentary(active.review, active.store.list(), roundReview);
+			const round = { number: active.number + 1, review: roundReview, store: createThreadStore(roundReview, THREAD_LIMITS, carried, held, undefined, inherited), viewed };
 			rounds.push(round);
 			phase = "reviewing";
 			// The new round's snapshot was just collected from this worktree.

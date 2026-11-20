@@ -2788,6 +2788,48 @@ try {
 				await rm(scrollRepo, { recursive: true, force: true });
 			}
 
+			// A held press must not move the rail: pressing a lower card's Reply
+			// collapses the open box above it, and the click has to land anyway.
+			const pressRepo = await mkdtemp(join(tmpdir(), "marginalia-browser-press-"));
+			await git(pressRepo, "init", "-q");
+			await git(pressRepo, "config", "user.email", "test@example.com");
+			await git(pressRepo, "config", "user.name", "Test");
+			await writeFile(join(pressRepo, "notes.txt"), "seed\n");
+			await git(pressRepo, "add", "notes.txt");
+			await git(pressRepo, "commit", "-qm", "base");
+			await writeFile(join(pressRepo, "notes.txt"), Array.from({ length: 40 }, (_, index) => "note line " + (index + 1)).join("\n") + "\n");
+			const pressNotes = ["p1", "p2", "p3"].map((id, index) => ({ id, body: "Note " + id + ". " + "Text that gives the card some height. ".repeat(3), side: "new", startLine: 2 + index }));
+			const pressServer = await createCodeReviewServer(applyReviewManifest(await collectReviewSnapshot(pressRepo), { files: [{ path: "notes.txt", summary: "Notes.", commentary: pressNotes }] }), {
+				onThreadPost: async () => {},
+				onFinishPass: async () => ({ stale: false }),
+			});
+			const pressPage = await browser.newPage();
+			try {
+				await pressPage.setViewport({ width: 1400, height: 900 });
+				await pressPage.goto(pressServer.url, { waitUntil: "domcontentloaded" });
+				await pressPage.waitForSelector(".agent-note");
+				const settle = () => pressPage.evaluate(() => new Promise((resolve) => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(resolve)), 50)));
+				for (const id of ["p1", "p3", "p2", "p3"]) {
+					await settle();
+					const point = await pressPage.$eval(`.agent-note[data-commentary-id="${id}"] [data-composer-expand]`, (button) => {
+						button.scrollIntoView({ block: "center" });
+						const box = button.getBoundingClientRect();
+						return { x: box.left + 15, y: box.top + box.height / 2 };
+					});
+					await settle();
+					await pressPage.mouse.move(point.x, point.y);
+					await pressPage.mouse.down();
+					await settle();
+					await pressPage.mouse.up();
+					await settle();
+					assert.equal(await pressPage.evaluate(() => document.activeElement?.tagName + ":" + document.activeElement?.closest(".agent-note")?.dataset.commentaryId), "TEXTAREA:" + id, `One held click on ${id}'s Reply enters its box.`);
+				}
+			} finally {
+				await pressPage.close();
+				await pressServer.close();
+				await rm(pressRepo, { recursive: true, force: true });
+			}
+
 			// Existing commits keep their own diff and context while the checkout is dirty.
 			const rangeRepo = await mkdtemp(join(tmpdir(), "marginalia-browser-range-"));
 			await git(rangeRepo, "init", "-q");

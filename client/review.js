@@ -1579,9 +1579,18 @@
       }
     }
   };
-  // Every layout trigger coalesces into one pass per animation frame.
+  // Every layout trigger coalesces into one pass per animation frame. While a
+  // pointer is pressed the rail holds still: a press blurs the previous box
+  // (collapsing it) and focuses the pressed control, and moving cards before
+  // the release would land the click on whatever slid under the pointer.
   let railLayoutPending = false;
+  let railPointerHeld = false;
+  let railLayoutDeferred = false;
   const scheduleRailLayout = () => {
+    if (railPointerHeld) {
+      railLayoutDeferred = true;
+      return;
+    }
     if (railLayoutPending) return;
     railLayoutPending = true;
     requestAnimationFrame(() => {
@@ -1597,6 +1606,23 @@
     document.querySelectorAll('[data-review-file] .commentary-column, [data-review-file] .diff-column, [data-review-file] .plan-column').forEach((element) => railResizeObserver.observe(element));
   }
   document.addEventListener('marginalia:cards-resized', () => scheduleRailLayout());
+  document.addEventListener('pointerdown', (event) => {
+    if (event.button === 0) railPointerHeld = true;
+  }, true);
+  const releaseRailLayout = () => {
+    if (!railPointerHeld) return;
+    // The click dispatches after pointerup in the same task; lay out after it.
+    window.setTimeout(() => {
+      railPointerHeld = false;
+      if (railLayoutDeferred) {
+        railLayoutDeferred = false;
+        scheduleRailLayout();
+      }
+    }, 0);
+  };
+  window.addEventListener('pointerup', releaseRailLayout, true);
+  window.addEventListener('pointercancel', releaseRailLayout, true);
+  window.addEventListener('blur', releaseRailLayout);
   // The composer is a rail item like any card: it wears its draft's anchor so
   // the layout can seat it beside the selection.
   const stampComposerAnchor = (composer, pending) => {
